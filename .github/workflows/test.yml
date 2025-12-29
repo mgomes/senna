@@ -45,13 +45,6 @@ jobs:
         env:
           REDIS_ADDR: localhost:6379
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        if: matrix.go-version == '1.23' && matrix.store.name == 'redis'
-        with:
-          files: coverage.out
-          fail_ci_if_error: false
-
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -60,10 +53,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: stable
 
-      - name: Run golangci-lint
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          install-mode: source
+          install-only: true
