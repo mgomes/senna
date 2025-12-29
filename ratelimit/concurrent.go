@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,7 +30,8 @@ type ConcurrentLimiter struct {
 	client      redis.Cmdable
 	keyPrefix   string
 	initialized atomic.Bool
-	lockID      string
+	lockMu      sync.Mutex
+	lockIDs     map[context.Context]string
 }
 
 type ConcurrentConfig struct {
@@ -59,6 +61,7 @@ func Concurrent(client redis.Cmdable, cfg ConcurrentConfig) *ConcurrentLimiter {
 		policy:      cfg.Policy,
 		client:      client,
 		keyPrefix:   cfg.KeyPrefix,
+		lockIDs:     make(map[context.Context]string),
 	}
 }
 
@@ -165,7 +168,9 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		acquired := arr[0].(int64) == 1
 
 		if acquired {
-			l.lockID = tempLockID
+			l.lockMu.Lock()
+			l.lockIDs[ctx] = tempLockID
+			l.lockMu.Unlock()
 			return 0, nil
 		}
 
@@ -193,15 +198,21 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 }
 
 func (l *ConcurrentLimiter) Release(ctx context.Context) error {
-	if l.lockID == "" {
+	l.lockMu.Lock()
+	lockID, ok := l.lockIDs[ctx]
+	if ok {
+		delete(l.lockIDs, ctx)
+	}
+	l.lockMu.Unlock()
+
+	if !ok || lockID == "" {
 		return nil
 	}
 
 	_, err := concurrentReleaseScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey()},
-		l.lockID, l.ttlSeconds(),
+		lockID, l.ttlSeconds(),
 	)
-	l.lockID = ""
 	return err
 }
 
