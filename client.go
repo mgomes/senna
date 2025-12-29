@@ -1,0 +1,282 @@
+package senna
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/mgomes/senna/internal/keys"
+	"github.com/redis/go-redis/v9"
+)
+
+type Client struct {
+	redis     *redis.Client
+	keys      *keys.Keys
+	settings  ClientSettings
+	encryptor *encryptor
+}
+
+type ClientConfig struct {
+	Redis      RedisConfig
+	Namespace  string
+	Settings   ClientSettings
+	Encryption *EncryptionSettings
+}
+
+func NewClient(cfg *ClientConfig) (*Client, error) {
+	if cfg.Settings.DefaultQueue == "" {
+		cfg.Settings = DefaultClientSettings()
+	}
+
+	client := redis.NewClient(cfg.Redis.Options())
+
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		return nil, err
+	}
+
+	c := &Client{
+		redis:    client,
+		keys:     keys.New(cfg.Namespace),
+		settings: cfg.Settings,
+	}
+
+	if cfg.Encryption != nil && cfg.Encryption.Enabled {
+		enc, err := newEncryptor(cfg.Encryption.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init encryptor: %w", err)
+		}
+		c.encryptor = enc
+	}
+
+	return c, nil
+}
+
+func (c *Client) Close() error {
+	return c.redis.Close()
+}
+
+func (c *Client) Redis() *redis.Client {
+	return c.redis
+}
+
+type EnqueueOption func(*enqueueConfig)
+
+type enqueueConfig struct {
+	queue     string
+	retry     int
+	uniqueKey string
+	uniqueTTL time.Duration
+	batchID   string
+	encrypt   bool
+	delay     time.Duration
+	at        time.Time
+}
+
+func WithQueue(q string) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.queue = q
+	}
+}
+
+func WithRetry(n int) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.retry = n
+	}
+}
+
+func WithUniqueKey(key string, ttl time.Duration) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.uniqueKey = key
+		c.uniqueTTL = ttl
+	}
+}
+
+func WithBatch(batchID string) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.batchID = batchID
+	}
+}
+
+func WithEncryption() EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.encrypt = true
+	}
+}
+
+func WithDelay(d time.Duration) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.delay = d
+	}
+}
+
+func WithScheduleAt(t time.Time) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.at = t
+	}
+}
+
+func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]any, opts ...EnqueueOption) (*Job, error) {
+	cfg := &enqueueConfig{
+		queue: c.settings.DefaultQueue,
+		retry: c.settings.DefaultRetry,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	job := NewJob(jobType, args)
+	job.Queue = cfg.queue
+	job.Retry = cfg.retry
+	job.BatchID = cfg.batchID
+	job.UniqueKey = cfg.uniqueKey
+	job.UniqueTTL = cfg.uniqueTTL
+
+	if cfg.encrypt && c.encryptor != nil {
+		encryptedArgs, err := c.encryptor.encrypt(args)
+		if err != nil {
+			return nil, err
+		}
+		job.Args = encryptedArgs
+		job.Encrypted = true
+	}
+
+	if cfg.uniqueKey != "" {
+		if cfg.uniqueTTL <= 0 {
+			return nil, fmt.Errorf("unique TTL must be > 0 when using a unique key")
+		}
+		ok, err := c.redis.SetNX(ctx, c.keys.Unique(cfg.uniqueKey), job.ID, cfg.uniqueTTL).Result()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &DuplicateJobError{UniqueKey: cfg.uniqueKey}
+		}
+	}
+
+	if !cfg.at.IsZero() {
+		return c.enqueueAt(ctx, cfg.at, job)
+	}
+	if cfg.delay > 0 {
+		return c.enqueueAt(ctx, time.Now().Add(cfg.delay), job)
+	}
+
+	return c.enqueueNow(ctx, job)
+}
+
+func (c *Client) EnqueueIn(ctx context.Context, d time.Duration, jobType string, args map[string]any, opts ...EnqueueOption) (*Job, error) {
+	opts = append(opts, WithDelay(d))
+	return c.Enqueue(ctx, jobType, args, opts...)
+}
+
+func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, args map[string]any, opts ...EnqueueOption) (*Job, error) {
+	opts = append(opts, WithScheduleAt(t))
+	return c.Enqueue(ctx, jobType, args, opts...)
+}
+
+func (c *Client) enqueueNow(ctx context.Context, job *Job) (*Job, error) {
+	data, err := job.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.redis.SAdd(ctx, c.keys.Queues(), job.Queue).Err(); err != nil {
+		return nil, err
+	}
+
+	if err := c.redis.LPush(ctx, c.keys.Queue(job.Queue), string(data)).Err(); err != nil {
+		return nil, err
+	}
+
+	return job, nil
+}
+
+func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *Job) (*Job, error) {
+	data, err := job.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.redis.ZAdd(ctx, c.keys.Scheduled(), redis.Z{
+		Score:  float64(t.Unix()),
+		Member: string(data),
+	}).Err(); err != nil {
+		return nil, err
+	}
+
+	return job, nil
+}
+
+func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
+	pipe := c.redis.Pipeline()
+
+	batchData, err := json.Marshal(batch)
+	if err != nil {
+		return err
+	}
+	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), 7*24*time.Hour)
+
+	for _, job := range batch.Jobs {
+		job.BatchID = batch.ID
+
+		data, err := job.Marshal()
+		if err != nil {
+			return err
+		}
+
+		pipe.LPush(ctx, c.keys.Queue(job.Queue), string(data))
+		pipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
+	}
+
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+type Batch struct {
+	ID          string
+	Description string
+	Jobs        []*Job
+	OnComplete  string
+	OnSuccess   string
+	OnDeath     string
+	CreatedAt   time.Time
+}
+
+func NewBatch() *Batch {
+	return &Batch{
+		ID:        NewJob("", nil).ID,
+		CreatedAt: time.Now(),
+		Jobs:      make([]*Job, 0),
+	}
+}
+
+func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) *Batch {
+	cfg := &enqueueConfig{
+		queue: "default",
+		retry: 25,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	job := NewJob(jobType, args)
+	job.Queue = cfg.queue
+	job.Retry = cfg.retry
+	b.Jobs = append(b.Jobs, job)
+	return b
+}
+
+func (b *Batch) OnCompleteCallback(jobType string) *Batch {
+	b.OnComplete = jobType
+	return b
+}
+
+func (b *Batch) OnSuccessCallback(jobType string) *Batch {
+	b.OnSuccess = jobType
+	return b
+}
+
+func (b *Batch) OnDeathCallback(jobType string) *Batch {
+	b.OnDeath = jobType
+	return b
+}
