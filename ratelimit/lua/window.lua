@@ -1,23 +1,26 @@
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
-local window_ms = tonumber(ARGV[2])
-local now_ms = tonumber(ARGV[3])
+local window_us = tonumber(ARGV[2])
+local now_us = tonumber(ARGV[3])
 local member = ARGV[4]
 local ttl = tonumber(ARGV[5])
 
-redis.call("ZREMRANGEBYSCORE", key, "-inf", now_ms - window_ms)
+redis.call("ZREMRANGEBYSCORE", key, "-inf", now_us - window_us)
 
 local count = redis.call("ZCARD", key)
 
 if count >= limit then
     local oldest = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
     if #oldest >= 2 then
-        local retry_in_ms = tonumber(oldest[2]) + window_ms - now_ms
-        return {0, count, retry_in_ms}
+        local retry_in_us = tonumber(oldest[2]) + window_us - now_us
+        if retry_in_us < 0 then
+            retry_in_us = 0
+        end
+        return {0, count, retry_in_us}
     end
-    return {0, count, window_ms}
+    return {0, count, window_us}
 end
 
-redis.call("ZADD", key, now_ms, member)
+redis.call("ZADD", key, now_us, member)
 redis.call("EXPIRE", key, ttl)
 return {1, count + 1, 0}
