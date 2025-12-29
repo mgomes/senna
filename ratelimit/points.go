@@ -9,46 +9,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var pointsCheckScript = script.New("points_check", `
-local key = KEYS[1]
-local capacity = tonumber(ARGV[1])
-local refill_rate = tonumber(ARGV[2])
-local cost = tonumber(ARGV[3])
-local now = tonumber(ARGV[4])
-local ttl = tonumber(ARGV[5])
+var pointsCheckScript = script.New("points_check", pointsCheckLua)
 
-local state = redis.call("HMGET", key, "points", "last_refill")
-local points = tonumber(state[1] or tostring(capacity))
-local last_refill = tonumber(state[2] or tostring(now))
-
-local elapsed = now - last_refill
-local refilled = elapsed * refill_rate
-points = math.min(capacity, points + refilled)
-
-if points < cost then
-    local needed = cost - points
-    local wait_time = needed / refill_rate
-    return {0, points, wait_time}
-end
-
-points = points - cost
-redis.call("HMSET", key, "points", points, "last_refill", now)
-redis.call("EXPIRE", key, ttl)
-return {1, points, 0}
-`)
-
-var pointsAdjustScript = script.New("points_adjust", `
-local key = KEYS[1]
-local diff = tonumber(ARGV[1])
-local capacity = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local current = tonumber(redis.call("HGET", key, "points") or "0")
-local new_points = math.max(0, math.min(capacity, current + diff))
-redis.call("HSET", key, "points", new_points)
-redis.call("EXPIRE", key, ttl)
-return new_points
-`)
+var pointsAdjustScript = script.New("points_adjust", pointsAdjustLua)
 
 type PointsLimiter struct {
 	name        string
@@ -89,10 +52,6 @@ func Points(client redis.Cmdable, cfg PointsConfig) *PointsLimiter {
 
 func (l *PointsLimiter) Name() string {
 	return l.name
-}
-
-func (l *PointsLimiter) refillRate() float64 {
-	return float64(l.capacity) / l.refillTime.Seconds()
 }
 
 func (l *PointsLimiter) WithinLimit(ctx context.Context, fn func() error) error {
@@ -159,13 +118,19 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		now := float64(time.Now().UnixNano()) / 1e9
-		refillRate := l.refillRate()
-		ttl := int64(l.refillTime.Seconds() * 2)
+		nowMs := time.Now().UnixMilli()
+		refillTimeMs := l.refillTime.Milliseconds()
+		if refillTimeMs < 1 {
+			refillTimeMs = 1
+		}
+		ttlSeconds := (refillTimeMs * 2) / 1000
+		if ttlSeconds < 1 {
+			ttlSeconds = 1
+		}
 
 		result, err := pointsCheckScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.capacity, refillRate, cost, now, ttl,
+			l.capacity, refillTimeMs, cost, nowMs, ttlSeconds,
 		)
 		if err != nil {
 			return 0, err
@@ -173,15 +138,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 
 		arr := result.([]any)
 		allowed := arr[0].(int64) == 1
-
-		var waitTimeSecs float64
-		switch v := arr[2].(type) {
-		case int64:
-			waitTimeSecs = float64(v)
-		case float64:
-			waitTimeSecs = v
-		}
-		retryIn := time.Duration(waitTimeSecs * float64(time.Second))
+		retryIn := time.Duration(arr[2].(int64)) * time.Millisecond
 
 		if allowed {
 			return 0, nil
@@ -226,16 +183,27 @@ func (l *PointsLimiter) Release(ctx context.Context) error {
 }
 
 func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
-	ttl := int64(l.refillTime.Seconds() * 2)
+	refillTimeMs := l.refillTime.Milliseconds()
+	if refillTimeMs < 1 {
+		refillTimeMs = 1
+	}
+	ttlSeconds := (refillTimeMs * 2) / 1000
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
 	_, err := pointsAdjustScript.Run(ctx, l.client,
 		[]string{l.keyPrefix + ":" + l.name},
-		diff, l.capacity, ttl,
+		diff, l.capacity, ttlSeconds,
 	)
 	return err
 }
 
 func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
-	now := float64(time.Now().UnixNano()) / 1e9
+	nowMs := time.Now().UnixMilli()
+	refillTimeMs := l.refillTime.Milliseconds()
+	if refillTimeMs < 1 {
+		refillTimeMs = 1
+	}
 
 	state, err := l.client.HMGet(ctx, l.keyPrefix+":"+l.name, "points", "last_refill").Result()
 	if err == redis.Nil {
@@ -246,24 +214,24 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 	}
 
 	points := float64(l.capacity)
-	var lastRefill float64
+	var lastRefillMs int64
 
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
-			fmt.Sscanf(s, "%f", &points)
+			_, _ = fmt.Sscanf(s, "%f", &points)
 		}
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			fmt.Sscanf(s, "%f", &lastRefill)
+			_, _ = fmt.Sscanf(s, "%d", &lastRefillMs)
 		}
 	}
-	if lastRefill == 0 {
-		lastRefill = now
+	if lastRefillMs == 0 {
+		lastRefillMs = nowMs
 	}
 
-	elapsed := now - lastRefill
-	refilled := elapsed * l.refillRate()
+	elapsedMs := nowMs - lastRefillMs
+	refilled := (float64(elapsedMs) * float64(l.capacity)) / float64(refillTimeMs)
 	points = min(float64(l.capacity), points+refilled)
 
 	return points, nil

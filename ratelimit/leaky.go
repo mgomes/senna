@@ -9,31 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var leakyScript = script.New("leaky", `
-local key = KEYS[1]
-local capacity = tonumber(ARGV[1])
-local drain_rate = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
-local ttl = tonumber(ARGV[4])
-
-local state = redis.call("HMGET", key, "level", "last_drip")
-local level = tonumber(state[1] or "0")
-local last_drip = tonumber(state[2] or tostring(now))
-
-local elapsed = now - last_drip
-local drained = elapsed * drain_rate
-level = math.max(0, level - drained)
-
-if level >= capacity then
-    local wait_time = (level - capacity + 1) / drain_rate
-    return {0, level, wait_time}
-end
-
-level = level + 1
-redis.call("HMSET", key, "level", level, "last_drip", now)
-redis.call("EXPIRE", key, ttl)
-return {1, level, 0}
-`)
+var leakyScript = script.New("leaky", leakyLua)
 
 type LeakyLimiter struct {
 	name        string
@@ -76,10 +52,6 @@ func (l *LeakyLimiter) Name() string {
 	return l.name
 }
 
-func (l *LeakyLimiter) drainRate() float64 {
-	return float64(l.capacity) / l.drainTime.Seconds()
-}
-
 func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	waitTime, err := l.Acquire(ctx)
 	if err != nil {
@@ -100,13 +72,19 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		now := float64(time.Now().UnixNano()) / 1e9
-		drainRate := l.drainRate()
-		ttl := int64(l.drainTime.Seconds() * 2)
+		nowMs := time.Now().UnixMilli()
+		drainTimeMs := l.drainTime.Milliseconds()
+		if drainTimeMs < 1 {
+			drainTimeMs = 1
+		}
+		ttlSeconds := (drainTimeMs * 2) / 1000
+		if ttlSeconds < 1 {
+			ttlSeconds = 1
+		}
 
 		result, err := leakyScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.capacity, drainRate, now, ttl,
+			l.capacity, drainTimeMs, nowMs, ttlSeconds,
 		)
 		if err != nil {
 			return 0, err
@@ -114,17 +92,7 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 
 		arr := result.([]any)
 		allowed := arr[0].(int64) == 1
-
-		var waitTimeSecs float64
-		switch v := arr[2].(type) {
-		case int64:
-			waitTimeSecs = float64(v)
-		case float64:
-			waitTimeSecs = v
-		case string:
-			// ignore
-		}
-		retryIn := time.Duration(waitTimeSecs * float64(time.Second))
+		retryIn := time.Duration(arr[2].(int64)) * time.Millisecond
 
 		if allowed {
 			return 0, nil
@@ -169,7 +137,11 @@ func (l *LeakyLimiter) Release(ctx context.Context) error {
 }
 
 func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
-	now := float64(time.Now().UnixNano()) / 1e9
+	nowMs := time.Now().UnixMilli()
+	drainTimeMs := l.drainTime.Milliseconds()
+	if drainTimeMs < 1 {
+		drainTimeMs = 1
+	}
 
 	state, err := l.client.HMGet(ctx, l.keyPrefix+":"+l.name, "level", "last_drip").Result()
 	if err == redis.Nil {
@@ -179,23 +151,24 @@ func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
 		return 0, err
 	}
 
-	var level, lastDrip float64
+	var level float64
+	var lastDripMs int64
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
-			fmt.Sscanf(s, "%f", &level)
+			_, _ = fmt.Sscanf(s, "%f", &level)
 		}
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			fmt.Sscanf(s, "%f", &lastDrip)
+			_, _ = fmt.Sscanf(s, "%d", &lastDripMs)
 		}
 	}
-	if lastDrip == 0 {
-		lastDrip = now
+	if lastDripMs == 0 {
+		lastDripMs = nowMs
 	}
 
-	elapsed := now - lastDrip
-	drained := elapsed * l.drainRate()
+	elapsedMs := nowMs - lastDripMs
+	drained := (float64(elapsedMs) * float64(l.capacity)) / float64(drainTimeMs)
 	level = max(0, level-drained)
 
 	return level, nil

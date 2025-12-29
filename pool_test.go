@@ -1,0 +1,415 @@
+package senna
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestWorkerPool_Register(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	called := false
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		called = true
+		return nil
+	}, nil)
+
+	job := NewJob("test_job", nil)
+	_, err := pool.process(context.Background(), job)
+	if err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	if !called {
+		t.Error("handler should have been called")
+	}
+}
+
+func TestWorkerPool_Register_WithOptions(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	opts := &JobOptions{
+		MaxRetries: 3,
+		Timeout:    time.Second,
+	}
+
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		return nil
+	}, opts)
+
+	job := NewJob("test_job", nil)
+	returnedOpts, err := pool.process(context.Background(), job)
+	if err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	if returnedOpts == nil {
+		t.Fatal("expected options to be returned")
+	}
+	if returnedOpts.MaxRetries != 3 {
+		t.Errorf("expected MaxRetries 3, got %d", returnedOpts.MaxRetries)
+	}
+}
+
+func TestWorkerPool_Use(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	var order []string
+
+	pool.Use(func(next Handler) Handler {
+		return func(ctx context.Context, job *Job) error {
+			order = append(order, "mw1")
+			return next(ctx, job)
+		}
+	})
+
+	pool.Use(func(next Handler) Handler {
+		return func(ctx context.Context, job *Job) error {
+			order = append(order, "mw2")
+			return next(ctx, job)
+		}
+	})
+
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		order = append(order, "handler")
+		return nil
+	}, nil)
+
+	job := NewJob("test_job", nil)
+	_, _ = pool.process(context.Background(), job)
+
+	expected := []string{"mw1", "mw2", "handler"}
+	if len(order) != len(expected) {
+		t.Fatalf("expected %d calls, got %d: %v", len(expected), len(order), order)
+	}
+	for i, v := range expected {
+		if order[i] != v {
+			t.Errorf("expected order[%d]='%s', got '%s'", i, v, order[i])
+		}
+	}
+}
+
+func TestWorkerPool_Process_Success(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	result := ""
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		result = job.Args["message"].(string)
+		return nil
+	}, nil)
+
+	job := NewJob("test_job", map[string]any{"message": "hello"})
+	_, err := pool.process(context.Background(), job)
+	if err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	if result != "hello" {
+		t.Errorf("expected 'hello', got '%s'", result)
+	}
+}
+
+func TestWorkerPool_Process_JobNotFound(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	job := NewJob("unknown_job", nil)
+	_, err := pool.process(context.Background(), job)
+
+	var notFoundErr *JobNotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected JobNotFoundError, got %T: %v", err, err)
+	}
+}
+
+func TestWorkerPool_Process_WithTimeout(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	opts := &JobOptions{
+		Timeout: 50 * time.Millisecond,
+	}
+
+	pool.Register("slow_job", func(ctx context.Context, job *Job) error {
+		time.Sleep(500 * time.Millisecond)
+		return nil
+	}, opts)
+
+	job := NewJob("slow_job", nil)
+	_, err := pool.process(context.Background(), job)
+
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestWorkerPool_Process_SetsProcessedAt(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		return nil
+	}, nil)
+
+	job := NewJob("test_job", nil)
+	if job.ProcessedAt != nil {
+		t.Error("ProcessedAt should be nil before processing")
+	}
+
+	before := time.Now()
+	_, _ = pool.process(context.Background(), job)
+	after := time.Now()
+
+	if job.ProcessedAt == nil {
+		t.Fatal("ProcessedAt should be set after processing")
+	}
+	if job.ProcessedAt.Before(before) || job.ProcessedAt.After(after) {
+		t.Errorf("ProcessedAt should be between %v and %v", before, after)
+	}
+}
+
+func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
+	pool := newWorkerPool(10)
+
+	opts := &JobOptions{
+		MaxConcurrency: 2,
+	}
+
+	var maxConcurrent atomic.Int32
+	var currentConcurrent atomic.Int32
+
+	pool.Register("limited_job", func(ctx context.Context, job *Job) error {
+		current := currentConcurrent.Add(1)
+		defer currentConcurrent.Add(-1)
+
+		for {
+			max := maxConcurrent.Load()
+			if current <= max || maxConcurrent.CompareAndSwap(max, current) {
+				break
+			}
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}, opts)
+
+	done := make(chan struct{})
+	for range 10 {
+		go func() {
+			job := NewJob("limited_job", nil)
+			_, _ = pool.process(context.Background(), job)
+			done <- struct{}{}
+		}()
+	}
+
+	for range 10 {
+		<-done
+	}
+
+	if maxConcurrent.Load() > 2 {
+		t.Errorf("max concurrency exceeded limit, got %d", maxConcurrent.Load())
+	}
+}
+
+func TestWorkerPool_Submit_Success(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	ctx := context.Background()
+	pool.Start(ctx)
+	defer pool.Stop()
+
+	job := NewJob("test_job", nil)
+	ok := pool.Submit(job)
+	if !ok {
+		t.Error("Submit should return true")
+	}
+}
+
+func TestWorkerPool_Submit_ChannelFull(t *testing.T) {
+	pool := newWorkerPool(1)
+
+	for i := 0; i < pool.concurrency*2; i++ {
+		pool.Submit(NewJob("test", nil))
+	}
+
+	ok := pool.Submit(NewJob("test", nil))
+	if ok {
+		t.Error("Submit should return false when channel is full")
+	}
+}
+
+func TestWorkerPool_SubmitWait_Success(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	ctx := context.Background()
+	pool.Start(ctx)
+	defer func() {
+		pool.Stop()
+		pool.Wait()
+	}()
+
+	job := NewJob("test_job", nil)
+	ok := pool.SubmitWait(ctx, job)
+	if !ok {
+		t.Error("SubmitWait should return true")
+	}
+}
+
+func TestWorkerPool_SubmitWait_ContextCanceled(t *testing.T) {
+	pool := newWorkerPool(1)
+
+	for i := 0; i < pool.concurrency*2; i++ {
+		pool.Submit(NewJob("test", nil))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ok := pool.SubmitWait(ctx, NewJob("test", nil))
+	if ok {
+		t.Error("SubmitWait should return false when context is canceled")
+	}
+}
+
+func TestWorkerPool_Drain_CompletesGracefully(t *testing.T) {
+	pool := newWorkerPool(2)
+
+	var processed atomic.Int32
+
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		time.Sleep(50 * time.Millisecond)
+		processed.Add(1)
+		return nil
+	}, nil)
+
+	ctx := context.Background()
+	pool.Start(ctx)
+
+	for range 4 {
+		pool.Submit(NewJob("test_job", nil))
+	}
+
+	pool.Stop()
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := pool.Drain(drainCtx)
+	if err != nil {
+		t.Fatalf("Drain failed: %v", err)
+	}
+
+	if processed.Load() != 4 {
+		t.Errorf("expected 4 processed jobs, got %d", processed.Load())
+	}
+}
+
+func TestWorkerPool_Drain_Timeout(t *testing.T) {
+	pool := newWorkerPool(1)
+
+	pool.Register("slow_job", func(ctx context.Context, job *Job) error {
+		time.Sleep(5 * time.Second)
+		return nil
+	}, nil)
+
+	ctx := context.Background()
+	pool.Start(ctx)
+
+	pool.Submit(NewJob("slow_job", nil))
+
+	time.Sleep(50 * time.Millisecond)
+
+	pool.Stop()
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := pool.Drain(drainCtx)
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestWorkerPool_Wait(t *testing.T) {
+	pool := newWorkerPool(2)
+
+	var processed atomic.Int32
+
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		time.Sleep(50 * time.Millisecond)
+		processed.Add(1)
+		return nil
+	}, nil)
+
+	ctx := context.Background()
+	pool.Start(ctx)
+
+	for range 4 {
+		pool.Submit(NewJob("test_job", nil))
+	}
+
+	pool.Stop()
+	pool.Wait()
+
+	if processed.Load() != 4 {
+		t.Errorf("expected 4 processed jobs, got %d", processed.Load())
+	}
+}
+
+func TestWorkerPool_Process_ReturnsError(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	expectedErr := errors.New("job failed")
+	pool.Register("failing_job", func(ctx context.Context, job *Job) error {
+		return expectedErr
+	}, nil)
+
+	job := NewJob("failing_job", nil)
+	_, err := pool.process(context.Background(), job)
+
+	if err != expectedErr {
+		t.Errorf("expected error to propagate, got %v", err)
+	}
+}
+
+func TestWorkerPool_WorkerExitsOnContextCancel(t *testing.T) {
+	pool := newWorkerPool(2)
+
+	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+		return nil
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool.Start(ctx)
+
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		pool.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("workers should exit when context is canceled")
+	}
+}
+
+func TestWorkerPool_ConcurrentRegistration(t *testing.T) {
+	pool := newWorkerPool(5)
+
+	done := make(chan struct{})
+	for i := range 10 {
+		go func(id int) {
+			pool.Register("job_"+string(rune('a'+id)), func(ctx context.Context, job *Job) error {
+				return nil
+			}, nil)
+			done <- struct{}{}
+		}(i)
+	}
+
+	for range 10 {
+		<-done
+	}
+}

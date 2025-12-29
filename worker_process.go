@@ -210,6 +210,7 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 		}
 
 		if job == nil {
+			time.Sleep(w.config.Settings.PollInterval)
 			continue
 		}
 
@@ -221,21 +222,21 @@ func (w *Worker) processJob(ctx context.Context, job *Job) {
 	opts, err := w.pool.process(ctx, job)
 
 	if err == nil {
-		w.fetcher.Ack(ctx, w.id, job)
+		_ = w.fetcher.Ack(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, true)
 		return
 	}
 
 	var retryErr *RetryableError
 	if errors.As(err, &retryErr) {
-		w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
+		_ = w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
 		return
 	}
 
 	var maxRetriesErr *MaxRetriesExceededError
 	if errors.As(err, &maxRetriesErr) {
 		job.Error = maxRetriesErr.Error()
-		w.fetcher.MoveToDead(ctx, w.id, job)
+		_ = w.fetcher.MoveToDead(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, false)
 		return
 	}
@@ -252,10 +253,10 @@ func (w *Worker) processJob(ctx context.Context, job *Job) {
 	}
 	backoff := backoffFn(job.RetryCount)
 	if job.RetryCount < maxRetries {
-		w.fetcher.Nack(ctx, w.id, job, backoff)
+		_ = w.fetcher.Nack(ctx, w.id, job, backoff)
 	} else {
 		job.Error = err.Error()
-		w.fetcher.MoveToDead(ctx, w.id, job)
+		_ = w.fetcher.MoveToDead(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, false)
 	}
 }

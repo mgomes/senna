@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -12,99 +13,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var concurrentInitScript = script.New("concurrent_init", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local init_key = KEYS[3]
-local limit = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
+var concurrentInitScript = script.New("concurrent_init", concurrentInitLua)
 
-local already_init = redis.call("GET", init_key)
-if already_init then
-    return 0
-end
+var concurrentAcquireScript = script.New("concurrent_acquire", concurrentAcquireLua)
 
-local set_result = redis.call("SETNX", init_key, "1")
-if set_result == 0 then
-    return 0
-end
+var concurrentReleaseScript = script.New("concurrent_release", concurrentReleaseLua)
 
-for i = 1, limit do
-    redis.call("RPUSH", slots_key, "slot")
-end
-
-redis.call("EXPIRE", slots_key, ttl)
-redis.call("EXPIRE", locks_key, ttl)
-redis.call("EXPIRE", init_key, ttl)
-
-return limit
-`)
-
-var concurrentAcquireScript = script.New("concurrent_acquire", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local lock_id = ARGV[1]
-local now = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local slot = redis.call("LPOP", slots_key)
-if not slot then
-    return {0, 0}
-end
-
-redis.call("HSET", locks_key, lock_id, now)
-redis.call("EXPIRE", slots_key, ttl)
-redis.call("EXPIRE", locks_key, ttl)
-
-return {1, redis.call("HLEN", locks_key)}
-`)
-
-var concurrentReleaseScript = script.New("concurrent_release", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local lock_id = ARGV[1]
-local ttl = tonumber(ARGV[2])
-
-local deleted = redis.call("HDEL", locks_key, lock_id)
-if deleted == 0 then
-    return 0
-end
-
-redis.call("RPUSH", slots_key, "slot")
-redis.call("EXPIRE", slots_key, ttl)
-redis.call("EXPIRE", locks_key, ttl)
-
-return 1
-`)
-
-var concurrentReclaimScript = script.New("concurrent_reclaim", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local now = tonumber(ARGV[1])
-local lock_timeout = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local locks = redis.call("HGETALL", locks_key)
-local reclaimed = 0
-
-for i = 1, #locks, 2 do
-    local lock_id = locks[i]
-    local acquired_at = tonumber(locks[i + 1])
-
-    if acquired_at and (now - acquired_at) > lock_timeout then
-        redis.call("HDEL", locks_key, lock_id)
-        redis.call("RPUSH", slots_key, "slot")
-        reclaimed = reclaimed + 1
-    end
-end
-
-if reclaimed > 0 then
-    redis.call("EXPIRE", slots_key, ttl)
-    redis.call("EXPIRE", locks_key, ttl)
-end
-
-return reclaimed
-`)
+var concurrentReclaimScript = script.New("concurrent_reclaim", concurrentReclaimLua)
 
 type ConcurrentLimiter struct {
 	name        string
@@ -115,7 +30,8 @@ type ConcurrentLimiter struct {
 	client      redis.Cmdable
 	keyPrefix   string
 	initialized atomic.Bool
-	lockID      string
+	lockMu      sync.Mutex
+	lockIDs     map[context.Context]string
 }
 
 type ConcurrentConfig struct {
@@ -145,6 +61,7 @@ func Concurrent(client redis.Cmdable, cfg ConcurrentConfig) *ConcurrentLimiter {
 		policy:      cfg.Policy,
 		client:      client,
 		keyPrefix:   cfg.KeyPrefix,
+		lockIDs:     make(map[context.Context]string),
 	}
 }
 
@@ -168,15 +85,22 @@ func (l *ConcurrentLimiter) generateLockID() string {
 	return fmt.Sprintf("%d:%s", os.Getpid(), uuid.New().String())
 }
 
+func (l *ConcurrentLimiter) ttlSeconds() int64 {
+	ttl := (l.lockTimeout.Milliseconds() * 3) / 1000
+	if ttl < 1 {
+		ttl = 1
+	}
+	return ttl
+}
+
 func (l *ConcurrentLimiter) ensureInitialized(ctx context.Context) error {
 	if l.initialized.Load() {
 		return nil
 	}
 
-	ttl := int64(l.lockTimeout.Seconds() * 3)
 	_, err := concurrentInitScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey(), l.initKey()},
-		l.limit, ttl,
+		l.limit, l.ttlSeconds(),
 	)
 	if err != nil {
 		return err
@@ -187,13 +111,12 @@ func (l *ConcurrentLimiter) ensureInitialized(ctx context.Context) error {
 }
 
 func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
-	now := float64(time.Now().UnixNano()) / 1e9
-	lockTimeoutSecs := l.lockTimeout.Seconds()
-	ttl := int64(lockTimeoutSecs * 3)
+	nowMs := time.Now().UnixMilli()
+	lockTimeoutMs := l.lockTimeout.Milliseconds()
 
 	result, err := concurrentReclaimScript.Run(ctx, l.client,
-		[]string{l.slotsKey(), l.locksKey()},
-		now, lockTimeoutSecs, ttl,
+		[]string{l.slotsKey(), l.locksKey(), l.keyPrefix + ":" + l.name + ":metrics"},
+		nowMs, lockTimeoutMs, l.ttlSeconds(),
 	)
 	if err != nil {
 		return 0, err
@@ -216,7 +139,7 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) er
 		}
 	}
 
-	defer l.Release(ctx)
+	defer func() { _ = l.Release(ctx) }()
 	return fn()
 }
 
@@ -225,18 +148,17 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		return 0, err
 	}
 
-	l.reclaim(ctx)
+	_, _ = l.reclaim(ctx)
 
 	deadline := time.Now().Add(l.waitTimeout)
-	l.lockID = l.generateLockID()
+	tempLockID := l.generateLockID()
 
 	for {
-		now := float64(time.Now().UnixNano()) / 1e9
-		ttl := int64(l.lockTimeout.Seconds() * 3)
+		nowMs := time.Now().UnixMilli()
 
 		result, err := concurrentAcquireScript.Run(ctx, l.client,
 			[]string{l.slotsKey(), l.locksKey()},
-			l.lockID, now, ttl,
+			tempLockID, nowMs, l.ttlSeconds(),
 		)
 		if err != nil {
 			return 0, err
@@ -246,6 +168,9 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		acquired := arr[0].(int64) == 1
 
 		if acquired {
+			l.lockMu.Lock()
+			l.lockIDs[ctx] = tempLockID
+			l.lockMu.Unlock()
 			return 0, nil
 		}
 
@@ -273,16 +198,21 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 }
 
 func (l *ConcurrentLimiter) Release(ctx context.Context) error {
-	if l.lockID == "" {
+	l.lockMu.Lock()
+	lockID, ok := l.lockIDs[ctx]
+	if ok {
+		delete(l.lockIDs, ctx)
+	}
+	l.lockMu.Unlock()
+
+	if !ok || lockID == "" {
 		return nil
 	}
 
-	ttl := int64(l.lockTimeout.Seconds() * 3)
 	_, err := concurrentReleaseScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey()},
-		l.lockID, ttl,
+		lockID, l.ttlSeconds(),
 	)
-	l.lockID = ""
 	return err
 }
 
