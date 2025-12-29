@@ -148,12 +148,11 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		return 0, err
 	}
 
-	_, _ = l.reclaim(ctx)
-
 	deadline := time.Now().Add(l.waitTimeout)
 	tempLockID := l.generateLockID()
 
 	for {
+		_, _ = l.reclaim(ctx)
 		nowMs := time.Now().UnixMilli()
 
 		result, err := concurrentAcquireScript.Run(ctx, l.client,
