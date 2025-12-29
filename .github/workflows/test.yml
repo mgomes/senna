@@ -55,8 +55,8 @@ jobs:
         with:
           go-version: stable
 
-      - name: Install golangci-lint
+      - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
-          install-only: true
+          version: v2.4.0
+
