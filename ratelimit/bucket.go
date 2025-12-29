@@ -72,13 +72,19 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		now := float64(time.Now().UnixNano()) / 1e9
-		windowSecs := l.interval.Seconds()
-		ttl := int64(windowSecs * 2)
+		nowMs := time.Now().UnixMilli()
+		windowMs := l.interval.Milliseconds()
+		if windowMs < 1 {
+			windowMs = 1
+		}
+		ttlSeconds := (windowMs * 2) / 1000
+		if ttlSeconds < 1 {
+			ttlSeconds = 1
+		}
 
 		result, err := bucketScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.limit, windowSecs, now, ttl,
+			l.limit, windowMs, nowMs, ttlSeconds,
 		)
 		if err != nil {
 			return 0, err
@@ -86,7 +92,7 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 
 		arr := result.([]any)
 		allowed := arr[0].(int64) == 1
-		retryIn := time.Duration(arr[2].(int64) * int64(time.Second))
+		retryIn := time.Duration(arr[2].(int64)) * time.Millisecond
 
 		if allowed {
 			return 0, nil
@@ -119,9 +125,12 @@ func (l *BucketLimiter) Release(ctx context.Context) error {
 }
 
 func (l *BucketLimiter) Remaining(ctx context.Context) (int, error) {
-	now := float64(time.Now().UnixNano()) / 1e9
-	windowSecs := l.interval.Seconds()
-	bucketTs := int64(now/windowSecs) * int64(windowSecs)
+	nowMs := time.Now().UnixMilli()
+	windowMs := l.interval.Milliseconds()
+	if windowMs < 1 {
+		windowMs = 1
+	}
+	bucketTs := (nowMs / windowMs) * windowMs
 
 	key := fmt.Sprintf("%s:%s:%d", l.keyPrefix, l.name, bucketTs)
 	val, err := l.client.Get(ctx, key).Int()

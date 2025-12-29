@@ -1,7 +1,7 @@
 local slots_key = KEYS[1]
 local locks_key = KEYS[2]
 local lock_id = ARGV[1]
-local now = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[2])
 local ttl = tonumber(ARGV[3])
 
 local slot = redis.call("LPOP", slots_key)
@@ -9,7 +9,7 @@ if not slot then
     return {0, 0}
 end
 
-redis.call("HSET", locks_key, lock_id, now)
+redis.call("HSET", locks_key, lock_id, now_ms)
 redis.call("EXPIRE", slots_key, ttl)
 redis.call("EXPIRE", locks_key, ttl)
 

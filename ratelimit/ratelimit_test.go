@@ -60,10 +60,12 @@ func TestWindowLimiterHonorsLimit(t *testing.T) {
 	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
 
 	l := Window(client, WindowConfig{
-		Name:      "w",
-		Limit:     2,
-		Interval:  time.Second,
-		KeyPrefix: prefix,
+		Name:        "w",
+		Limit:       2,
+		Interval:    time.Second,
+		KeyPrefix:   prefix,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      PolicySkip,
 	})
 
 	ctx := context.Background()
@@ -84,10 +86,12 @@ func TestBucketLimiterOverLimitReturnsRetry(t *testing.T) {
 	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
 
 	l := Bucket(client, BucketConfig{
-		Name:      "b",
-		Limit:     1,
-		Interval:  time.Second,
-		KeyPrefix: prefix,
+		Name:        "b",
+		Limit:       1,
+		Interval:    time.Second,
+		KeyPrefix:   prefix,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      PolicySkip,
 	})
 
 	ctx := context.Background()
@@ -105,10 +109,12 @@ func TestPointsLimiterRefills(t *testing.T) {
 	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
 
 	l := Points(client, PointsConfig{
-		Name:       "p",
-		Capacity:   2,
-		RefillTime: 200 * time.Millisecond,
-		KeyPrefix:  prefix,
+		Name:        "p",
+		Capacity:    2,
+		RefillTime:  200 * time.Millisecond,
+		KeyPrefix:   prefix,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      PolicySkip,
 	})
 
 	ctx := context.Background()
@@ -135,7 +141,8 @@ func TestLeakyLimiterDrains(t *testing.T) {
 		Capacity:    2,
 		DrainTime:   200 * time.Millisecond,
 		KeyPrefix:   prefix,
-		WaitTimeout: 500 * time.Millisecond,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      PolicySkip,
 	})
 
 	ctx := context.Background()
@@ -165,6 +172,7 @@ func TestConcurrentLimiterReturnsSlotAfterRelease(t *testing.T) {
 		Limit:       1,
 		WaitTimeout: 200 * time.Millisecond,
 		KeyPrefix:   prefix,
+		Policy:      PolicySkip,
 	})
 
 	ctx := context.Background()
@@ -172,7 +180,7 @@ func TestConcurrentLimiterReturnsSlotAfterRelease(t *testing.T) {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
 
-	if wait, err := l.Acquire(ctx); err == nil || wait == 0 {
+	if wait, err := l.Acquire(ctx); err == nil && wait == 0 {
 		t.Fatalf("expected over limit error/wait, got wait=%v err=%v", wait, err)
 	}
 

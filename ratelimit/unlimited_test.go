@@ -14,13 +14,13 @@ func TestUnlimitedLimiter_AlwaysAllows(t *testing.T) {
 	limiter := ratelimit.Unlimited("test")
 	ctx := context.Background()
 
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
-			t.Fatalf("acquire %d failed: %v", i, err)
+			t.Fatalf("acquire failed: %v", err)
 		}
 		if waitTime != 0 {
-			t.Fatalf("acquire %d should never wait", i)
+			t.Fatal("acquire should never wait")
 		}
 	}
 }
@@ -30,13 +30,13 @@ func TestUnlimitedLimiter_WithinLimit(t *testing.T) {
 	ctx := context.Background()
 
 	executed := 0
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("iteration %d failed: %v", i, err)
+			t.Fatalf("WithinLimit failed: %v", err)
 		}
 	}
 
@@ -66,7 +66,7 @@ func TestUnlimitedLimiter_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
 
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

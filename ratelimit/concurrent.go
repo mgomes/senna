@@ -82,15 +82,22 @@ func (l *ConcurrentLimiter) generateLockID() string {
 	return fmt.Sprintf("%d:%s", os.Getpid(), uuid.New().String())
 }
 
+func (l *ConcurrentLimiter) ttlSeconds() int64 {
+	ttl := (l.lockTimeout.Milliseconds() * 3) / 1000
+	if ttl < 1 {
+		ttl = 1
+	}
+	return ttl
+}
+
 func (l *ConcurrentLimiter) ensureInitialized(ctx context.Context) error {
 	if l.initialized.Load() {
 		return nil
 	}
 
-	ttl := int64(l.lockTimeout.Seconds() * 3)
 	_, err := concurrentInitScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey(), l.initKey()},
-		l.limit, ttl,
+		l.limit, l.ttlSeconds(),
 	)
 	if err != nil {
 		return err
@@ -101,13 +108,12 @@ func (l *ConcurrentLimiter) ensureInitialized(ctx context.Context) error {
 }
 
 func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
-	now := float64(time.Now().UnixNano()) / 1e9
-	lockTimeoutSecs := l.lockTimeout.Seconds()
-	ttl := int64(lockTimeoutSecs * 3)
+	nowMs := time.Now().UnixMilli()
+	lockTimeoutMs := l.lockTimeout.Milliseconds()
 
 	result, err := concurrentReclaimScript.Run(ctx, l.client,
-		[]string{l.slotsKey(), l.locksKey()},
-		now, lockTimeoutSecs, ttl,
+		[]string{l.slotsKey(), l.locksKey(), l.keyPrefix + ":" + l.name + ":metrics"},
+		nowMs, lockTimeoutMs, l.ttlSeconds(),
 	)
 	if err != nil {
 		return 0, err
@@ -142,15 +148,14 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 	l.reclaim(ctx)
 
 	deadline := time.Now().Add(l.waitTimeout)
-	l.lockID = l.generateLockID()
+	tempLockID := l.generateLockID()
 
 	for {
-		now := float64(time.Now().UnixNano()) / 1e9
-		ttl := int64(l.lockTimeout.Seconds() * 3)
+		nowMs := time.Now().UnixMilli()
 
 		result, err := concurrentAcquireScript.Run(ctx, l.client,
 			[]string{l.slotsKey(), l.locksKey()},
-			l.lockID, now, ttl,
+			tempLockID, nowMs, l.ttlSeconds(),
 		)
 		if err != nil {
 			return 0, err
@@ -160,6 +165,7 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		acquired := arr[0].(int64) == 1
 
 		if acquired {
+			l.lockID = tempLockID
 			return 0, nil
 		}
 
@@ -191,10 +197,9 @@ func (l *ConcurrentLimiter) Release(ctx context.Context) error {
 		return nil
 	}
 
-	ttl := int64(l.lockTimeout.Seconds() * 3)
 	_, err := concurrentReleaseScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey()},
-		l.lockID, ttl,
+		l.lockID, l.ttlSeconds(),
 	)
 	l.lockID = ""
 	return err

@@ -23,7 +23,7 @@ func TestWindowLimiter_Basic(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -55,7 +55,7 @@ func TestWindowLimiter_SlidingBehavior(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -90,7 +90,7 @@ func TestWindowLimiter_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -124,7 +124,7 @@ func TestWindowLimiter_WithinLimit(t *testing.T) {
 	})
 
 	executed := 0
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
 			return nil
@@ -152,7 +152,7 @@ func TestWindowLimiter_UniqueMembers(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)

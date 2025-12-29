@@ -23,7 +23,7 @@ func TestLeakyLimiter_Basic(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -55,7 +55,7 @@ func TestLeakyLimiter_Draining(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -92,7 +92,7 @@ func TestLeakyLimiter_BurstThenSteady(t *testing.T) {
 	})
 
 	burstSuccess := 0
-	for i := 0; i < 15; i++ {
+	for range 15 {
 		err := limiter.WithinLimit(ctx, func() error {
 			burstSuccess++
 			return nil
@@ -126,7 +126,7 @@ func TestLeakyLimiter_Level(t *testing.T) {
 		t.Fatalf("expected level 0, got %f", level)
 	}
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		limiter.Acquire(ctx)
 	}
 
@@ -155,7 +155,7 @@ func TestLeakyLimiter_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -189,7 +189,7 @@ func TestLeakyLimiter_WithinLimit(t *testing.T) {
 	})
 
 	executed := 0
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
 			return nil

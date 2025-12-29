@@ -1,4 +1,4 @@
-.PHONY: test test-race
+.PHONY: test test-race lint
 
 GO ?= go
 GOCACHE ?= $(CURDIR)/.gocache
@@ -9,3 +9,6 @@ test:
 
 test-race:
 	GOCACHE=$(GOCACHE) $(GO) test -race $(PKGS)
+
+lint:
+	GOCACHE=$(GOCACHE) $(GO) vet $(PKGS)

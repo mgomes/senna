@@ -25,7 +25,7 @@ func TestConcurrentLimiter_Basic(t *testing.T) {
 
 	var acquired []func()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -69,7 +69,7 @@ func TestConcurrentLimiter_WithinLimit(t *testing.T) {
 	var running atomic.Int32
 	var maxRunning atomic.Int32
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -110,7 +110,7 @@ func TestConcurrentLimiter_AutoRelease(t *testing.T) {
 	})
 
 	executed := 0
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
 			return nil
@@ -172,7 +172,7 @@ func TestConcurrentLimiter_Concurrent(t *testing.T) {
 	var maxRunning atomic.Int32
 	var errors atomic.Int32
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -222,7 +222,7 @@ func TestConcurrentLimiter_Held(t *testing.T) {
 		t.Fatalf("expected 0 held, got %d", held)
 	}
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		limiter.Acquire(ctx)
 	}
 

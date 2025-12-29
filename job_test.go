@@ -46,7 +46,7 @@ func TestNewJob(t *testing.T) {
 func TestNewJob_UniqueIDs(t *testing.T) {
 	ids := make(map[string]bool)
 
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		job := NewJob("test", nil)
 		if ids[job.ID] {
 			t.Fatalf("duplicate job ID generated: %s", job.ID)

@@ -83,8 +83,8 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	for i := 1; i <= 10; i++ {
-		_, err := client.Enqueue(context.Background(), "test_job", map[string]any{"id": i})
+	for i := range 10 {
+		_, err := client.Enqueue(context.Background(), "test_job", map[string]any{"id": i + 1})
 		if err != nil {
 			t.Fatalf("enqueue failed: %v", err)
 		}
@@ -102,9 +102,9 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 		t.Fatalf("expected 10 processed, got %d", processed.Load())
 	}
 
-	for i := 1; i <= 10; i++ {
-		if !results[i] {
-			t.Errorf("job %d was not processed", i)
+	for i := range 10 {
+		if !results[i+1] {
+			t.Errorf("job %d was not processed", i+1)
 		}
 	}
 }
@@ -233,7 +233,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		client.Enqueue(context.Background(), "rate_limited_job", nil)
 	}
 
@@ -302,7 +302,7 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		client.Enqueue(context.Background(), "concurrent_job", nil)
 	}
 

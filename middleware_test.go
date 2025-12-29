@@ -294,14 +294,14 @@ func TestMiddlewareChain_Concurrent(t *testing.T) {
 	})
 
 	done := make(chan struct{})
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		go func() {
 			handler(context.Background(), NewJob("test", nil))
 			done <- struct{}{}
 		}()
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		<-done
 	}
 

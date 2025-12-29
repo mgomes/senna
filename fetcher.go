@@ -68,9 +68,18 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*Job, error) {
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
 
-	result, err := f.client.BRPopLPush(ctx, queueKey, inFlightKey, f.pollInterval).Result()
+	// Use non-blocking pop to allow responsive context cancellation.
+	// Redis blocking operations (BRPOPLPUSH) have a minimum 1 second timeout,
+	// which prevents quick cancellation.
+	result, err := f.client.RPopLPush(ctx, queueKey, inFlightKey).Result()
 	if err == redis.Nil {
-		return nil, nil
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, nil
+		}
 	}
 	if err != nil {
 		return nil, err

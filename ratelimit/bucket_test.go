@@ -54,7 +54,7 @@ func TestBucketLimiter_Basic(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -87,7 +87,7 @@ func TestBucketLimiter_WithinLimit(t *testing.T) {
 	})
 
 	executed := 0
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
 			return nil
@@ -118,7 +118,7 @@ func TestBucketLimiter_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
 
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -156,7 +156,7 @@ func TestBucketLimiter_WindowReset(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("first batch acquire %d failed: %v", i, err)
@@ -170,7 +170,7 @@ func TestBucketLimiter_WindowReset(t *testing.T) {
 
 	time.Sleep(600 * time.Millisecond)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("second batch acquire %d failed: %v", i, err)
@@ -194,7 +194,7 @@ func TestBucketLimiter_PolicyRaise(t *testing.T) {
 		Policy:      ratelimit.PolicyRaise,
 	})
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		_, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
@@ -265,7 +265,7 @@ func TestBucketLimiter_DifferentIntervals(t *testing.T) {
 				Policy:      ratelimit.PolicySkip,
 			})
 
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				waitTime, err := limiter.Acquire(ctx)
 				if err != nil {
 					t.Fatalf("acquire %d failed: %v", i, err)

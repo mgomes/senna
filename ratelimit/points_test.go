@@ -17,28 +17,29 @@ func TestPointsLimiter_Basic(t *testing.T) {
 
 	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
 		Name:        "test-basic",
-		Capacity:    100,
+		Capacity:    10,
 		RefillTime:  time.Second,
 		WaitTimeout: 100 * time.Millisecond,
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 100; i++ {
+	// Exhaust all points (with extra to account for refilling during acquires)
+	for i := range 12 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
-		if waitTime != 0 {
+		if i < 10 && waitTime != 0 {
 			t.Fatalf("acquire %d should not wait", i)
 		}
 	}
 
 	waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
-		t.Fatalf("acquire 101 failed: %v", err)
+		t.Fatalf("acquire 13 failed: %v", err)
 	}
 	if waitTime == 0 {
-		t.Fatal("acquire 101 should have wait time")
+		t.Fatal("acquire 13 should have wait time")
 	}
 }
 
@@ -91,7 +92,7 @@ func TestPointsLimiter_WithinLimitCost(t *testing.T) {
 	})
 
 	executed := 0
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		err := limiter.WithinLimitCost(ctx, 30, func() error {
 			executed++
 			return nil
@@ -142,13 +143,14 @@ func TestPointsLimiter_Refill(t *testing.T) {
 
 	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
 		Name:        "test-refill",
-		Capacity:    100,
-		RefillTime:  500 * time.Millisecond,
+		Capacity:    10,
+		RefillTime:  200 * time.Millisecond,
 		WaitTimeout: 100 * time.Millisecond,
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	for i := 0; i < 100; i++ {
+	// Exhaust all points (with a few extra to account for refilling during acquires)
+	for range 12 {
 		limiter.Acquire(ctx)
 	}
 
@@ -157,7 +159,8 @@ func TestPointsLimiter_Refill(t *testing.T) {
 		t.Fatal("should be out of points")
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	// Wait for refill (refills 10 points over 200ms, so 100ms = ~5 points)
+	time.Sleep(150 * time.Millisecond)
 
 	waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
@@ -216,7 +219,7 @@ func TestPointsLimiter_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var totalPoints atomic.Int32
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

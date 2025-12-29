@@ -210,6 +210,7 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 		}
 
 		if job == nil {
+			time.Sleep(w.config.Settings.PollInterval)
 			continue
 		}
 
