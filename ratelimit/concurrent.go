@@ -12,99 +12,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var concurrentInitScript = script.New("concurrent_init", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local init_key = KEYS[3]
-local limit = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
+var concurrentInitScript = script.New("concurrent_init", concurrentInitLua)
 
-local already_init = redis.call("GET", init_key)
-if already_init then
-    return 0
-end
+var concurrentAcquireScript = script.New("concurrent_acquire", concurrentAcquireLua)
 
-local set_result = redis.call("SETNX", init_key, "1")
-if set_result == 0 then
-    return 0
-end
+var concurrentReleaseScript = script.New("concurrent_release", concurrentReleaseLua)
 
-for i = 1, limit do
-    redis.call("RPUSH", slots_key, "slot")
-end
-
-redis.call("EXPIRE", slots_key, ttl)
-redis.call("EXPIRE", locks_key, ttl)
-redis.call("EXPIRE", init_key, ttl)
-
-return limit
-`)
-
-var concurrentAcquireScript = script.New("concurrent_acquire", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local lock_id = ARGV[1]
-local now = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local slot = redis.call("LPOP", slots_key)
-if not slot then
-    return {0, 0}
-end
-
-redis.call("HSET", locks_key, lock_id, now)
-redis.call("EXPIRE", slots_key, ttl)
-redis.call("EXPIRE", locks_key, ttl)
-
-return {1, redis.call("HLEN", locks_key)}
-`)
-
-var concurrentReleaseScript = script.New("concurrent_release", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local lock_id = ARGV[1]
-local ttl = tonumber(ARGV[2])
-
-local deleted = redis.call("HDEL", locks_key, lock_id)
-if deleted == 0 then
-    return 0
-end
-
-redis.call("RPUSH", slots_key, "slot")
-redis.call("EXPIRE", slots_key, ttl)
-redis.call("EXPIRE", locks_key, ttl)
-
-return 1
-`)
-
-var concurrentReclaimScript = script.New("concurrent_reclaim", `
-local slots_key = KEYS[1]
-local locks_key = KEYS[2]
-local now = tonumber(ARGV[1])
-local lock_timeout = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local locks = redis.call("HGETALL", locks_key)
-local reclaimed = 0
-
-for i = 1, #locks, 2 do
-    local lock_id = locks[i]
-    local acquired_at = tonumber(locks[i + 1])
-
-    if acquired_at and (now - acquired_at) > lock_timeout then
-        redis.call("HDEL", locks_key, lock_id)
-        redis.call("RPUSH", slots_key, "slot")
-        reclaimed = reclaimed + 1
-    end
-end
-
-if reclaimed > 0 then
-    redis.call("EXPIRE", slots_key, ttl)
-    redis.call("EXPIRE", locks_key, ttl)
-end
-
-return reclaimed
-`)
+var concurrentReclaimScript = script.New("concurrent_reclaim", concurrentReclaimLua)
 
 type ConcurrentLimiter struct {
 	name        string

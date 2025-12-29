@@ -1,226 +1,393 @@
-package senna
+package senna_test
 
 import (
 	"context"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/mgomes/senna/internal/keys"
+	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/ratelimit"
 	"github.com/redis/go-redis/v9"
 )
 
-func redisAddr() string {
-	if url := os.Getenv("REDIS_URL"); url != "" {
-		return url
+func getRedisAddr() string {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
 	}
-	return "127.0.0.1:6379"
+	return addr
 }
 
-func newRedisClient(t *testing.T) *redis.Client {
-	t.Helper()
-	client := redis.NewClient(RedisConfig{Addr: redisAddr()}.Options())
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		t.Fatalf("redis ping failed: %v", err)
+func flushKeys(t *testing.T, pattern string) {
+	client := redis.NewClient(&redis.Options{Addr: getRedisAddr()})
+	defer client.Close()
+
+	ctx := context.Background()
+	keys, err := client.Keys(ctx, pattern).Result()
+	if err != nil {
+		t.Fatalf("failed to get keys: %v", err)
 	}
-	return client
+	if len(keys) > 0 {
+		client.Del(ctx, keys...)
+	}
 }
 
-func cleanupNamespace(t *testing.T, client *redis.Client, namespace string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func TestIntegration_EnqueueAndProcess(t *testing.T) {
+	flushKeys(t, "integration:*")
 
-	cursor := uint64(0)
-	pattern := namespace + ":*"
+	client, err := senna.NewClient(&senna.ClientConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
 
-	for {
-		keys, next, err := client.Scan(ctx, cursor, pattern, 200).Result()
+	worker, err := senna.NewWorker(&senna.WorkerConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration",
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var processed atomic.Int32
+	var mu sync.Mutex
+	results := make(map[int]bool)
+
+	worker.Register("test_job", func(ctx context.Context, job *senna.Job) error {
+		id := int(job.Args["id"].(float64))
+		mu.Lock()
+		results[id] = true
+		mu.Unlock()
+		processed.Add(1)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		worker.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	for i := 1; i <= 10; i++ {
+		_, err := client.Enqueue(context.Background(), "test_job", map[string]any{"id": i})
 		if err != nil {
-			t.Fatalf("failed to scan keys: %v", err)
+			t.Fatalf("enqueue failed: %v", err)
 		}
-		if len(keys) > 0 {
-			if err := client.Del(ctx, keys...).Err(); err != nil {
-				t.Fatalf("failed to delete keys: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for processed.Load() < 10 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if processed.Load() != 10 {
+		t.Fatalf("expected 10 processed, got %d", processed.Load())
+	}
+
+	for i := 1; i <= 10; i++ {
+		if !results[i] {
+			t.Errorf("job %d was not processed", i)
+		}
+	}
+}
+
+func TestIntegration_ScheduledJob(t *testing.T) {
+	flushKeys(t, "integration-scheduled:*")
+
+	client, err := senna.NewClient(&senna.ClientConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-scheduled",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	worker, err := senna.NewWorker(&senna.WorkerConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-scheduled",
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var processedAt atomic.Int64
+
+	worker.Register("scheduled_job", func(ctx context.Context, job *senna.Job) error {
+		processedAt.Store(time.Now().UnixNano())
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		worker.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	enqueuedAt := time.Now()
+	_, err = client.EnqueueIn(context.Background(), 500*time.Millisecond, "scheduled_job", nil)
+	if err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	if processedAt.Load() != 0 {
+		t.Error("job should not be processed yet")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for processedAt.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+
+	if processedAt.Load() == 0 {
+		t.Fatal("job was not processed")
+	}
+
+	processedTime := time.Unix(0, processedAt.Load())
+	delay := processedTime.Sub(enqueuedAt)
+	if delay < 400*time.Millisecond {
+		t.Errorf("job processed too early, delay was %v", delay)
+	}
+}
+
+func TestIntegration_RateLimitedJob(t *testing.T) {
+	flushKeys(t, "integration-ratelimit:*")
+	flushKeys(t, "senna:ratelimit:*")
+
+	client, err := senna.NewClient(&senna.ClientConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-ratelimit",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	worker, err := senna.NewWorker(&senna.WorkerConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-ratelimit",
+		Settings: senna.WorkerSettings{
+			Concurrency:     5,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	limiter := ratelimit.Bucket(worker.Redis(), ratelimit.BucketConfig{
+		Name:        "test-integration-limiter",
+		Limit:       5,
+		Interval:    time.Second,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	var processed atomic.Int32
+
+	worker.Register("rate_limited_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return nil
+	})
+
+	worker.Use(senna.RateLimitMiddleware(limiter))
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		worker.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	for i := 0; i < 20; i++ {
+		client.Enqueue(context.Background(), "rate_limited_job", nil)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	cancel()
+
+	count := processed.Load()
+	if count > 10 {
+		t.Errorf("expected <= 10 processed (rate limited), got %d", count)
+	}
+}
+
+func TestIntegration_ConcurrentProcessing(t *testing.T) {
+	flushKeys(t, "integration-concurrent:*")
+
+	client, err := senna.NewClient(&senna.ClientConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-concurrent",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	worker, err := senna.NewWorker(&senna.WorkerConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-concurrent",
+		Settings: senna.WorkerSettings{
+			Concurrency:     10,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var maxConcurrent atomic.Int32
+	var currentConcurrent atomic.Int32
+	var processed atomic.Int32
+
+	worker.Register("concurrent_job", func(ctx context.Context, job *senna.Job) error {
+		current := currentConcurrent.Add(1)
+		for {
+			max := maxConcurrent.Load()
+			if current <= max || maxConcurrent.CompareAndSwap(max, current) {
+				break
 			}
 		}
-		if next == 0 {
-			break
+
+		time.Sleep(100 * time.Millisecond)
+
+		currentConcurrent.Add(-1)
+		processed.Add(1)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		worker.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	for i := 0; i < 50; i++ {
+		client.Enqueue(context.Background(), "concurrent_job", nil)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for processed.Load() < 50 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	cancel()
+
+	if processed.Load() < 50 {
+		t.Fatalf("expected 50 processed, got %d", processed.Load())
+	}
+
+	if maxConcurrent.Load() < 5 {
+		t.Errorf("expected significant concurrency, max was %d", maxConcurrent.Load())
+	}
+	if maxConcurrent.Load() > 10 {
+		t.Errorf("concurrency exceeded limit, max was %d", maxConcurrent.Load())
+	}
+}
+
+func TestIntegration_GracefulShutdown(t *testing.T) {
+	flushKeys(t, "integration-shutdown:*")
+
+	client, err := senna.NewClient(&senna.ClientConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-shutdown",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	worker, err := senna.NewWorker(&senna.WorkerConfig{
+		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Namespace: "integration-shutdown",
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var processed atomic.Int32
+	started := make(chan struct{}, 1)
+
+	worker.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
+		select {
+		case started <- struct{}{}:
+		default:
 		}
-		cursor = next
-	}
-}
-
-func TestEnqueueFetchAckRemovesInFlight(t *testing.T) {
-	client := newRedisClient(t)
-	namespace := "senna-test-" + uuid.NewString()
-	t.Cleanup(func() { cleanupNamespace(t, client, namespace) })
-
-	c, err := NewClient(&ClientConfig{
-		Redis:     RedisConfig{Addr: redisAddr()},
-		Namespace: namespace,
-		Settings:  DefaultClientSettings(),
+		time.Sleep(500 * time.Millisecond)
+		processed.Add(1)
+		return nil
 	})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	t.Cleanup(func() { c.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
 
-	job, err := c.Enqueue(ctx, "demo", map[string]any{"x": 1})
-	if err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx)
+		close(done)
+	}()
 
-	k := keys.New(namespace)
-	f := newFetcher(c.Redis(), k, []QueueConfig{{Name: "default", Priority: 1}}, 100*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 2*time.Second)
-	defer fetchCancel()
-	fetched, err := f.Fetch(fetchCtx, "worker-1")
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if fetched == nil {
-		t.Fatalf("expected job, got nil")
-	}
-	if fetched.ID != job.ID {
-		t.Fatalf("expected job id %s, got %s", job.ID, fetched.ID)
-	}
-	if fetched.raw == "" {
-		t.Fatalf("expected raw payload to be populated")
+	client.Enqueue(context.Background(), "slow_job", nil)
+
+	<-started
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker did not shut down in time")
 	}
 
-	if err := f.Ack(ctx, "worker-1", fetched); err != nil {
-		t.Fatalf("ack: %v", err)
-	}
-
-	if n, _ := c.Redis().LLen(ctx, k.InFlight("worker-1")).Result(); n != 0 {
-		t.Fatalf("expected inflight empty, got %d", n)
-	}
-	if n, _ := c.Redis().LLen(ctx, k.Queue("default")).Result(); n != 0 {
-		t.Fatalf("expected queue empty, got %d", n)
-	}
-}
-
-func TestNackMovesToRetryAndBumpsRetryCount(t *testing.T) {
-	client := newRedisClient(t)
-	namespace := "senna-test-" + uuid.NewString()
-	t.Cleanup(func() { cleanupNamespace(t, client, namespace) })
-
-	c, err := NewClient(&ClientConfig{
-		Redis:     RedisConfig{Addr: redisAddr()},
-		Namespace: namespace,
-		Settings:  DefaultClientSettings(),
-	})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	t.Cleanup(func() { c.Close() })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := c.Enqueue(ctx, "demo", map[string]any{"x": 1}); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
-
-	k := keys.New(namespace)
-	f := newFetcher(c.Redis(), k, []QueueConfig{{Name: "default", Priority: 1}}, 100*time.Millisecond)
-
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 2*time.Second)
-	defer fetchCancel()
-	fetched, err := f.Fetch(fetchCtx, "worker-1")
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-
-	if fetched.RetryCount != 0 {
-		t.Fatalf("expected retry_count 0, got %d", fetched.RetryCount)
-	}
-
-	retryIn := 2 * time.Second
-	if err := f.Nack(ctx, "worker-1", fetched, retryIn); err != nil {
-		t.Fatalf("nack: %v", err)
-	}
-
-	if fetched.RetryCount != 1 {
-		t.Fatalf("expected retry_count 1 after nack, got %d", fetched.RetryCount)
-	}
-
-	retries, err := c.Redis().ZRangeWithScores(ctx, k.Retry(), 0, -1).Result()
-	if err != nil {
-		t.Fatalf("read retry set: %v", err)
-	}
-	if len(retries) != 1 {
-		t.Fatalf("expected 1 job in retry set, got %d", len(retries))
-	}
-	if retries[0].Score < float64(time.Now().Unix()) {
-		t.Fatalf("expected retry score to be in the future")
-	}
-}
-
-func TestSchedulerMovesDueJobs(t *testing.T) {
-	client := newRedisClient(t)
-	namespace := "senna-test-" + uuid.NewString()
-	t.Cleanup(func() { cleanupNamespace(t, client, namespace) })
-
-	w, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: redisAddr()},
-		Namespace: namespace,
-		Settings:  DefaultWorkerSettings(),
-	})
-	if err != nil {
-		t.Fatalf("new worker: %v", err)
-	}
-	t.Cleanup(func() { w.Redis().Close() })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	job := NewJob("demo", map[string]any{"x": 1})
-	data, _ := job.Marshal()
-	if err := w.redis.ZAdd(ctx, w.keys.Scheduled(), redis.Z{
-		Score:  float64(time.Now().Add(-time.Second).Unix()),
-		Member: string(data),
-	}).Err(); err != nil {
-		t.Fatalf("seed scheduled: %v", err)
-	}
-
-	w.enqueueScheduled(ctx)
-
-	if n, _ := w.redis.ZCard(ctx, w.keys.Scheduled()).Result(); n != 0 {
-		t.Fatalf("expected scheduled empty, got %d", n)
-	}
-	if n, _ := w.redis.LLen(ctx, w.keys.Queue("default")).Result(); n != 1 {
-		t.Fatalf("expected queue to have job, got %d", n)
-	}
-}
-
-func TestUniqueRequiresTTL(t *testing.T) {
-	client := newRedisClient(t)
-	namespace := "senna-test-" + uuid.NewString()
-	t.Cleanup(func() { cleanupNamespace(t, client, namespace) })
-
-	c, err := NewClient(&ClientConfig{
-		Redis:     RedisConfig{Addr: redisAddr()},
-		Namespace: namespace,
-		Settings:  DefaultClientSettings(),
-	})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	t.Cleanup(func() { c.Close() })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := c.Enqueue(ctx, "demo", map[string]any{"x": 1}, WithUniqueKey("uniq", 0)); err == nil {
-		t.Fatalf("expected error when TTL is zero for unique key")
+	if processed.Load() != 1 {
+		t.Errorf("expected job to complete during graceful shutdown, got %d", processed.Load())
 	}
 }
