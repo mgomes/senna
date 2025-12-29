@@ -118,19 +118,19 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		nowMs := time.Now().UnixMilli()
-		refillTimeMs := l.refillTime.Milliseconds()
-		if refillTimeMs < 1 {
-			refillTimeMs = 1
+		nowUs := time.Now().UnixMicro()
+		refillTimeUs := l.refillTime.Microseconds()
+		if refillTimeUs < 1 {
+			refillTimeUs = 1
 		}
-		ttlSeconds := (refillTimeMs * 2) / 1000
+		ttlSeconds := (refillTimeUs * 2) / 1_000_000
 		if ttlSeconds < 1 {
 			ttlSeconds = 1
 		}
 
 		result, err := pointsCheckScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.capacity, refillTimeMs, cost, nowMs, ttlSeconds,
+			l.capacity, refillTimeUs, cost, nowUs, ttlSeconds,
 		)
 		if err != nil {
 			return 0, err
@@ -138,7 +138,14 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 
 		arr := result.([]any)
 		allowed := arr[0].(int64) == 1
-		retryIn := time.Duration(arr[2].(int64)) * time.Millisecond
+		var retryUs int64
+		switch v := arr[2].(type) {
+		case int64:
+			retryUs = v
+		case float64:
+			retryUs = int64(v)
+		}
+		retryIn := time.Duration(retryUs) * time.Microsecond
 
 		if allowed {
 			return 0, nil
@@ -183,11 +190,11 @@ func (l *PointsLimiter) Release(ctx context.Context) error {
 }
 
 func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
-	refillTimeMs := l.refillTime.Milliseconds()
-	if refillTimeMs < 1 {
-		refillTimeMs = 1
+	refillTimeUs := l.refillTime.Microseconds()
+	if refillTimeUs < 1 {
+		refillTimeUs = 1
 	}
-	ttlSeconds := (refillTimeMs * 2) / 1000
+	ttlSeconds := (refillTimeUs * 2) / 1_000_000
 	if ttlSeconds < 1 {
 		ttlSeconds = 1
 	}
@@ -199,10 +206,10 @@ func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
 }
 
 func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
-	nowMs := time.Now().UnixMilli()
-	refillTimeMs := l.refillTime.Milliseconds()
-	if refillTimeMs < 1 {
-		refillTimeMs = 1
+	nowUs := time.Now().UnixMicro()
+	refillTimeUs := l.refillTime.Microseconds()
+	if refillTimeUs < 1 {
+		refillTimeUs = 1
 	}
 
 	state, err := l.client.HMGet(ctx, l.keyPrefix+":"+l.name, "points", "last_refill").Result()
@@ -214,7 +221,7 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 	}
 
 	points := float64(l.capacity)
-	var lastRefillMs int64
+	var lastRefillUs int64
 
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
@@ -223,15 +230,15 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			_, _ = fmt.Sscanf(s, "%d", &lastRefillMs)
+			_, _ = fmt.Sscanf(s, "%d", &lastRefillUs)
 		}
 	}
-	if lastRefillMs == 0 {
-		lastRefillMs = nowMs
+	if lastRefillUs == 0 {
+		lastRefillUs = nowUs
 	}
 
-	elapsedMs := nowMs - lastRefillMs
-	refilled := (float64(elapsedMs) * float64(l.capacity)) / float64(refillTimeMs)
+	elapsedUs := nowUs - lastRefillUs
+	refilled := (float64(elapsedUs) * float64(l.capacity)) / float64(refillTimeUs)
 	points = min(float64(l.capacity), points+refilled)
 
 	return points, nil

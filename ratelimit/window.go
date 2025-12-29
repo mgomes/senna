@@ -73,12 +73,12 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		nowMs := time.Now().UnixMilli()
-		windowMs := l.interval.Milliseconds()
-		if windowMs < 1 {
-			windowMs = 1
+		nowUs := time.Now().UnixMicro()
+		windowUs := l.interval.Microseconds()
+		if windowUs < 1 {
+			windowUs = 1
 		}
-		ttlSeconds := (windowMs * 2) / 1000
+		ttlSeconds := (windowUs * 2) / 1_000_000
 		if ttlSeconds < 1 {
 			ttlSeconds = 1
 		}
@@ -86,7 +86,7 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 
 		result, err := windowScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.limit, windowMs, nowMs, member, ttlSeconds,
+			l.limit, windowUs, nowUs, member, ttlSeconds,
 		)
 		if err != nil {
 			return 0, err
@@ -94,7 +94,14 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 
 		arr := result.([]any)
 		allowed := arr[0].(int64) == 1
-		retryIn := time.Duration(arr[2].(int64)) * time.Millisecond
+		var retryUs int64
+		switch v := arr[2].(type) {
+		case int64:
+			retryUs = v
+		case float64:
+			retryUs = int64(v)
+		}
+		retryIn := time.Duration(retryUs) * time.Microsecond
 
 		if allowed {
 			return 0, nil
@@ -132,10 +139,10 @@ func (l *WindowLimiter) Release(ctx context.Context) error {
 }
 
 func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
-	nowMs := time.Now().UnixMilli()
-	windowMs := l.interval.Milliseconds()
-	if windowMs < 1 {
-		windowMs = 1
+	nowUs := time.Now().UnixMicro()
+	windowUs := l.interval.Microseconds()
+	if windowUs < 1 {
+		windowUs = 1
 	}
 
 	key := l.keyPrefix + ":" + l.name
@@ -147,7 +154,7 @@ func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	l.client.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%d", nowMs-windowMs))
+	l.client.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%d", nowUs-windowUs))
 
 	return l.limit - int(count), nil
 }
