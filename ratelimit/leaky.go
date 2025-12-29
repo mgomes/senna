@@ -155,12 +155,12 @@ func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
 	var lastDripMs int64
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
-			fmt.Sscanf(s, "%f", &level)
+			_, _ = fmt.Sscanf(s, "%f", &level)
 		}
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			fmt.Sscanf(s, "%d", &lastDripMs)
+			_, _ = fmt.Sscanf(s, "%d", &lastDripMs)
 		}
 	}
 	if lastDripMs == 0 {

@@ -127,7 +127,7 @@ func TestLeakyLimiter_Level(t *testing.T) {
 	}
 
 	for range 5 {
-		limiter.Acquire(ctx)
+		_, _ = limiter.Acquire(ctx)
 	}
 
 	level, err = limiter.Level(ctx)

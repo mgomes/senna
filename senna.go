@@ -38,7 +38,7 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 					RetryIn: waitTime,
 				}
 			}
-			defer limiter.Release(ctx)
+			defer func() { _ = limiter.Release(ctx) }()
 			return next(ctx, job)
 		}
 	}

@@ -37,7 +37,7 @@ func TestChain(t *testing.T) {
 	}
 
 	chained := Chain(m1, m2)(handler)
-	chained(context.Background(), NewJob("test", nil))
+	_ = chained(context.Background(), NewJob("test", nil))
 
 	expected := []string{"m1-before", "m2-before", "handler", "m2-after", "m1-after"}
 	if len(order) != len(expected) {
@@ -58,7 +58,7 @@ func TestChain_Empty(t *testing.T) {
 	}
 
 	chained := Chain()(handler)
-	chained(context.Background(), NewJob("test", nil))
+	_ = chained(context.Background(), NewJob("test", nil))
 
 	if !called {
 		t.Error("handler should be called with empty chain")
@@ -296,7 +296,7 @@ func TestMiddlewareChain_Concurrent(t *testing.T) {
 	done := make(chan struct{})
 	for range 100 {
 		go func() {
-			handler(context.Background(), NewJob("test", nil))
+			_ = handler(context.Background(), NewJob("test", nil))
 			done <- struct{}{}
 		}()
 	}

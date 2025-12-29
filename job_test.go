@@ -206,7 +206,7 @@ func TestJob_MarshalNilArgs(t *testing.T) {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 
-	if parsed.Args != nil && len(parsed.Args) != 0 {
+	if len(parsed.Args) != 0 {
 		t.Errorf("expected nil or empty args, got %v", parsed.Args)
 	}
 }

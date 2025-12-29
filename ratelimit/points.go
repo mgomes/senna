@@ -218,12 +218,12 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
-			fmt.Sscanf(s, "%f", &points)
+			_, _ = fmt.Sscanf(s, "%f", &points)
 		}
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			fmt.Sscanf(s, "%d", &lastRefillMs)
+			_, _ = fmt.Sscanf(s, "%d", &lastRefillMs)
 		}
 	}
 	if lastRefillMs == 0 {

@@ -77,7 +77,7 @@ func TestWorkerPool_Use(t *testing.T) {
 	}, nil)
 
 	job := NewJob("test_job", nil)
-	pool.process(context.Background(), job)
+	_, _ = pool.process(context.Background(), job)
 
 	expected := []string{"mw1", "mw2", "handler"}
 	if len(order) != len(expected) {
@@ -154,7 +154,7 @@ func TestWorkerPool_Process_SetsProcessedAt(t *testing.T) {
 	}
 
 	before := time.Now()
-	pool.process(context.Background(), job)
+	_, _ = pool.process(context.Background(), job)
 	after := time.Now()
 
 	if job.ProcessedAt == nil {
@@ -194,7 +194,7 @@ func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
 	for range 10 {
 		go func() {
 			job := NewJob("limited_job", nil)
-			pool.process(context.Background(), job)
+			_, _ = pool.process(context.Background(), job)
 			done <- struct{}{}
 		}()
 	}

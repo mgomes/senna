@@ -25,7 +25,7 @@ func newTestClient(t *testing.T) *redis.Client {
 		Addr: getRedisAddr(),
 	})
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 	})
 	return client
 }

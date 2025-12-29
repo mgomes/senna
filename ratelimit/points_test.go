@@ -151,7 +151,7 @@ func TestPointsLimiter_Refill(t *testing.T) {
 
 	// Exhaust all points (with a few extra to account for refilling during acquires)
 	for range 12 {
-		limiter.Acquire(ctx)
+		_, _ = limiter.Acquire(ctx)
 	}
 
 	waitTime, _ := limiter.Acquire(ctx)
@@ -192,7 +192,7 @@ func TestPointsLimiter_AvailablePoints(t *testing.T) {
 		t.Fatalf("expected 100 available, got %f", available)
 	}
 
-	limiter.AcquirePoints(ctx, 30)
+	_, _ = limiter.AcquirePoints(ctx, 30)
 
 	available, err = limiter.AvailablePoints(ctx)
 	if err != nil {

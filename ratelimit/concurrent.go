@@ -139,7 +139,7 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) er
 		}
 	}
 
-	defer l.Release(ctx)
+	defer func() { _ = l.Release(ctx) }()
 	return fn()
 }
 
@@ -148,7 +148,7 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		return 0, err
 	}
 
-	l.reclaim(ctx)
+	_, _ = l.reclaim(ctx)
 
 	deadline := time.Now().Add(l.waitTimeout)
 	tempLockID := l.generateLockID()

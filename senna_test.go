@@ -67,7 +67,7 @@ func TestWithinLimit_OverLimit(t *testing.T) {
 	})
 
 	for range 2 {
-		WithinLimit(limiter, func() error { return nil })
+		_ = WithinLimit(limiter, func() error { return nil })
 	}
 
 	err := WithinLimit(limiter, func() error { return nil })
@@ -89,7 +89,7 @@ func TestWithinLimitCtx_RespectsContext(t *testing.T) {
 		WaitTimeout: 5 * time.Second,
 	})
 
-	WithinLimitCtx(context.Background(), limiter, func() error { return nil })
+	_ = WithinLimitCtx(context.Background(), limiter, func() error { return nil })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -151,7 +151,7 @@ func TestRateLimitMiddleware_BlocksOverLimit(t *testing.T) {
 	})
 
 	job := NewJob("test_job", nil)
-	handler(context.Background(), job)
+	_ = handler(context.Background(), job)
 
 	err := handler(context.Background(), job)
 
@@ -213,7 +213,7 @@ func TestRateLimitMiddlewareWithReschedule_ReturnsRetryableError(t *testing.T) {
 	})
 
 	job := NewJob("test_job", nil)
-	handler(context.Background(), job)
+	_ = handler(context.Background(), job)
 
 	err := handler(context.Background(), job)
 
@@ -271,7 +271,7 @@ func TestRateLimitMiddleware_ConcurrentAccess(t *testing.T) {
 	for range 20 {
 		go func() {
 			job := NewJob("test_job", nil)
-			handler(context.Background(), job)
+			_ = handler(context.Background(), job)
 			done <- struct{}{}
 		}()
 	}
@@ -323,7 +323,7 @@ func TestRateLimitMiddleware_PreservesJobContext(t *testing.T) {
 	})
 
 	job := NewJob("test_job", map[string]any{"key": "value"})
-	handler(context.Background(), job)
+	_ = handler(context.Background(), job)
 
 	if receivedJob == nil {
 		t.Fatal("job should be passed to handler")

@@ -22,7 +22,7 @@ func newTestRedisClient(t *testing.T) *redis.Client {
 		Addr: getTestRedisAddr(),
 	})
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 	})
 	return client
 }
@@ -48,7 +48,7 @@ func TestClient_New(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if client.Redis() == nil {
 		t.Error("Redis client should not be nil")
@@ -68,7 +68,7 @@ func TestClient_Enqueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	job, err := client.Enqueue(ctx, "send_email", map[string]any{
@@ -111,7 +111,7 @@ func TestClient_EnqueueWithQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	job, err := client.Enqueue(ctx, "process", nil, WithQueue("critical"))
@@ -145,7 +145,7 @@ func TestClient_EnqueueWithRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	job, err := client.Enqueue(ctx, "process", nil, WithRetry(5))
@@ -171,7 +171,7 @@ func TestClient_EnqueueIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	_, err = client.EnqueueIn(ctx, 5*time.Minute, "delayed_job", nil)
@@ -206,7 +206,7 @@ func TestClient_EnqueueAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	futureTime := time.Now().Add(time.Hour)
@@ -237,7 +237,7 @@ func TestClient_UniqueJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 
@@ -273,7 +273,7 @@ func TestClient_UniqueJobDifferentKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 
@@ -303,7 +303,7 @@ func TestClient_Batch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 
@@ -382,7 +382,7 @@ func TestClient_EncryptedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	job, err := client.Enqueue(ctx, "sensitive_job", map[string]any{
@@ -416,14 +416,14 @@ func TestClient_MultipleQueues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 
-	client.Enqueue(ctx, "job1", nil, WithQueue("critical"))
-	client.Enqueue(ctx, "job2", nil, WithQueue("critical"))
-	client.Enqueue(ctx, "job3", nil, WithQueue("default"))
-	client.Enqueue(ctx, "job4", nil, WithQueue("low"))
+	_, _ = client.Enqueue(ctx, "job1", nil, WithQueue("critical"))
+	_, _ = client.Enqueue(ctx, "job2", nil, WithQueue("critical"))
+	_, _ = client.Enqueue(ctx, "job3", nil, WithQueue("default"))
+	_, _ = client.Enqueue(ctx, "job4", nil, WithQueue("low"))
 
 	criticalLen, _ := redisClient.LLen(ctx, "test:queue:critical").Result()
 	defaultLen, _ := redisClient.LLen(ctx, "test:queue:default").Result()

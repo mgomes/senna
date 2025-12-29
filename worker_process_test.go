@@ -16,7 +16,7 @@ func TestWorker_New_DefaultSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	if worker.config.Settings.Concurrency != 10 {
 		t.Errorf("expected default Concurrency 10, got %d", worker.config.Settings.Concurrency)
@@ -44,7 +44,7 @@ func TestWorker_New_WithSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	if worker.config.Settings.Concurrency != 5 {
 		t.Errorf("expected Concurrency 5, got %d", worker.config.Settings.Concurrency)
@@ -72,7 +72,7 @@ func TestWorker_New_EncryptionEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	if worker.encryptor == nil {
 		t.Error("encryptor should be initialized")
@@ -106,7 +106,7 @@ func TestWorker_Register_WithOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	called := false
 	worker.Register("test_job", func(ctx context.Context, job *Job) error {
@@ -137,7 +137,7 @@ func TestWorker_Use_AddsMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	middlewareCalled := false
 	worker.Use(func(next Handler) Handler {
@@ -152,7 +152,7 @@ func TestWorker_Use_AddsMiddleware(t *testing.T) {
 	})
 
 	job := NewJob("test_job", nil)
-	worker.pool.process(context.Background(), job)
+	_, _ = worker.pool.process(context.Background(), job)
 
 	if !middlewareCalled {
 		t.Error("middleware should have been called")
@@ -168,11 +168,11 @@ func TestWorker_Redis_ReturnsClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	client := worker.Redis()
 	if client == nil {
-		t.Error("Redis() should return client")
+		t.Fatal("Redis() should return client")
 	}
 
 	err = client.Ping(context.Background()).Err()
@@ -261,7 +261,7 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	worker.Register("failing_job", func(ctx context.Context, job *Job) error {
 		return errors.New("job failed")
@@ -287,7 +287,7 @@ func TestWorker_ProcessJob_RetryableError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	worker.Register("retryable_job", func(ctx context.Context, job *Job) error {
 		return &RetryableError{
@@ -336,7 +336,7 @@ func TestWorker_MultipleHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	var job1Called, job2Called atomic.Bool
 
@@ -350,8 +350,8 @@ func TestWorker_MultipleHandlers(t *testing.T) {
 		return nil
 	})
 
-	worker.pool.process(context.Background(), NewJob("job_type_1", nil))
-	worker.pool.process(context.Background(), NewJob("job_type_2", nil))
+	_, _ = worker.pool.process(context.Background(), NewJob("job_type_1", nil))
+	_, _ = worker.pool.process(context.Background(), NewJob("job_type_2", nil))
 
 	if !job1Called.Load() {
 		t.Error("job_type_1 handler should have been called")
@@ -370,7 +370,7 @@ func TestWorker_UnknownJobType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	worker.Register("known_job", func(ctx context.Context, job *Job) error {
 		return nil
@@ -394,7 +394,7 @@ func TestWorker_MiddlewareOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer worker.redis.Close()
+	defer func() { _ = worker.redis.Close() }()
 
 	var order []string
 
@@ -421,7 +421,7 @@ func TestWorker_MiddlewareOrder(t *testing.T) {
 		return nil
 	})
 
-	worker.pool.process(context.Background(), NewJob("test_job", nil))
+	_, _ = worker.pool.process(context.Background(), NewJob("test_job", nil))
 
 	expected := []string{"mw1-before", "mw2-before", "handler", "mw2-after", "mw1-after"}
 	start := len(order) - len(expected)

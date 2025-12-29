@@ -23,7 +23,7 @@ func getRedisAddr() string {
 
 func flushKeys(t *testing.T, pattern string) {
 	client := redis.NewClient(&redis.Options{Addr: getRedisAddr()})
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
 	keys, err := client.Keys(ctx, pattern).Result()
@@ -45,7 +45,7 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	worker, err := senna.NewWorker(&senna.WorkerConfig{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
@@ -78,7 +78,7 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		worker.Run(ctx)
+		_ = worker.Run(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -119,7 +119,7 @@ func TestIntegration_ScheduledJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	worker, err := senna.NewWorker(&senna.WorkerConfig{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
@@ -146,7 +146,7 @@ func TestIntegration_ScheduledJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		worker.Run(ctx)
+		_ = worker.Run(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -191,7 +191,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	worker, err := senna.NewWorker(&senna.WorkerConfig{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
@@ -228,13 +228,13 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		worker.Run(ctx)
+		_ = worker.Run(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
 
 	for range 20 {
-		client.Enqueue(context.Background(), "rate_limited_job", nil)
+		_, _ = client.Enqueue(context.Background(), "rate_limited_job", nil)
 	}
 
 	time.Sleep(500 * time.Millisecond)
@@ -257,7 +257,7 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	worker, err := senna.NewWorker(&senna.WorkerConfig{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
@@ -297,13 +297,13 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		worker.Run(ctx)
+		_ = worker.Run(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
 
 	for range 50 {
-		client.Enqueue(context.Background(), "concurrent_job", nil)
+		_, _ = client.Enqueue(context.Background(), "concurrent_job", nil)
 	}
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -335,7 +335,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	worker, err := senna.NewWorker(&senna.WorkerConfig{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
@@ -369,13 +369,13 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		worker.Run(ctx)
+		_ = worker.Run(ctx)
 		close(done)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
 
-	client.Enqueue(context.Background(), "slow_job", nil)
+	_, _ = client.Enqueue(context.Background(), "slow_job", nil)
 
 	<-started
 

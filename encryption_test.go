@@ -8,7 +8,7 @@ import (
 
 func generateTestKey() []byte {
 	key := make([]byte, 32)
-	rand.Read(key)
+	_, _ = rand.Read(key)
 	return key
 }
 

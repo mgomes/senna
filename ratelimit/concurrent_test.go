@@ -33,7 +33,7 @@ func TestConcurrentLimiter_Basic(t *testing.T) {
 		if waitTime != 0 {
 			t.Fatalf("acquire %d should not wait", i)
 		}
-		acquired = append(acquired, func() { limiter.Release(ctx) })
+		acquired = append(acquired, func() { _ = limiter.Release(ctx) })
 	}
 
 	waitTime, _ := limiter.Acquire(ctx)
@@ -223,7 +223,7 @@ func TestConcurrentLimiter_Held(t *testing.T) {
 	}
 
 	for range 3 {
-		limiter.Acquire(ctx)
+		_, _ = limiter.Acquire(ctx)
 	}
 
 	held, err = limiter.Held(ctx)

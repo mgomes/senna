@@ -178,8 +178,8 @@ func TestFetcher_Fetch_ContextCanceled(t *testing.T) {
 	if elapsed > time.Second {
 		t.Errorf("fetch should have been canceled quickly, took %v", elapsed)
 	}
-	if err != nil && err != context.Canceled {
-	}
+	// err is expected to be nil or context.Canceled
+	_ = err
 }
 
 func TestFetcher_Ack_RemovesFromInFlight(t *testing.T) {
@@ -292,7 +292,7 @@ func TestFetcher_Nack_IncrementsRetryCount(t *testing.T) {
 
 	fetched, _ := f.Fetch(ctx, "worker-1")
 
-	f.Nack(ctx, "worker-1", fetched, time.Second)
+	_ = f.Nack(ctx, "worker-1", fetched, time.Second)
 
 	items, _ := client.ZRange(ctx, k.Retry(), 0, -1).Result()
 	if len(items) != 1 {
@@ -384,7 +384,7 @@ func TestFetcher_MoveToDead_SetsFailedAt(t *testing.T) {
 	fetched, _ := f.Fetch(ctx, "worker-1")
 
 	before := time.Now()
-	f.MoveToDead(ctx, "worker-1", fetched)
+	_ = f.MoveToDead(ctx, "worker-1", fetched)
 	after := time.Now()
 
 	items, _ := client.ZRange(ctx, k.Dead(), 0, -1).Result()
@@ -421,7 +421,7 @@ func TestFetcher_MoveToDead_CleansUniqueKey(t *testing.T) {
 
 	fetched, _ := f.Fetch(ctx, "worker-1")
 
-	f.MoveToDead(ctx, "worker-1", fetched)
+	_ = f.MoveToDead(ctx, "worker-1", fetched)
 
 	exists, _ := client.Exists(ctx, k.Unique(job.UniqueKey)).Result()
 	if exists != 0 {
