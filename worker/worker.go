@@ -193,11 +193,17 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 }
 
 func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
+	// If job is part of a batch, attach batch handle to context
+	if job.BatchID != "" {
+		bh := newBatchHandle(job.BatchID, w.redis, w.keys)
+		ctx = contextWithBatch(ctx, bh)
+	}
+
 	opts, err := w.pool.process(ctx, job)
 
 	if err == nil {
 		_ = w.fetcher.Ack(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, true)
+		w.updateBatchProgress(ctx, job, batchResultSuccess)
 		return
 	}
 
@@ -211,7 +217,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	if errors.As(err, &maxRetriesErr) {
 		job.Error = maxRetriesErr.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, false)
+		w.updateBatchProgress(ctx, job, batchResultDeath)
 		return
 	}
 
@@ -221,9 +227,8 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 		if opts.RetryBackoff != nil {
 			backoffFn = opts.RetryBackoff
 		}
-		if opts.MaxRetries > 0 {
-			maxRetries = opts.MaxRetries
-		}
+		// Use handler's MaxRetries setting (which defaults to 25 if not set)
+		maxRetries = opts.MaxRetries
 	}
 	backoff := backoffFn(job.RetryCount)
 	if job.RetryCount < maxRetries {
@@ -231,49 +236,89 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	} else {
 		job.Error = err.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, false)
+		w.updateBatchProgress(ctx, job, batchResultDeath)
 	}
 }
 
-func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, success bool) {
+// batchResult represents the result of a job completion.
+type batchResult string
+
+const (
+	batchResultSuccess batchResult = "success"
+	batchResultDeath   batchResult = "death"
+)
+
+// batchCallbackResult is the response from the batch_complete Lua script.
+type batchCallbackResult struct {
+	Callbacks        []batchCallback `json:"callbacks"`
+	Pending          int             `json:"pending"`
+	Successes        int             `json:"successes"`
+	Failures         int             `json:"failures"`
+	Dead             bool            `json:"dead"`
+	CallbackQueue    string          `json:"callback_queue"`
+	Error            string          `json:"error,omitempty"`
+	Invalidated      bool            `json:"invalidated,omitempty"`
+	AlreadyProcessed bool            `json:"already_processed,omitempty"`
+}
+
+type batchCallback struct {
+	CallbackType string         `json:"callback_type"`
+	JobType      string         `json:"job_type"`
+	Options      map[string]any `json:"options,omitempty"`
+}
+
+func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batchResult) {
 	if job.BatchID == "" {
 		return
 	}
 
-	w.redis.SRem(ctx, w.keys.BatchJobs(job.BatchID), job.ID)
-
-	remaining, _ := w.redis.SCard(ctx, w.keys.BatchJobs(job.BatchID)).Result()
-	if remaining > 0 {
-		return
+	keys := []string{
+		w.keys.Batch(job.BatchID),
+		w.keys.BatchJobs(job.BatchID),
+		w.keys.BatchFailed(job.BatchID),
+		w.keys.DeadBatches(),
 	}
 
-	batchData, err := w.redis.Get(ctx, w.keys.Batch(job.BatchID)).Result()
+	resultJSON, err := batchCompleteScript.Run(ctx, w.redis, keys, job.ID, string(result))
 	if err != nil {
+		slog.ErrorContext(ctx, "batch script failed", "error", err, "batch_id", job.BatchID)
 		return
 	}
 
-	var batch batchInfo
-	if err := json.Unmarshal([]byte(batchData), &batch); err != nil {
+	var callbackResult batchCallbackResult
+	if err := json.Unmarshal([]byte(resultJSON.(string)), &callbackResult); err != nil {
+		slog.ErrorContext(ctx, "failed to parse batch result", "error", err)
 		return
 	}
 
-	if batch.OnComplete != "" {
-		w.enqueueBatchCallback(ctx, batch.OnComplete, job.BatchID)
+	if callbackResult.Error != "" || callbackResult.Invalidated || callbackResult.AlreadyProcessed {
+		return
+	}
+
+	// Enqueue any callbacks that need to fire
+	queue := callbackResult.CallbackQueue
+	if queue == "" {
+		queue = "default"
+	}
+
+	for _, cb := range callbackResult.Callbacks {
+		w.enqueueBatchCallback(ctx, cb.JobType, job.BatchID, cb.Options, queue)
 	}
 }
 
-type batchInfo struct {
-	OnComplete string `json:"on_complete,omitempty"`
-	OnSuccess  string `json:"on_success,omitempty"`
-	OnDeath    string `json:"on_death,omitempty"`
-}
-
-func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID string) {
-	job := senna.NewJob(jobType, map[string]any{
+func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID string, options map[string]any, queue string) {
+	args := map[string]any{
 		"batch_id": batchID,
-	})
+	}
+	// Merge user-provided options into args
+	for k, v := range options {
+		args[k] = v
+	}
+
+	job := senna.NewJob(jobType, args)
+	job.Queue = queue
 	data, _ := job.Marshal()
-	w.redis.LPush(ctx, w.keys.Queue("default"), string(data))
+	w.redis.LPush(ctx, w.keys.Queue(queue), string(data))
 }
 
 func (w *Worker) heartbeat(ctx context.Context) {

@@ -6,16 +6,25 @@ import (
 	"github.com/mgomes/senna"
 )
 
-type Batch struct {
-	ID          string      `json:"id"`
-	Description string      `json:"description,omitempty"`
-	Jobs        []*senna.Job `json:"jobs"`
-	OnComplete  string      `json:"on_complete,omitempty"`
-	OnSuccess   string      `json:"on_success,omitempty"`
-	OnDeath     string      `json:"on_death,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
+// CallbackConfig holds configuration for a batch callback.
+type CallbackConfig struct {
+	JobType string         `json:"job_type"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
+// Batch represents a collection of jobs that can be monitored as a group.
+type Batch struct {
+	ID            string          `json:"id"`
+	Description   string          `json:"description,omitempty"`
+	Jobs          []*senna.Job    `json:"jobs"`
+	OnComplete    *CallbackConfig `json:"on_complete,omitempty"`
+	OnSuccess     *CallbackConfig `json:"on_success,omitempty"`
+	OnDeath       *CallbackConfig `json:"on_death,omitempty"`
+	CallbackQueue string          `json:"callback_queue,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// NewBatch creates a new batch with a unique ID.
 func NewBatch() *Batch {
 	return &Batch{
 		ID:        senna.NewJob("", nil).ID,
@@ -24,6 +33,13 @@ func NewBatch() *Batch {
 	}
 }
 
+// WithDescription sets an optional description for the batch.
+func (b *Batch) WithDescription(desc string) *Batch {
+	b.Description = desc
+	return b
+}
+
+// Add adds a job to the batch.
 func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) *Batch {
 	cfg := &enqueueConfig{
 		queue: "default",
@@ -40,17 +56,37 @@ func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) 
 	return b
 }
 
-func (b *Batch) OnCompleteCallback(jobType string) *Batch {
-	b.OnComplete = jobType
+// OnCompleteCallback sets the callback to fire when all jobs have executed
+// (whether successful or not).
+func (b *Batch) OnCompleteCallback(jobType string, options ...map[string]any) *Batch {
+	b.OnComplete = &CallbackConfig{JobType: jobType}
+	if len(options) > 0 {
+		b.OnComplete.Options = options[0]
+	}
 	return b
 }
 
-func (b *Batch) OnSuccessCallback(jobType string) *Batch {
-	b.OnSuccess = jobType
+// OnSuccessCallback sets the callback to fire when all jobs have completed successfully.
+func (b *Batch) OnSuccessCallback(jobType string, options ...map[string]any) *Batch {
+	b.OnSuccess = &CallbackConfig{JobType: jobType}
+	if len(options) > 0 {
+		b.OnSuccess.Options = options[0]
+	}
 	return b
 }
 
-func (b *Batch) OnDeathCallback(jobType string) *Batch {
-	b.OnDeath = jobType
+// OnDeathCallback sets the callback to fire the first time a batch job dies
+// (exhausts all retries).
+func (b *Batch) OnDeathCallback(jobType string, options ...map[string]any) *Batch {
+	b.OnDeath = &CallbackConfig{JobType: jobType}
+	if len(options) > 0 {
+		b.OnDeath.Options = options[0]
+	}
+	return b
+}
+
+// WithCallbackQueue sets the queue for callback jobs (defaults to "default").
+func (b *Batch) WithCallbackQueue(queue string) *Batch {
+	b.CallbackQueue = queue
 	return b
 }

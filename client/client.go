@@ -224,11 +224,51 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	pipe := c.redis.Pipeline()
 
-	batchData, err := json.Marshal(batch)
+	// Build batch state for tracking
+	state := &senna.BatchState{
+		ID:            batch.ID,
+		Description:   batch.Description,
+		Total:         len(batch.Jobs),
+		Pending:       len(batch.Jobs),
+		Failures:      0,
+		Successes:     0,
+		Dead:          false,
+		DeathFired:    false,
+		CompleteFired: false,
+		SuccessFired:  false,
+		CreatedAt:     batch.CreatedAt,
+		CallbackQueue: batch.CallbackQueue,
+	}
+
+	if batch.OnComplete != nil {
+		state.OnComplete = &senna.CallbackInfo{
+			JobType: batch.OnComplete.JobType,
+			Options: batch.OnComplete.Options,
+		}
+	}
+	if batch.OnSuccess != nil {
+		state.OnSuccess = &senna.CallbackInfo{
+			JobType: batch.OnSuccess.JobType,
+			Options: batch.OnSuccess.Options,
+		}
+	}
+	if batch.OnDeath != nil {
+		state.OnDeath = &senna.CallbackInfo{
+			JobType: batch.OnDeath.JobType,
+			Options: batch.OnDeath.Options,
+		}
+	}
+
+	batchData, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), 7*24*time.Hour)
+
+	// Store batch state with 30 day expiration (like Sidekiq)
+	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), 30*24*time.Hour)
+
+	// Add to batches set for iteration
+	pipe.SAdd(ctx, c.keys.Batches(), batch.ID)
 
 	for _, job := range batch.Jobs {
 		job.BatchID = batch.ID
@@ -244,4 +284,9 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+// BatchStatus returns the status of a batch.
+func (c *Client) BatchStatus(bid string) *senna.BatchStatus {
+	return senna.NewBatchStatus(c.redis, c.keys.Namespace(), bid)
 }
