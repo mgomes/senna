@@ -23,11 +23,6 @@ end
 
 local batch = cjson.decode(batch_data)
 
--- Check if batch is invalidated
-if batch.invalidated then
-    return '{"invalidated":true}'
-end
-
 -- Remove job from pending set
 local removed = redis.call('SREM', jobs_key, job_id)
 if removed == 0 then
@@ -35,33 +30,37 @@ if removed == 0 then
     return '{"already_processed":true}'
 end
 
--- Update counters based on result
 -- Track callbacks as simple strings to build JSON manually
 local callback_list = {}
 
+-- Update counters based on result
 if result_type == "success" then
     batch.successes = (batch.successes or 0) + 1
     batch.pending = (batch.pending or 1) - 1
 elseif result_type == "death" then
     batch.failures = (batch.failures or 0) + 1
     batch.pending = (batch.pending or 1) - 1
-    batch.dead = true
 
-    -- Track failed job ID
-    redis.call('SADD', failed_key, job_id)
+    -- Only track death state and fire callbacks if not invalidated
+    if not batch.invalidated then
+        batch.dead = true
 
-    -- Add to dead batches set (for iteration)
-    redis.call('SADD', dead_batches_key, batch.id)
+        -- Track failed job ID
+        redis.call('SADD', failed_key, job_id)
 
-    -- Fire death callback only once
-    if not batch.death_fired and batch.on_death then
-        batch.death_fired = true
-        local cb = '{"callback_type":"death","job_type":"' .. batch.on_death.job_type .. '"'
-        if batch.on_death.options then
-            cb = cb .. ',"options":' .. cjson.encode(batch.on_death.options)
+        -- Add to dead batches set (for iteration)
+        redis.call('SADD', dead_batches_key, batch.id)
+
+        -- Fire death callback only once
+        if not batch.death_fired and batch.on_death then
+            batch.death_fired = true
+            local cb = '{"callback_type":"death","job_type":"' .. batch.on_death.job_type .. '"'
+            if batch.on_death.options then
+                cb = cb .. ',"options":' .. cjson.encode(batch.on_death.options)
+            end
+            cb = cb .. '}'
+            table.insert(callback_list, cb)
         end
-        cb = cb .. '}'
-        table.insert(callback_list, cb)
     end
 end
 
@@ -79,8 +78,8 @@ if batch.pending == 0 and not batch.complete_fired then
         table.insert(callback_list, cb)
     end
 
-    -- Fire success callback only if no deaths
-    if not batch.dead and not batch.success_fired and batch.on_success then
+    -- Fire success callback only if no deaths and not invalidated
+    if not batch.dead and not batch.invalidated and not batch.success_fired and batch.on_success then
         batch.success_fired = true
         local cb = '{"callback_type":"success","job_type":"' .. batch.on_success.job_type .. '"'
         if batch.on_success.options then
@@ -101,6 +100,7 @@ result = result .. ',"pending":' .. (batch.pending or 0)
 result = result .. ',"successes":' .. (batch.successes or 0)
 result = result .. ',"failures":' .. (batch.failures or 0)
 result = result .. ',"dead":' .. (batch.dead and 'true' or 'false')
+result = result .. ',"invalidated":' .. (batch.invalidated and 'true' or 'false')
 result = result .. ',"callback_queue":"' .. (batch.callback_queue or 'default') .. '"}'
 
 return result

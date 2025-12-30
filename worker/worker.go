@@ -291,7 +291,7 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		return
 	}
 
-	if callbackResult.Error != "" || callbackResult.Invalidated || callbackResult.AlreadyProcessed {
+	if callbackResult.Error != "" || callbackResult.AlreadyProcessed {
 		return
 	}
 

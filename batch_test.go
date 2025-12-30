@@ -533,3 +533,119 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestBatch_InvalidatedBatchCompletes(t *testing.T) {
+	flushKeysBatch(t, "batch-invalidate:*")
+	flushKeysBatch(t, "senna:*")
+
+	c, err := client.New(&client.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-invalidate",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-invalidate",
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var jobsProcessed atomic.Int32
+	var completeCalled atomic.Bool
+	var successCalled atomic.Bool
+	invalidateOnce := sync.Once{}
+
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		// First job invalidates the batch
+		invalidateOnce.Do(func() {
+			batch := worker.BatchFromContext(ctx)
+			if batch != nil {
+				_ = batch.Invalidate(ctx)
+			}
+		})
+		jobsProcessed.Add(1)
+		return nil
+	})
+
+	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
+		completeCalled.Store(true)
+		return nil
+	})
+
+	w.Register("on_success", func(ctx context.Context, job *senna.Job) error {
+		successCalled.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = w.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	batch := client.NewBatch().
+		Add("batch_job", map[string]any{"id": 1}).
+		Add("batch_job", map[string]any{"id": 2}).
+		Add("batch_job", map[string]any{"id": 3}).
+		OnCompleteCallback("on_complete").
+		OnSuccessCallback("on_success")
+
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	// Use Join to wait for batch completion - this should return even though invalidated
+	status := c.BatchStatus(batch.ID)
+	joinCtx, joinCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer joinCancel()
+
+	err = status.Join(joinCtx)
+	if err != nil {
+		t.Errorf("Join() should return without error for invalidated batch, got: %v", err)
+	}
+
+	// Wait a bit for callbacks to fire
+	time.Sleep(200 * time.Millisecond)
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	// All jobs should have processed
+	if jobsProcessed.Load() != 3 {
+		t.Errorf("expected 3 jobs processed, got %d", jobsProcessed.Load())
+	}
+
+	// Complete callback should fire
+	if !completeCalled.Load() {
+		t.Error("complete callback should have been called for invalidated batch")
+	}
+
+	// Success callback should NOT fire (batch was invalidated)
+	if successCalled.Load() {
+		t.Error("success callback should NOT have been called for invalidated batch")
+	}
+
+	// Verify batch status shows complete
+	if err := status.Refresh(context.Background()); err != nil {
+		t.Fatalf("failed to refresh status: %v", err)
+	}
+	if !status.Complete() {
+		t.Error("batch should be marked as complete")
+	}
+	if status.Pending() != 0 {
+		t.Errorf("expected 0 pending, got %d", status.Pending())
+	}
+}
