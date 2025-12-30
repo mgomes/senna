@@ -1,7 +1,6 @@
-package senna
+package encryption
 
 import (
-	"context"
 	"crypto/rand"
 	"testing"
 )
@@ -14,7 +13,7 @@ func generateTestKey() []byte {
 
 func TestEncryptor_EncryptDecrypt(t *testing.T) {
 	key := generateTestKey()
-	enc, err := newEncryptor(key)
+	enc, err := New(key)
 	if err != nil {
 		t.Fatalf("failed to create encryptor: %v", err)
 	}
@@ -25,7 +24,7 @@ func TestEncryptor_EncryptDecrypt(t *testing.T) {
 		"card_number": "4111111111111111",
 	}
 
-	encrypted, err := enc.encrypt(original)
+	encrypted, err := enc.Encrypt(original)
 	if err != nil {
 		t.Fatalf("encrypt failed: %v", err)
 	}
@@ -38,7 +37,7 @@ func TestEncryptor_EncryptDecrypt(t *testing.T) {
 		t.Error("original keys should not exist in encrypted data")
 	}
 
-	decrypted, err := enc.decrypt(encrypted)
+	decrypted, err := enc.Decrypt(encrypted)
 	if err != nil {
 		t.Fatalf("decrypt failed: %v", err)
 	}
@@ -56,7 +55,7 @@ func TestEncryptor_EncryptDecrypt(t *testing.T) {
 
 func TestEncryptor_DecryptNonEncrypted(t *testing.T) {
 	key := generateTestKey()
-	enc, err := newEncryptor(key)
+	enc, err := New(key)
 	if err != nil {
 		t.Fatalf("failed to create encryptor: %v", err)
 	}
@@ -65,7 +64,7 @@ func TestEncryptor_DecryptNonEncrypted(t *testing.T) {
 		"key": "value",
 	}
 
-	result, err := enc.decrypt(plain)
+	result, err := enc.Decrypt(plain)
 	if err != nil {
 		t.Fatalf("decrypt non-encrypted should not fail: %v", err)
 	}
@@ -79,17 +78,17 @@ func TestEncryptor_DifferentKeys(t *testing.T) {
 	key1 := generateTestKey()
 	key2 := generateTestKey()
 
-	enc1, _ := newEncryptor(key1)
-	enc2, _ := newEncryptor(key2)
+	enc1, _ := New(key1)
+	enc2, _ := New(key2)
 
 	original := map[string]any{"secret": "data"}
 
-	encrypted, err := enc1.encrypt(original)
+	encrypted, err := enc1.Encrypt(original)
 	if err != nil {
 		t.Fatalf("encrypt failed: %v", err)
 	}
 
-	_, err = enc2.decrypt(encrypted)
+	_, err = enc2.Decrypt(encrypted)
 	if err == nil {
 		t.Error("decrypt with wrong key should fail")
 	}
@@ -97,12 +96,12 @@ func TestEncryptor_DifferentKeys(t *testing.T) {
 
 func TestEncryptor_UniqueNonces(t *testing.T) {
 	key := generateTestKey()
-	enc, _ := newEncryptor(key)
+	enc, _ := New(key)
 
 	data := map[string]any{"value": "same"}
 
-	encrypted1, _ := enc.encrypt(data)
-	encrypted2, _ := enc.encrypt(data)
+	encrypted1, _ := enc.Encrypt(data)
+	encrypted2, _ := enc.Encrypt(data)
 
 	if encrypted1["_encrypted"] == encrypted2["_encrypted"] {
 		t.Error("same plaintext should produce different ciphertext (unique nonces)")
@@ -111,16 +110,16 @@ func TestEncryptor_UniqueNonces(t *testing.T) {
 
 func TestEncryptor_EmptyArgs(t *testing.T) {
 	key := generateTestKey()
-	enc, _ := newEncryptor(key)
+	enc, _ := New(key)
 
 	empty := map[string]any{}
 
-	encrypted, err := enc.encrypt(empty)
+	encrypted, err := enc.Encrypt(empty)
 	if err != nil {
 		t.Fatalf("encrypt empty failed: %v", err)
 	}
 
-	decrypted, err := enc.decrypt(encrypted)
+	decrypted, err := enc.Decrypt(encrypted)
 	if err != nil {
 		t.Fatalf("decrypt empty failed: %v", err)
 	}
@@ -132,7 +131,7 @@ func TestEncryptor_EmptyArgs(t *testing.T) {
 
 func TestEncryptor_ComplexData(t *testing.T) {
 	key := generateTestKey()
-	enc, _ := newEncryptor(key)
+	enc, _ := New(key)
 
 	complex := map[string]any{
 		"string": "value",
@@ -148,12 +147,12 @@ func TestEncryptor_ComplexData(t *testing.T) {
 		},
 	}
 
-	encrypted, err := enc.encrypt(complex)
+	encrypted, err := enc.Encrypt(complex)
 	if err != nil {
 		t.Fatalf("encrypt complex failed: %v", err)
 	}
 
-	decrypted, err := enc.decrypt(encrypted)
+	decrypted, err := enc.Decrypt(encrypted)
 	if err != nil {
 		t.Fatalf("decrypt complex failed: %v", err)
 	}
@@ -177,7 +176,7 @@ func TestEncryptor_ComplexData(t *testing.T) {
 
 func TestEncryptor_InvalidKey(t *testing.T) {
 	shortKey := []byte("tooshort")
-	_, err := newEncryptor(shortKey)
+	_, err := New(shortKey)
 	if err == nil {
 		t.Error("should fail with invalid key length")
 	}
@@ -185,74 +184,17 @@ func TestEncryptor_InvalidKey(t *testing.T) {
 
 func TestEncryptor_TamperedData(t *testing.T) {
 	key := generateTestKey()
-	enc, _ := newEncryptor(key)
+	enc, _ := New(key)
 
 	original := map[string]any{"secret": "data"}
-	encrypted, _ := enc.encrypt(original)
+	encrypted, _ := enc.Encrypt(original)
 
 	ciphertext := encrypted["_encrypted"].(string)
 	tampered := ciphertext[:len(ciphertext)-5] + "XXXXX"
 	encrypted["_encrypted"] = tampered
 
-	_, err := enc.decrypt(encrypted)
+	_, err := enc.Decrypt(encrypted)
 	if err == nil {
 		t.Error("decrypt tampered data should fail")
-	}
-}
-
-func TestEncryptionMiddleware(t *testing.T) {
-	key := generateTestKey()
-
-	middleware, err := EncryptionMiddleware(key)
-	if err != nil {
-		t.Fatalf("failed to create middleware: %v", err)
-	}
-
-	enc, _ := newEncryptor(key)
-	originalArgs := map[string]any{"secret": "value"}
-	encryptedArgs, _ := enc.encrypt(originalArgs)
-
-	job := NewJob("test", encryptedArgs)
-	job.Encrypted = true
-
-	var decryptedJob *Job
-	handler := middleware(func(ctx context.Context, j *Job) error {
-		decryptedJob = j
-		return nil
-	})
-
-	err = handler(context.Background(), job)
-	if err != nil {
-		t.Fatalf("handler failed: %v", err)
-	}
-
-	if decryptedJob.Encrypted {
-		t.Error("job should be marked as decrypted")
-	}
-	if decryptedJob.Args["secret"] != "value" {
-		t.Errorf("expected secret 'value', got %v", decryptedJob.Args["secret"])
-	}
-}
-
-func TestEncryptionMiddleware_NonEncrypted(t *testing.T) {
-	key := generateTestKey()
-	middleware, _ := EncryptionMiddleware(key)
-
-	job := NewJob("test", map[string]any{"plain": "data"})
-	job.Encrypted = false
-
-	var passedJob *Job
-	handler := middleware(func(ctx context.Context, j *Job) error {
-		passedJob = j
-		return nil
-	})
-
-	err := handler(context.Background(), job)
-	if err != nil {
-		t.Fatalf("handler failed: %v", err)
-	}
-
-	if passedJob.Args["plain"] != "data" {
-		t.Errorf("expected plain 'data', got %v", passedJob.Args["plain"])
 	}
 }

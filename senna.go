@@ -43,9 +43,3 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 		}
 	}
 }
-
-func WithRateLimiter(limiter ratelimit.Limiter) JobOption {
-	return func(o *JobOptions) {
-		o.RateLimiter = limiter
-	}
-}

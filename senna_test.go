@@ -226,27 +226,6 @@ func TestRateLimitMiddlewareWithReschedule_ReturnsRetryableError(t *testing.T) {
 	}
 }
 
-func TestWithRateLimiter_SetsOption(t *testing.T) {
-	client := newTestRedisClient(t)
-
-	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-option",
-		Limit:    10,
-		Interval: time.Second,
-	})
-
-	opts := &JobOptions{}
-	opt := WithRateLimiter(limiter)
-	opt(opts)
-
-	if opts.RateLimiter == nil {
-		t.Error("RateLimiter should be set")
-	}
-	if opts.RateLimiter.Name() != "test-option" {
-		t.Errorf("expected limiter name 'test-option', got '%s'", opts.RateLimiter.Name())
-	}
-}
-
 func TestRateLimitMiddleware_ConcurrentAccess(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "senna:ratelimit:*")

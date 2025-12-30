@@ -1,4 +1,4 @@
-package senna
+package worker
 
 import (
 	"context"
@@ -6,18 +6,20 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mgomes/senna"
 )
 
 func TestWorkerPool_Register(t *testing.T) {
 	pool := newWorkerPool(5)
 
 	called := false
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		called = true
 		return nil
 	}, nil)
 
-	job := NewJob("test_job", nil)
+	job := senna.NewJob("test_job", nil)
 	_, err := pool.process(context.Background(), job)
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
@@ -35,11 +37,11 @@ func TestWorkerPool_Register_WithOptions(t *testing.T) {
 		Timeout:    time.Second,
 	}
 
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	}, opts)
 
-	job := NewJob("test_job", nil)
+	job := senna.NewJob("test_job", nil)
 	returnedOpts, err := pool.process(context.Background(), job)
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
@@ -57,26 +59,26 @@ func TestWorkerPool_Use(t *testing.T) {
 
 	var order []string
 
-	pool.Use(func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+	pool.Use(func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
 			order = append(order, "mw1")
 			return next(ctx, job)
 		}
 	})
 
-	pool.Use(func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+	pool.Use(func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
 			order = append(order, "mw2")
 			return next(ctx, job)
 		}
 	})
 
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		order = append(order, "handler")
 		return nil
 	}, nil)
 
-	job := NewJob("test_job", nil)
+	job := senna.NewJob("test_job", nil)
 	_, _ = pool.process(context.Background(), job)
 
 	expected := []string{"mw1", "mw2", "handler"}
@@ -94,12 +96,12 @@ func TestWorkerPool_Process_Success(t *testing.T) {
 	pool := newWorkerPool(5)
 
 	result := ""
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		result = job.Args["message"].(string)
 		return nil
 	}, nil)
 
-	job := NewJob("test_job", map[string]any{"message": "hello"})
+	job := senna.NewJob("test_job", map[string]any{"message": "hello"})
 	_, err := pool.process(context.Background(), job)
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
@@ -112,10 +114,10 @@ func TestWorkerPool_Process_Success(t *testing.T) {
 func TestWorkerPool_Process_JobNotFound(t *testing.T) {
 	pool := newWorkerPool(5)
 
-	job := NewJob("unknown_job", nil)
+	job := senna.NewJob("unknown_job", nil)
 	_, err := pool.process(context.Background(), job)
 
-	var notFoundErr *JobNotFoundError
+	var notFoundErr *senna.JobNotFoundError
 	if !errors.As(err, &notFoundErr) {
 		t.Fatalf("expected JobNotFoundError, got %T: %v", err, err)
 	}
@@ -128,12 +130,12 @@ func TestWorkerPool_Process_WithTimeout(t *testing.T) {
 		Timeout: 50 * time.Millisecond,
 	}
 
-	pool.Register("slow_job", func(ctx context.Context, job *Job) error {
+	pool.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
 		time.Sleep(500 * time.Millisecond)
 		return nil
 	}, opts)
 
-	job := NewJob("slow_job", nil)
+	job := senna.NewJob("slow_job", nil)
 	_, err := pool.process(context.Background(), job)
 
 	if err != context.DeadlineExceeded {
@@ -144,11 +146,11 @@ func TestWorkerPool_Process_WithTimeout(t *testing.T) {
 func TestWorkerPool_Process_SetsProcessedAt(t *testing.T) {
 	pool := newWorkerPool(5)
 
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	}, nil)
 
-	job := NewJob("test_job", nil)
+	job := senna.NewJob("test_job", nil)
 	if job.ProcessedAt != nil {
 		t.Error("ProcessedAt should be nil before processing")
 	}
@@ -175,7 +177,7 @@ func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
 	var maxConcurrent atomic.Int32
 	var currentConcurrent atomic.Int32
 
-	pool.Register("limited_job", func(ctx context.Context, job *Job) error {
+	pool.Register("limited_job", func(ctx context.Context, job *senna.Job) error {
 		current := currentConcurrent.Add(1)
 		defer currentConcurrent.Add(-1)
 
@@ -193,7 +195,7 @@ func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
 	done := make(chan struct{})
 	for range 10 {
 		go func() {
-			job := NewJob("limited_job", nil)
+			job := senna.NewJob("limited_job", nil)
 			_, _ = pool.process(context.Background(), job)
 			done <- struct{}{}
 		}()
@@ -215,7 +217,7 @@ func TestWorkerPool_Submit_Success(t *testing.T) {
 	pool.Start(ctx)
 	defer pool.Stop()
 
-	job := NewJob("test_job", nil)
+	job := senna.NewJob("test_job", nil)
 	ok := pool.Submit(job)
 	if !ok {
 		t.Error("Submit should return true")
@@ -226,10 +228,10 @@ func TestWorkerPool_Submit_ChannelFull(t *testing.T) {
 	pool := newWorkerPool(1)
 
 	for i := 0; i < pool.concurrency*2; i++ {
-		pool.Submit(NewJob("test", nil))
+		pool.Submit(senna.NewJob("test", nil))
 	}
 
-	ok := pool.Submit(NewJob("test", nil))
+	ok := pool.Submit(senna.NewJob("test", nil))
 	if ok {
 		t.Error("Submit should return false when channel is full")
 	}
@@ -245,7 +247,7 @@ func TestWorkerPool_SubmitWait_Success(t *testing.T) {
 		pool.Wait()
 	}()
 
-	job := NewJob("test_job", nil)
+	job := senna.NewJob("test_job", nil)
 	ok := pool.SubmitWait(ctx, job)
 	if !ok {
 		t.Error("SubmitWait should return true")
@@ -256,13 +258,13 @@ func TestWorkerPool_SubmitWait_ContextCanceled(t *testing.T) {
 	pool := newWorkerPool(1)
 
 	for i := 0; i < pool.concurrency*2; i++ {
-		pool.Submit(NewJob("test", nil))
+		pool.Submit(senna.NewJob("test", nil))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	ok := pool.SubmitWait(ctx, NewJob("test", nil))
+	ok := pool.SubmitWait(ctx, senna.NewJob("test", nil))
 	if ok {
 		t.Error("SubmitWait should return false when context is canceled")
 	}
@@ -273,7 +275,7 @@ func TestWorkerPool_Drain_CompletesGracefully(t *testing.T) {
 
 	var processed atomic.Int32
 
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		time.Sleep(50 * time.Millisecond)
 		processed.Add(1)
 		return nil
@@ -283,7 +285,7 @@ func TestWorkerPool_Drain_CompletesGracefully(t *testing.T) {
 	pool.Start(ctx)
 
 	for range 4 {
-		pool.Submit(NewJob("test_job", nil))
+		pool.Submit(senna.NewJob("test_job", nil))
 	}
 
 	pool.Stop()
@@ -304,7 +306,7 @@ func TestWorkerPool_Drain_CompletesGracefully(t *testing.T) {
 func TestWorkerPool_Drain_Timeout(t *testing.T) {
 	pool := newWorkerPool(1)
 
-	pool.Register("slow_job", func(ctx context.Context, job *Job) error {
+	pool.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
 		time.Sleep(5 * time.Second)
 		return nil
 	}, nil)
@@ -312,7 +314,7 @@ func TestWorkerPool_Drain_Timeout(t *testing.T) {
 	ctx := context.Background()
 	pool.Start(ctx)
 
-	pool.Submit(NewJob("slow_job", nil))
+	pool.Submit(senna.NewJob("slow_job", nil))
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -332,7 +334,7 @@ func TestWorkerPool_Wait(t *testing.T) {
 
 	var processed atomic.Int32
 
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		time.Sleep(50 * time.Millisecond)
 		processed.Add(1)
 		return nil
@@ -342,7 +344,7 @@ func TestWorkerPool_Wait(t *testing.T) {
 	pool.Start(ctx)
 
 	for range 4 {
-		pool.Submit(NewJob("test_job", nil))
+		pool.Submit(senna.NewJob("test_job", nil))
 	}
 
 	pool.Stop()
@@ -357,11 +359,11 @@ func TestWorkerPool_Process_ReturnsError(t *testing.T) {
 	pool := newWorkerPool(5)
 
 	expectedErr := errors.New("job failed")
-	pool.Register("failing_job", func(ctx context.Context, job *Job) error {
+	pool.Register("failing_job", func(ctx context.Context, job *senna.Job) error {
 		return expectedErr
 	}, nil)
 
-	job := NewJob("failing_job", nil)
+	job := senna.NewJob("failing_job", nil)
 	_, err := pool.process(context.Background(), job)
 
 	if err != expectedErr {
@@ -372,7 +374,7 @@ func TestWorkerPool_Process_ReturnsError(t *testing.T) {
 func TestWorkerPool_WorkerExitsOnContextCancel(t *testing.T) {
 	pool := newWorkerPool(2)
 
-	pool.Register("test_job", func(ctx context.Context, job *Job) error {
+	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	}, nil)
 
@@ -402,7 +404,7 @@ func TestWorkerPool_ConcurrentRegistration(t *testing.T) {
 	done := make(chan struct{})
 	for i := range 10 {
 		go func(id int) {
-			pool.Register("job_"+string(rune('a'+id)), func(ctx context.Context, job *Job) error {
+			pool.Register("job_"+string(rune('a'+id)), func(ctx context.Context, job *senna.Job) error {
 				return nil
 			}, nil)
 			done <- struct{}{}

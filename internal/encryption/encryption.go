@@ -1,7 +1,6 @@
-package senna
+package encryption
 
 import (
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -11,11 +10,11 @@ import (
 	"io"
 )
 
-type encryptor struct {
+type Encryptor struct {
 	gcm cipher.AEAD
 }
 
-func newEncryptor(key []byte) (*encryptor, error) {
+func New(key []byte) (*Encryptor, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
@@ -26,10 +25,10 @@ func newEncryptor(key []byte) (*encryptor, error) {
 		return nil, fmt.Errorf("create GCM: %w", err)
 	}
 
-	return &encryptor{gcm: gcm}, nil
+	return &Encryptor{gcm: gcm}, nil
 }
 
-func (e *encryptor) encrypt(args map[string]any) (map[string]any, error) {
+func (e *Encryptor) Encrypt(args map[string]any) (map[string]any, error) {
 	plaintext, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -48,7 +47,7 @@ func (e *encryptor) encrypt(args map[string]any) (map[string]any, error) {
 	}, nil
 }
 
-func (e *encryptor) decrypt(args map[string]any) (map[string]any, error) {
+func (e *Encryptor) Decrypt(args map[string]any) (map[string]any, error) {
 	encoded, ok := args["_encrypted"].(string)
 	if !ok {
 		return args, nil
@@ -76,24 +75,4 @@ func (e *encryptor) decrypt(args map[string]any) (map[string]any, error) {
 	}
 
 	return result, nil
-}
-
-func EncryptionMiddleware(key []byte) (Middleware, error) {
-	enc, err := newEncryptor(key)
-	if err != nil {
-		return nil, err
-	}
-	return func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
-			if job.Encrypted {
-				decrypted, err := enc.decrypt(job.Args)
-				if err != nil {
-					return fmt.Errorf("failed to decrypt job args: %w", err)
-				}
-				job.Args = decrypted
-				job.Encrypted = false
-			}
-			return next(ctx, job)
-		}
-	}, nil
 }

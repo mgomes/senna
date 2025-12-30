@@ -46,11 +46,12 @@ import (
     "time"
 
     "github.com/mgomes/senna"
+    "github.com/mgomes/senna/client"
 )
 
 func main() {
     // Create a client
-    client, err := senna.NewClient(&senna.ClientConfig{
+    c, err := client.New(&client.Config{
         Redis: senna.RedisConfig{
             Addr: "localhost:6379",
         },
@@ -59,12 +60,12 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    defer client.Close()
+    defer c.Close()
 
     ctx := context.Background()
 
     // Enqueue a job immediately
-    job, err := client.Enqueue(ctx, "send_email", map[string]any{
+    job, err := c.Enqueue(ctx, "send_email", map[string]any{
         "to":      "user@example.com",
         "subject": "Welcome!",
         "body":    "Thanks for signing up.",
@@ -75,7 +76,7 @@ func main() {
     log.Printf("Enqueued job: %s", job.ID)
 
     // Enqueue a job to run in 5 minutes
-    job, err = client.EnqueueIn(ctx, 5*time.Minute, "send_reminder", map[string]any{
+    job, err = c.EnqueueIn(ctx, 5*time.Minute, "send_reminder", map[string]any{
         "user_id": 123,
     })
     if err != nil {
@@ -84,16 +85,16 @@ func main() {
 
     // Enqueue a job to run at a specific time
     runAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-    job, err = client.EnqueueAt(ctx, runAt, "new_year_notification", nil)
+    job, err = c.EnqueueAt(ctx, runAt, "new_year_notification", nil)
     if err != nil {
         log.Fatal(err)
     }
 
     // Enqueue to a specific queue
-    job, err = client.Enqueue(ctx, "process_payment", map[string]any{
+    job, err = c.Enqueue(ctx, "process_payment", map[string]any{
         "order_id": 456,
         "amount":   99.99,
-    }, senna.WithQueue("critical"))
+    }, client.WithQueue("critical"))
     if err != nil {
         log.Fatal(err)
     }
@@ -114,11 +115,12 @@ import (
     "time"
 
     "github.com/mgomes/senna"
+    "github.com/mgomes/senna/worker"
 )
 
 func main() {
     // Create a worker
-    worker, err := senna.NewWorker(&senna.WorkerConfig{
+    w, err := worker.New(&worker.Config{
         Redis: senna.RedisConfig{
             Addr: "localhost:6379",
         },
@@ -139,7 +141,7 @@ func main() {
     }
 
     // Register job handlers
-    worker.Register("send_email", func(ctx context.Context, job *senna.Job) error {
+    w.Register("send_email", func(ctx context.Context, job *senna.Job) error {
         to := job.Args["to"].(string)
         subject := job.Args["subject"].(string)
         body := job.Args["body"].(string)
@@ -150,7 +152,7 @@ func main() {
         return nil
     })
 
-    worker.Register("process_payment", func(ctx context.Context, job *senna.Job) error {
+    w.Register("process_payment", func(ctx context.Context, job *senna.Job) error {
         orderID := int(job.Args["order_id"].(float64))
         amount := job.Args["amount"].(float64)
 
@@ -158,11 +160,11 @@ func main() {
         // ... payment logic ...
 
         return nil
-    }, senna.WithMaxRetries(3), senna.WithJobTimeout(30*time.Second))
+    }, worker.WithMaxRetries(3), worker.WithJobTimeout(30*time.Second))
 
     // Run the worker (blocks until shutdown signal)
     ctx := context.Background()
-    if err := worker.Run(ctx); err != nil {
+    if err := w.Run(ctx); err != nil {
         log.Fatal(err)
     }
 }
@@ -174,33 +176,33 @@ func main() {
 
 ```go
 // Send to a specific queue
-client.Enqueue(ctx, "job_type", args, senna.WithQueue("critical"))
+c.Enqueue(ctx, "job_type", args, client.WithQueue("critical"))
 
 // Set retry count
-client.Enqueue(ctx, "job_type", args, senna.WithRetry(5))
+c.Enqueue(ctx, "job_type", args, client.WithRetry(5))
 
 // Unique job (prevents duplicates)
-client.Enqueue(ctx, "sync_user", args,
-    senna.WithUniqueKey("user:123:sync", time.Hour))
+c.Enqueue(ctx, "sync_user", args,
+    client.WithUniqueKey("user:123:sync", time.Hour))
 
 // Encrypt job arguments
-client.Enqueue(ctx, "sensitive_job", args, senna.WithEncryption())
+c.Enqueue(ctx, "sensitive_job", args, client.WithEncryption())
 
 // Delay execution
-client.Enqueue(ctx, "job_type", args, senna.WithDelay(10*time.Minute))
+c.Enqueue(ctx, "job_type", args, client.WithDelay(10*time.Minute))
 ```
 
 ### Handler Options
 
 ```go
 // Limit retries
-worker.Register("job_type", handler, senna.WithMaxRetries(3))
+w.Register("job_type", handler, worker.WithMaxRetries(3))
 
 // Set job timeout
-worker.Register("job_type", handler, senna.WithJobTimeout(5*time.Minute))
+w.Register("job_type", handler, worker.WithJobTimeout(5*time.Minute))
 
 // Limit concurrent executions of this job type
-worker.Register("api_sync", handler, senna.WithMaxConcurrency(2))
+w.Register("api_sync", handler, worker.WithMaxConcurrency(2))
 ```
 
 ## Middleware
@@ -214,10 +216,10 @@ import "log/slog"
 
 // Logging middleware
 logger := slog.Default()
-worker.Use(senna.LoggingMiddleware(logger))
+w.Use(senna.LoggingMiddleware(logger))
 
 // Timeout middleware (applies to all jobs)
-worker.Use(senna.TimeoutMiddleware(5 * time.Minute))
+w.Use(senna.TimeoutMiddleware(5 * time.Minute))
 
 // Recovery middleware (automatically added)
 // Catches panics and converts them to errors
@@ -245,7 +247,7 @@ func MetricsMiddleware() senna.Middleware {
     }
 }
 
-worker.Use(MetricsMiddleware())
+w.Use(MetricsMiddleware())
 ```
 
 ## Rate Limiting
@@ -260,7 +262,7 @@ Fixed window rate limiting. Allows N requests per time interval.
 import "github.com/mgomes/senna/ratelimit"
 
 // Allow 100 requests per minute
-limiter := ratelimit.Bucket(worker.Redis(), ratelimit.BucketConfig{
+limiter := ratelimit.Bucket(w.Redis(), ratelimit.BucketConfig{
     Name:     "api-calls",
     Limit:    100,
     Interval: time.Minute,
@@ -268,7 +270,7 @@ limiter := ratelimit.Bucket(worker.Redis(), ratelimit.BucketConfig{
 })
 
 // Use as middleware
-worker.Use(senna.RateLimitMiddleware(limiter))
+w.Use(senna.RateLimitMiddleware(limiter))
 
 // Or use directly
 err := limiter.WithinLimit(ctx, func() error {
@@ -281,7 +283,7 @@ err := limiter.WithinLimit(ctx, func() error {
 More accurate rate limiting using a sliding time window.
 
 ```go
-limiter := ratelimit.Window(worker.Redis(), ratelimit.WindowConfig{
+limiter := ratelimit.Window(w.Redis(), ratelimit.WindowConfig{
     Name:     "api-calls",
     Limit:    100,
     Interval: time.Minute,
@@ -294,7 +296,7 @@ limiter := ratelimit.Window(worker.Redis(), ratelimit.WindowConfig{
 Smooths out bursts by draining requests at a constant rate.
 
 ```go
-limiter := ratelimit.Leaky(worker.Redis(), ratelimit.LeakyConfig{
+limiter := ratelimit.Leaky(w.Redis(), ratelimit.LeakyConfig{
     Name:      "notifications",
     Capacity:  50,            // Bucket size
     DrainTime: time.Second,   // Time to drain entire bucket
@@ -307,7 +309,7 @@ limiter := ratelimit.Leaky(worker.Redis(), ratelimit.LeakyConfig{
 Limits the number of concurrent operations (like a semaphore).
 
 ```go
-limiter := ratelimit.Concurrent(worker.Redis(), ratelimit.ConcurrentConfig{
+limiter := ratelimit.Concurrent(w.Redis(), ratelimit.ConcurrentConfig{
     Name:        "db-connections",
     Limit:       10,
     LockTimeout: 30 * time.Second, // Auto-release after this time
@@ -320,7 +322,7 @@ limiter := ratelimit.Concurrent(worker.Redis(), ratelimit.ConcurrentConfig{
 Variable cost rate limiting. Useful when different operations have different costs.
 
 ```go
-limiter := ratelimit.Points(worker.Redis(), ratelimit.PointsConfig{
+limiter := ratelimit.Points(w.Redis(), ratelimit.PointsConfig{
     Name:       "api-quota",
     Capacity:   1000,         // Total points
     RefillTime: time.Hour,    // Time to fully refill
@@ -342,14 +344,14 @@ err = limiter.WithinLimitCost(ctx, 1, func() error {
 Instead of failing jobs when rate limited, reschedule them:
 
 ```go
-limiter := ratelimit.Bucket(worker.Redis(), ratelimit.BucketConfig{
+limiter := ratelimit.Bucket(w.Redis(), ratelimit.BucketConfig{
     Name:     "external-api",
     Limit:    60,
     Interval: time.Minute,
 })
 
 // Jobs will be retried later instead of failing
-worker.Use(senna.RateLimitMiddlewareWithReschedule(limiter))
+w.Use(senna.RateLimitMiddlewareWithReschedule(limiter))
 ```
 
 ## Batch Jobs
@@ -358,17 +360,17 @@ Process related jobs as a group and get notified when all complete.
 
 ```go
 // Create a batch
-batch := senna.NewBatch().
+batch := client.NewBatch().
     Add("process_image", map[string]any{"image_id": 1}).
     Add("process_image", map[string]any{"image_id": 2}).
     Add("process_image", map[string]any{"image_id": 3}).
     OnCompleteCallback("batch_finished")
 
 // Enqueue the batch
-err := client.EnqueueBatch(ctx, batch)
+err := c.EnqueueBatch(ctx, batch)
 
 // Register the callback handler
-worker.Register("batch_finished", func(ctx context.Context, job *senna.Job) error {
+w.Register("batch_finished", func(ctx context.Context, job *senna.Job) error {
     batchID := job.Args["batch_id"].(string)
     fmt.Printf("Batch %s completed!\n", batchID)
     return nil
@@ -378,7 +380,7 @@ worker.Register("batch_finished", func(ctx context.Context, job *senna.Job) erro
 You can also set callbacks for success (all jobs succeeded) or death (any job failed permanently):
 
 ```go
-batch := senna.NewBatch().
+batch := client.NewBatch().
     Add("job1", nil).
     Add("job2", nil).
     OnCompleteCallback("on_complete").    // Always called
@@ -396,7 +398,7 @@ key := make([]byte, 32)
 // ... load key from secure storage ...
 
 // Client with encryption
-client, err := senna.NewClient(&senna.ClientConfig{
+c, err := client.New(&client.Config{
     Redis:     senna.RedisConfig{Addr: "localhost:6379"},
     Namespace: "myapp",
     Encryption: &senna.EncryptionSettings{
@@ -406,13 +408,13 @@ client, err := senna.NewClient(&senna.ClientConfig{
 })
 
 // Enqueue an encrypted job
-client.Enqueue(ctx, "process_pii", map[string]any{
+c.Enqueue(ctx, "process_pii", map[string]any{
     "ssn":         "123-45-6789",
     "card_number": "4111111111111111",
-}, senna.WithEncryption())
+}, client.WithEncryption())
 
 // Worker with encryption (uses same key)
-worker, err := senna.NewWorker(&senna.WorkerConfig{
+w, err := worker.New(&worker.Config{
     Redis:     senna.RedisConfig{Addr: "localhost:6379"},
     Namespace: "myapp",
     Encryption: &senna.EncryptionSettings{
@@ -422,7 +424,7 @@ worker, err := senna.NewWorker(&senna.WorkerConfig{
 })
 
 // Handler receives decrypted arguments
-worker.Register("process_pii", func(ctx context.Context, job *senna.Job) error {
+w.Register("process_pii", func(ctx context.Context, job *senna.Job) error {
     ssn := job.Args["ssn"].(string) // Already decrypted
     // ...
     return nil
@@ -435,14 +437,14 @@ Prevent duplicate jobs from being enqueued using a unique key:
 
 ```go
 // Only one sync job per user can be enqueued within the TTL
-_, err := client.Enqueue(ctx, "sync_user_data", map[string]any{
+_, err := c.Enqueue(ctx, "sync_user_data", map[string]any{
     "user_id": 123,
-}, senna.WithUniqueKey("sync:user:123", time.Hour))
+}, client.WithUniqueKey("sync:user:123", time.Hour))
 
 // Second enqueue with same key returns DuplicateJobError
-_, err = client.Enqueue(ctx, "sync_user_data", map[string]any{
+_, err = c.Enqueue(ctx, "sync_user_data", map[string]any{
     "user_id": 123,
-}, senna.WithUniqueKey("sync:user:123", time.Hour))
+}, client.WithUniqueKey("sync:user:123", time.Hour))
 
 if err != nil {
     var dupErr *senna.DuplicateJobError
@@ -490,7 +492,7 @@ senna.WorkerSettings{
 ### Client Settings
 
 ```go
-senna.ClientSettings{
+client.Settings{
     DefaultQueue: "default",  // Queue used when none specified
     DefaultRetry: 25,         // Default retry count
 }
@@ -511,13 +513,13 @@ You can use the retry middleware with custom backoff:
 ```go
 // Exponential backoff with max
 backoff := senna.ExponentialBackoff(time.Second, time.Hour)
-worker.Use(senna.RetryMiddleware(3, backoff))
+w.Use(senna.RetryMiddleware(3, backoff))
 ```
 
 ### Returning Errors
 
 ```go
-worker.Register("my_job", func(ctx context.Context, job *senna.Job) error {
+w.Register("my_job", func(ctx context.Context, job *senna.Job) error {
     // Return an error to trigger retry
     if err := doWork(); err != nil {
         return err // Will be retried with backoff

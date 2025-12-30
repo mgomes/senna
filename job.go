@@ -53,4 +53,12 @@ func UnmarshalJob(data []byte) (*Job, error) {
 	return &job, nil
 }
 
+func (j *Job) Raw() string {
+	return j.raw
+}
+
+func (j *Job) SetRaw(raw string) {
+	j.raw = raw
+}
+
 type Handler func(ctx context.Context, job *Job) error

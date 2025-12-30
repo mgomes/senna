@@ -1,4 +1,4 @@
-package senna
+package client
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -13,20 +15,32 @@ import (
 type Client struct {
 	redis     *redis.Client
 	keys      *keys.Keys
-	settings  ClientSettings
-	encryptor *encryptor
+	settings  Settings
+	encryptor *encryption.Encryptor
 }
 
-type ClientConfig struct {
-	Redis      RedisConfig
+type Config struct {
+	Redis      senna.RedisConfig
 	Namespace  string
-	Settings   ClientSettings
-	Encryption *EncryptionSettings
+	Settings   Settings
+	Encryption *senna.EncryptionSettings
 }
 
-func NewClient(cfg *ClientConfig) (*Client, error) {
+type Settings struct {
+	DefaultQueue string
+	DefaultRetry int
+}
+
+func DefaultSettings() Settings {
+	return Settings{
+		DefaultQueue: "default",
+		DefaultRetry: 25,
+	}
+}
+
+func New(cfg *Config) (*Client, error) {
 	if cfg.Settings.DefaultQueue == "" {
-		cfg.Settings = DefaultClientSettings()
+		cfg.Settings = DefaultSettings()
 	}
 
 	client := redis.NewClient(cfg.Redis.Options())
@@ -42,7 +56,7 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 	}
 
 	if cfg.Encryption != nil && cfg.Encryption.Enabled {
-		enc, err := newEncryptor(cfg.Encryption.Key)
+		enc, err := encryption.New(cfg.Encryption.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to init encryptor: %w", err)
 		}
@@ -116,7 +130,7 @@ func WithScheduleAt(t time.Time) EnqueueOption {
 	}
 }
 
-func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]any, opts ...EnqueueOption) (*Job, error) {
+func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	cfg := &enqueueConfig{
 		queue: c.settings.DefaultQueue,
 		retry: c.settings.DefaultRetry,
@@ -125,7 +139,7 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 		opt(cfg)
 	}
 
-	job := NewJob(jobType, args)
+	job := senna.NewJob(jobType, args)
 	job.Queue = cfg.queue
 	job.Retry = cfg.retry
 	job.BatchID = cfg.batchID
@@ -133,7 +147,7 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 	job.UniqueTTL = cfg.uniqueTTL
 
 	if cfg.encrypt && c.encryptor != nil {
-		encryptedArgs, err := c.encryptor.encrypt(args)
+		encryptedArgs, err := c.encryptor.Encrypt(args)
 		if err != nil {
 			return nil, err
 		}
@@ -150,7 +164,7 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 			return nil, err
 		}
 		if !ok {
-			return nil, &DuplicateJobError{UniqueKey: cfg.uniqueKey}
+			return nil, &senna.DuplicateJobError{UniqueKey: cfg.uniqueKey}
 		}
 	}
 
@@ -164,17 +178,17 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 	return c.enqueueNow(ctx, job)
 }
 
-func (c *Client) EnqueueIn(ctx context.Context, d time.Duration, jobType string, args map[string]any, opts ...EnqueueOption) (*Job, error) {
+func (c *Client) EnqueueIn(ctx context.Context, d time.Duration, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	opts = append(opts, WithDelay(d))
 	return c.Enqueue(ctx, jobType, args, opts...)
 }
 
-func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, args map[string]any, opts ...EnqueueOption) (*Job, error) {
+func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	opts = append(opts, WithScheduleAt(t))
 	return c.Enqueue(ctx, jobType, args, opts...)
 }
 
-func (c *Client) enqueueNow(ctx context.Context, job *Job) (*Job, error) {
+func (c *Client) enqueueNow(ctx context.Context, job *senna.Job) (*senna.Job, error) {
 	data, err := job.Marshal()
 	if err != nil {
 		return nil, err
@@ -191,7 +205,7 @@ func (c *Client) enqueueNow(ctx context.Context, job *Job) (*Job, error) {
 	return job, nil
 }
 
-func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *Job) (*Job, error) {
+func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*senna.Job, error) {
 	data, err := job.Marshal()
 	if err != nil {
 		return nil, err
@@ -230,53 +244,4 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 
 	_, err = pipe.Exec(ctx)
 	return err
-}
-
-type Batch struct {
-	ID          string
-	Description string
-	Jobs        []*Job
-	OnComplete  string
-	OnSuccess   string
-	OnDeath     string
-	CreatedAt   time.Time
-}
-
-func NewBatch() *Batch {
-	return &Batch{
-		ID:        NewJob("", nil).ID,
-		CreatedAt: time.Now(),
-		Jobs:      make([]*Job, 0),
-	}
-}
-
-func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) *Batch {
-	cfg := &enqueueConfig{
-		queue: "default",
-		retry: 25,
-	}
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
-	job := NewJob(jobType, args)
-	job.Queue = cfg.queue
-	job.Retry = cfg.retry
-	b.Jobs = append(b.Jobs, job)
-	return b
-}
-
-func (b *Batch) OnCompleteCallback(jobType string) *Batch {
-	b.OnComplete = jobType
-	return b
-}
-
-func (b *Batch) OnSuccessCallback(jobType string) *Batch {
-	b.OnSuccess = jobType
-	return b
-}
-
-func (b *Batch) OnDeathCallback(jobType string) *Batch {
-	b.OnDeath = jobType
-	return b
 }

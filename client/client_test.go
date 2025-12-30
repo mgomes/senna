@@ -1,4 +1,4 @@
-package senna
+package client
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgomes/senna"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -39,8 +40,8 @@ func flushTestKeys(t *testing.T, client *redis.Client, pattern string) {
 }
 
 func TestClient_New(t *testing.T) {
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -59,8 +60,8 @@ func TestClient_Enqueue(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -102,8 +103,8 @@ func TestClient_EnqueueWithQueue(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -136,8 +137,8 @@ func TestClient_EnqueueWithRetry(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -162,8 +163,8 @@ func TestClient_EnqueueIn(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -197,8 +198,8 @@ func TestClient_EnqueueAt(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -228,8 +229,8 @@ func TestClient_UniqueJob(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -250,12 +251,10 @@ func TestClient_UniqueJob(t *testing.T) {
 	_, err = client.Enqueue(ctx, "unique_job", nil,
 		WithUniqueKey("user:123:sync", time.Hour))
 
-	var dupErr *DuplicateJobError
 	if err == nil {
 		t.Fatal("expected DuplicateJobError for second enqueue")
 	}
-	if _, ok := err.(*DuplicateJobError); !ok {
-		_ = dupErr
+	if _, ok := err.(*senna.DuplicateJobError); !ok {
 		t.Fatalf("expected DuplicateJobError, got %T: %v", err, err)
 	}
 }
@@ -264,8 +263,8 @@ func TestClient_UniqueJobDifferentKeys(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -294,8 +293,8 @@ func TestClient_Batch(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
@@ -369,12 +368,12 @@ func TestClient_EncryptedJob(t *testing.T) {
 		key[i] = byte(i)
 	}
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
-		Encryption: &EncryptionSettings{
+		Encryption: &senna.EncryptionSettings{
 			Enabled: true,
 			Key:     key,
 		},
@@ -407,8 +406,8 @@ func TestClient_MultipleQueues(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
 
-	client, err := NewClient(&ClientConfig{
-		Redis: RedisConfig{
+	client, err := New(&Config{
+		Redis: senna.RedisConfig{
 			Addr: getTestRedisAddr(),
 		},
 		Namespace: "test",
