@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/client"
 	"github.com/mgomes/senna/ratelimit"
+	"github.com/mgomes/senna/worker"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -38,7 +40,7 @@ func flushKeys(t *testing.T, pattern string) {
 func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	flushKeys(t, "integration:*")
 
-	client, err := senna.NewClient(&senna.ClientConfig{
+	client, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration",
 	})
@@ -47,7 +49,7 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	worker, err := senna.NewWorker(&senna.WorkerConfig{
+	worker, err := worker.New(&worker.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration",
 		Settings: senna.WorkerSettings{
@@ -112,7 +114,7 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 func TestIntegration_ScheduledJob(t *testing.T) {
 	flushKeys(t, "integration-scheduled:*")
 
-	client, err := senna.NewClient(&senna.ClientConfig{
+	client, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-scheduled",
 	})
@@ -121,7 +123,7 @@ func TestIntegration_ScheduledJob(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	worker, err := senna.NewWorker(&senna.WorkerConfig{
+	worker, err := worker.New(&worker.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-scheduled",
 		Settings: senna.WorkerSettings{
@@ -184,7 +186,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 	flushKeys(t, "integration-ratelimit:*")
 	flushKeys(t, "senna:ratelimit:*")
 
-	client, err := senna.NewClient(&senna.ClientConfig{
+	client, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-ratelimit",
 	})
@@ -193,7 +195,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	worker, err := senna.NewWorker(&senna.WorkerConfig{
+	worker, err := worker.New(&worker.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-ratelimit",
 		Settings: senna.WorkerSettings{
@@ -250,7 +252,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 func TestIntegration_ConcurrentProcessing(t *testing.T) {
 	flushKeys(t, "integration-concurrent:*")
 
-	client, err := senna.NewClient(&senna.ClientConfig{
+	client, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-concurrent",
 	})
@@ -259,7 +261,7 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	worker, err := senna.NewWorker(&senna.WorkerConfig{
+	worker, err := worker.New(&worker.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-concurrent",
 		Settings: senna.WorkerSettings{
@@ -328,7 +330,7 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 func TestIntegration_GracefulShutdown(t *testing.T) {
 	flushKeys(t, "integration-shutdown:*")
 
-	client, err := senna.NewClient(&senna.ClientConfig{
+	client, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-shutdown",
 	})
@@ -337,7 +339,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	worker, err := senna.NewWorker(&senna.WorkerConfig{
+	worker, err := worker.New(&worker.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
 		Namespace: "integration-shutdown",
 		Settings: senna.WorkerSettings{

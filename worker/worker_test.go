@@ -1,4 +1,4 @@
-package senna
+package worker
 
 import (
 	"context"
@@ -6,36 +6,38 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mgomes/senna"
 )
 
 func TestWorker_New_DefaultSettings(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-default",
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	if worker.config.Settings.Concurrency != 10 {
-		t.Errorf("expected default Concurrency 10, got %d", worker.config.Settings.Concurrency)
+	if w.config.Settings.Concurrency != 10 {
+		t.Errorf("expected default Concurrency 10, got %d", w.config.Settings.Concurrency)
 	}
-	if len(worker.config.Settings.Queues) != 1 {
-		t.Fatalf("expected 1 default queue, got %d", len(worker.config.Settings.Queues))
+	if len(w.config.Settings.Queues) != 1 {
+		t.Fatalf("expected 1 default queue, got %d", len(w.config.Settings.Queues))
 	}
-	if worker.config.Settings.Queues[0].Name != "default" {
-		t.Errorf("expected default queue 'default', got '%s'", worker.config.Settings.Queues[0].Name)
+	if w.config.Settings.Queues[0].Name != "default" {
+		t.Errorf("expected default queue 'default', got '%s'", w.config.Settings.Queues[0].Name)
 	}
 }
 
 func TestWorker_New_WithSettings(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-settings",
-		Settings: WorkerSettings{
+		Settings: senna.WorkerSettings{
 			Concurrency:     5,
-			Queues:          []QueueConfig{{Name: "high", Priority: 10}, {Name: "low", Priority: 1}},
+			Queues:          []senna.QueueConfig{{Name: "high", Priority: 10}, {Name: "low", Priority: 1}},
 			ShutdownTimeout: time.Minute,
 			PollInterval:    50 * time.Millisecond,
 			HeartbeatRate:   time.Second,
@@ -44,13 +46,13 @@ func TestWorker_New_WithSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	if worker.config.Settings.Concurrency != 5 {
-		t.Errorf("expected Concurrency 5, got %d", worker.config.Settings.Concurrency)
+	if w.config.Settings.Concurrency != 5 {
+		t.Errorf("expected Concurrency 5, got %d", w.config.Settings.Concurrency)
 	}
-	if len(worker.config.Settings.Queues) != 2 {
-		t.Fatalf("expected 2 queues, got %d", len(worker.config.Settings.Queues))
+	if len(w.config.Settings.Queues) != 2 {
+		t.Fatalf("expected 2 queues, got %d", len(w.config.Settings.Queues))
 	}
 }
 
@@ -60,11 +62,11 @@ func TestWorker_New_EncryptionEnabled(t *testing.T) {
 		key[i] = byte(i)
 	}
 
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-enc",
-		Settings:  DefaultWorkerSettings(),
-		Encryption: &EncryptionSettings{
+		Settings:  senna.DefaultWorkerSettings(),
+		Encryption: &senna.EncryptionSettings{
 			Enabled: true,
 			Key:     key,
 		},
@@ -72,22 +74,22 @@ func TestWorker_New_EncryptionEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	if worker.encryptor == nil {
+	if w.encryptor == nil {
 		t.Error("encryptor should be initialized")
 	}
-	if len(worker.middleware) < 2 {
+	if len(w.middleware) < 2 {
 		t.Error("middleware should include encryption and recovery")
 	}
 }
 
 func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
-	_, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	_, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-invalid-enc",
-		Settings:  DefaultWorkerSettings(),
-		Encryption: &EncryptionSettings{
+		Settings:  senna.DefaultWorkerSettings(),
+		Encryption: &senna.EncryptionSettings{
 			Enabled: true,
 			Key:     []byte("tooshort"),
 		},
@@ -98,24 +100,24 @@ func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 }
 
 func TestWorker_Register_WithOptions(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-register",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
 	called := false
-	worker.Register("test_job", func(ctx context.Context, job *Job) error {
+	w.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		called = true
 		return nil
 	}, WithMaxRetries(3), WithJobTimeout(time.Second))
 
-	job := NewJob("test_job", nil)
-	opts, _ := worker.pool.process(context.Background(), job)
+	job := senna.NewJob("test_job", nil)
+	opts, _ := w.pool.process(context.Background(), job)
 
 	if !called {
 		t.Error("handler should have been called")
@@ -129,30 +131,30 @@ func TestWorker_Register_WithOptions(t *testing.T) {
 }
 
 func TestWorker_Use_AddsMiddleware(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-mw",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
 	middlewareCalled := false
-	worker.Use(func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+	w.Use(func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
 			middlewareCalled = true
 			return next(ctx, job)
 		}
 	})
 
-	worker.Register("test_job", func(ctx context.Context, job *Job) error {
+	w.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	})
 
-	job := NewJob("test_job", nil)
-	_, _ = worker.pool.process(context.Background(), job)
+	job := senna.NewJob("test_job", nil)
+	_, _ = w.pool.process(context.Background(), job)
 
 	if !middlewareCalled {
 		t.Error("middleware should have been called")
@@ -160,17 +162,17 @@ func TestWorker_Use_AddsMiddleware(t *testing.T) {
 }
 
 func TestWorker_Redis_ReturnsClient(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-worker-redis",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	client := worker.Redis()
+	client := w.Redis()
 	if client == nil {
 		t.Fatal("Redis() should return client")
 	}
@@ -235,7 +237,7 @@ func TestWorker_JobOptions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := &JobOptions{
 				MaxRetries:   25,
-				RetryBackoff: DefaultBackoff(),
+				RetryBackoff: senna.DefaultBackoff(),
 			}
 			tt.option(opts)
 			tt.validate(t, opts)
@@ -244,15 +246,15 @@ func TestWorker_JobOptions(t *testing.T) {
 }
 
 func TestWorker_ProcessJob_HandlerError(t *testing.T) {
-	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "test-process-error:*")
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-process-error:*")
 
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-process-error",
-		Settings: WorkerSettings{
+		Settings: senna.WorkerSettings{
 			Concurrency:     1,
-			Queues:          []QueueConfig{{Name: "default", Priority: 1}},
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
 			ShutdownTimeout: time.Second,
 			PollInterval:    50 * time.Millisecond,
 			HeartbeatRate:   time.Second,
@@ -261,14 +263,14 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	worker.Register("failing_job", func(ctx context.Context, job *Job) error {
+	w.Register("failing_job", func(ctx context.Context, job *senna.Job) error {
 		return errors.New("job failed")
 	}, WithMaxRetries(1))
 
-	job := NewJob("failing_job", nil)
-	opts, err := worker.pool.process(context.Background(), job)
+	job := senna.NewJob("failing_job", nil)
+	opts, err := w.pool.process(context.Background(), job)
 
 	if err == nil {
 		t.Error("expected error from handler")
@@ -279,28 +281,28 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 }
 
 func TestWorker_ProcessJob_RetryableError(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-process-retry",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	worker.Register("retryable_job", func(ctx context.Context, job *Job) error {
-		return &RetryableError{
+	w.Register("retryable_job", func(ctx context.Context, job *senna.Job) error {
+		return &senna.RetryableError{
 			Job:     job,
 			Cause:   errors.New("temporary failure"),
 			RetryIn: 5 * time.Second,
 		}
 	})
 
-	job := NewJob("retryable_job", nil)
-	_, err = worker.pool.process(context.Background(), job)
+	job := senna.NewJob("retryable_job", nil)
+	_, err = w.pool.process(context.Background(), job)
 
-	var retryErr *RetryableError
+	var retryErr *senna.RetryableError
 	if !errors.As(err, &retryErr) {
 		t.Fatalf("expected RetryableError, got %T: %v", err, err)
 	}
@@ -310,7 +312,7 @@ func TestWorker_ProcessJob_RetryableError(t *testing.T) {
 }
 
 func TestWorker_DefaultBackoff(t *testing.T) {
-	backoff := DefaultBackoff()
+	backoff := senna.DefaultBackoff()
 
 	d0 := backoff(0)
 	d1 := backoff(1)
@@ -328,30 +330,30 @@ func TestWorker_DefaultBackoff(t *testing.T) {
 }
 
 func TestWorker_MultipleHandlers(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-multi-handler",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
 	var job1Called, job2Called atomic.Bool
 
-	worker.Register("job_type_1", func(ctx context.Context, job *Job) error {
+	w.Register("job_type_1", func(ctx context.Context, job *senna.Job) error {
 		job1Called.Store(true)
 		return nil
 	})
 
-	worker.Register("job_type_2", func(ctx context.Context, job *Job) error {
+	w.Register("job_type_2", func(ctx context.Context, job *senna.Job) error {
 		job2Called.Store(true)
 		return nil
 	})
 
-	_, _ = worker.pool.process(context.Background(), NewJob("job_type_1", nil))
-	_, _ = worker.pool.process(context.Background(), NewJob("job_type_2", nil))
+	_, _ = w.pool.process(context.Background(), senna.NewJob("job_type_1", nil))
+	_, _ = w.pool.process(context.Background(), senna.NewJob("job_type_2", nil))
 
 	if !job1Called.Load() {
 		t.Error("job_type_1 handler should have been called")
@@ -362,44 +364,44 @@ func TestWorker_MultipleHandlers(t *testing.T) {
 }
 
 func TestWorker_UnknownJobType(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-unknown-job",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
-	worker.Register("known_job", func(ctx context.Context, job *Job) error {
+	w.Register("known_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	})
 
-	job := NewJob("unknown_job", nil)
-	_, err = worker.pool.process(context.Background(), job)
+	job := senna.NewJob("unknown_job", nil)
+	_, err = w.pool.process(context.Background(), job)
 
-	var notFoundErr *JobNotFoundError
+	var notFoundErr *senna.JobNotFoundError
 	if !errors.As(err, &notFoundErr) {
 		t.Fatalf("expected JobNotFoundError, got %T: %v", err, err)
 	}
 }
 
 func TestWorker_MiddlewareOrder(t *testing.T) {
-	worker, err := NewWorker(&WorkerConfig{
-		Redis:     RedisConfig{Addr: getTestRedisAddr()},
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
 		Namespace: "test-mw-order",
-		Settings:  DefaultWorkerSettings(),
+		Settings:  senna.DefaultWorkerSettings(),
 	})
 	if err != nil {
 		t.Fatalf("failed to create worker: %v", err)
 	}
-	defer func() { _ = worker.redis.Close() }()
+	defer func() { _ = w.redis.Close() }()
 
 	var order []string
 
-	worker.Use(func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+	w.Use(func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
 			order = append(order, "mw1-before")
 			err := next(ctx, job)
 			order = append(order, "mw1-after")
@@ -407,8 +409,8 @@ func TestWorker_MiddlewareOrder(t *testing.T) {
 		}
 	})
 
-	worker.Use(func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+	w.Use(func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
 			order = append(order, "mw2-before")
 			err := next(ctx, job)
 			order = append(order, "mw2-after")
@@ -416,12 +418,12 @@ func TestWorker_MiddlewareOrder(t *testing.T) {
 		}
 	})
 
-	worker.Register("test_job", func(ctx context.Context, job *Job) error {
+	w.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		order = append(order, "handler")
 		return nil
 	})
 
-	_, _ = worker.pool.process(context.Background(), NewJob("test_job", nil))
+	_, _ = w.pool.process(context.Background(), senna.NewJob("test_job", nil))
 
 	expected := []string{"mw1-before", "mw2-before", "handler", "mw2-after", "mw1-after"}
 	start := len(order) - len(expected)

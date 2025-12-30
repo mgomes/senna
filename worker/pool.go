@@ -1,31 +1,32 @@
-package senna
+package worker
 
 import (
 	"context"
 	"sync"
 	"time"
 
+	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/ratelimit"
 )
 
 type workerPool struct {
 	concurrency int
 	handlers    map[string]handlerEntry
-	middleware  []Middleware
-	jobs        chan *Job
+	middleware  []senna.Middleware
+	jobs        chan *senna.Job
 	wg          sync.WaitGroup
 	mu          sync.RWMutex
 }
 
 type handlerEntry struct {
-	handler Handler
+	handler senna.Handler
 	options *JobOptions
 	sema    chan struct{}
 }
 
 type JobOptions struct {
 	MaxRetries     int
-	RetryBackoff   BackoffFunc
+	RetryBackoff   senna.BackoffFunc
 	Timeout        time.Duration
 	MaxConcurrency int
 	Unique         *UniqueConfig
@@ -41,11 +42,11 @@ func newWorkerPool(concurrency int) *workerPool {
 	return &workerPool{
 		concurrency: concurrency,
 		handlers:    make(map[string]handlerEntry),
-		jobs:        make(chan *Job, concurrency*2),
+		jobs:        make(chan *senna.Job, concurrency*2),
 	}
 }
 
-func (p *workerPool) Register(jobType string, handler Handler, opts *JobOptions) {
+func (p *workerPool) Register(jobType string, handler senna.Handler, opts *JobOptions) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -61,7 +62,7 @@ func (p *workerPool) Register(jobType string, handler Handler, opts *JobOptions)
 	}
 }
 
-func (p *workerPool) Use(mw ...Middleware) {
+func (p *workerPool) Use(mw ...senna.Middleware) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.middleware = append(p.middleware, mw...)
@@ -90,26 +91,26 @@ func (p *workerPool) worker(ctx context.Context, id int) {
 	}
 }
 
-func (p *workerPool) process(ctx context.Context, job *Job) (*JobOptions, error) {
+func (p *workerPool) process(ctx context.Context, job *senna.Job) (*JobOptions, error) {
 	p.mu.RLock()
 	entry, ok := p.handlers[job.Type]
 	middleware := p.middleware
 	p.mu.RUnlock()
 
 	if !ok {
-		return nil, &JobNotFoundError{JobID: job.ID}
+		return nil, &senna.JobNotFoundError{JobID: job.ID}
 	}
 
 	handler := entry.handler
 	if entry.options != nil && entry.options.Timeout > 0 {
-		handler = TimeoutMiddleware(entry.options.Timeout)(handler)
+		handler = senna.TimeoutMiddleware(entry.options.Timeout)(handler)
 	}
 	if entry.options != nil && entry.options.RateLimiter != nil {
-		handler = RateLimitMiddlewareWithReschedule(entry.options.RateLimiter)(handler)
+		handler = rateLimitMiddlewareWithReschedule(entry.options.RateLimiter)(handler)
 	}
 
 	if len(middleware) > 0 {
-		handler = Chain(middleware...)(handler)
+		handler = senna.Chain(middleware...)(handler)
 	}
 
 	if entry.sema != nil {
@@ -127,7 +128,7 @@ func (p *workerPool) process(ctx context.Context, job *Job) (*JobOptions, error)
 	return entry.options, handler(ctx, job)
 }
 
-func (p *workerPool) Submit(job *Job) bool {
+func (p *workerPool) Submit(job *senna.Job) bool {
 	select {
 	case p.jobs <- job:
 		return true
@@ -136,7 +137,7 @@ func (p *workerPool) Submit(job *Job) bool {
 	}
 }
 
-func (p *workerPool) SubmitWait(ctx context.Context, job *Job) bool {
+func (p *workerPool) SubmitWait(ctx context.Context, job *senna.Job) bool {
 	select {
 	case p.jobs <- job:
 		return true
@@ -165,5 +166,25 @@ func (p *workerPool) Drain(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func rateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) senna.Middleware {
+	return func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
+			waitTime, err := limiter.Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			if waitTime > 0 {
+				return &senna.RetryableError{
+					Job:     job,
+					Cause:   &ratelimit.OverLimitError{LimiterName: limiter.Name(), LimiterType: "unknown", RetryIn: waitTime},
+					RetryIn: waitTime,
+				}
+			}
+			defer func() { _ = limiter.Release(ctx) }()
+			return next(ctx, job)
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package senna
+package worker
 
 import (
 	"context"
@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -21,26 +23,26 @@ type Worker struct {
 	id         string
 	redis      *redis.Client
 	keys       *keys.Keys
-	config     *WorkerConfig
+	config     *Config
 	pool       *workerPool
 	fetcher    *fetcher
-	encryptor  *encryptor
-	middleware []Middleware
+	encryptor  *encryption.Encryptor
+	middleware []senna.Middleware
 	running    bool
 	mu         sync.RWMutex
 	stopCh     chan struct{}
 }
 
-type WorkerConfig struct {
-	Redis      RedisConfig
+type Config struct {
+	Redis      senna.RedisConfig
 	Namespace  string
-	Settings   WorkerSettings
-	Encryption *EncryptionSettings
+	Settings   senna.WorkerSettings
+	Encryption *senna.EncryptionSettings
 }
 
-func NewWorker(cfg *WorkerConfig) (*Worker, error) {
+func New(cfg *Config) (*Worker, error) {
 	if cfg.Settings.Concurrency == 0 {
-		cfg.Settings = DefaultWorkerSettings()
+		cfg.Settings = senna.DefaultWorkerSettings()
 	}
 
 	client := redis.NewClient(cfg.Redis.Options())
@@ -63,20 +65,17 @@ func NewWorker(cfg *WorkerConfig) (*Worker, error) {
 	}
 
 	if cfg.Encryption != nil && cfg.Encryption.Enabled {
-		enc, err := newEncryptor(cfg.Encryption.Key)
+		enc, err := encryption.New(cfg.Encryption.Key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to init encryptor: %w", err)
 		}
 		w.encryptor = enc
 
-		mw, err := EncryptionMiddleware(cfg.Encryption.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to init encryption middleware: %w", err)
-		}
+		mw := encryptionMiddleware(enc)
 		w.Use(mw)
 	}
 
-	w.Use(RecoveryMiddleware())
+	w.Use(senna.RecoveryMiddleware())
 
 	return w, nil
 }
@@ -93,10 +92,10 @@ func (w *Worker) Redis() *redis.Client {
 	return w.redis
 }
 
-func (w *Worker) Register(jobType string, handler Handler, opts ...JobOption) {
+func (w *Worker) Register(jobType string, handler senna.Handler, opts ...JobOption) {
 	jobOpts := &JobOptions{
 		MaxRetries:   25,
-		RetryBackoff: DefaultBackoff(),
+		RetryBackoff: senna.DefaultBackoff(),
 	}
 	for _, opt := range opts {
 		opt(jobOpts)
@@ -104,36 +103,7 @@ func (w *Worker) Register(jobType string, handler Handler, opts ...JobOption) {
 	w.pool.Register(jobType, handler, jobOpts)
 }
 
-type JobOption func(*JobOptions)
-
-func WithMaxRetries(n int) JobOption {
-	return func(o *JobOptions) {
-		o.MaxRetries = n
-	}
-}
-
-func WithJobTimeout(d time.Duration) JobOption {
-	return func(o *JobOptions) {
-		o.Timeout = d
-	}
-}
-
-func WithMaxConcurrency(n int) JobOption {
-	return func(o *JobOptions) {
-		o.MaxConcurrency = n
-	}
-}
-
-func WithUniqueJob(key string, ttl time.Duration) JobOption {
-	return func(o *JobOptions) {
-		o.Unique = &UniqueConfig{
-			Key: key,
-			TTL: ttl,
-		}
-	}
-}
-
-func (w *Worker) Use(mw ...Middleware) {
+func (w *Worker) Use(mw ...senna.Middleware) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.middleware = append(w.middleware, mw...)
@@ -191,6 +161,10 @@ func (w *Worker) Stop() {
 	close(w.stopCh)
 }
 
+func (w *Worker) Close() error {
+	return w.redis.Close()
+}
+
 func (w *Worker) fetchLoop(ctx context.Context) {
 	for {
 		select {
@@ -218,7 +192,7 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 	}
 }
 
-func (w *Worker) processJob(ctx context.Context, job *Job) {
+func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	opts, err := w.pool.process(ctx, job)
 
 	if err == nil {
@@ -227,13 +201,13 @@ func (w *Worker) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	var retryErr *RetryableError
+	var retryErr *senna.RetryableError
 	if errors.As(err, &retryErr) {
 		_ = w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
 		return
 	}
 
-	var maxRetriesErr *MaxRetriesExceededError
+	var maxRetriesErr *senna.MaxRetriesExceededError
 	if errors.As(err, &maxRetriesErr) {
 		job.Error = maxRetriesErr.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
@@ -241,7 +215,7 @@ func (w *Worker) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	backoffFn := DefaultBackoff()
+	backoffFn := senna.DefaultBackoff()
 	maxRetries := job.Retry
 	if opts != nil {
 		if opts.RetryBackoff != nil {
@@ -261,7 +235,7 @@ func (w *Worker) processJob(ctx context.Context, job *Job) {
 	}
 }
 
-func (w *Worker) updateBatchProgress(ctx context.Context, job *Job, success bool) {
+func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, success bool) {
 	if job.BatchID == "" {
 		return
 	}
@@ -278,7 +252,7 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *Job, success bool
 		return
 	}
 
-	var batch Batch
+	var batch batchInfo
 	if err := json.Unmarshal([]byte(batchData), &batch); err != nil {
 		return
 	}
@@ -288,8 +262,14 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *Job, success bool
 	}
 }
 
+type batchInfo struct {
+	OnComplete string `json:"on_complete,omitempty"`
+	OnSuccess  string `json:"on_success,omitempty"`
+	OnDeath    string `json:"on_death,omitempty"`
+}
+
 func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID string) {
-	job := NewJob(jobType, map[string]any{
+	job := senna.NewJob(jobType, map[string]any{
 		"batch_id": batchID,
 	})
 	data, _ := job.Marshal()
@@ -358,7 +338,7 @@ func (w *Worker) enqueueScheduled(ctx context.Context) {
 				continue
 			}
 
-			var job Job
+			var job senna.Job
 			if err := json.Unmarshal([]byte(data), &job); err != nil {
 				continue
 			}
@@ -391,7 +371,7 @@ func (w *Worker) enqueueRetries(ctx context.Context) {
 				continue
 			}
 
-			var job Job
+			var job senna.Job
 			if err := json.Unmarshal([]byte(data), &job); err != nil {
 				continue
 			}
@@ -427,12 +407,12 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 	}
 
 	pattern := w.keys.InFlight("*")
-	keys, err := w.redis.Keys(ctx, pattern).Result()
+	foundKeys, err := w.redis.Keys(ctx, pattern).Result()
 	if err != nil {
 		return
 	}
 
-	for _, key := range keys {
+	for _, key := range foundKeys {
 		workerID := key[len(w.keys.InFlight(""))+1:]
 		if activeWorkers[workerID] {
 			continue
@@ -444,7 +424,7 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 		}
 
 		for _, data := range jobs {
-			var job Job
+			var job senna.Job
 			if err := json.Unmarshal([]byte(data), &job); err != nil {
 				continue
 			}
@@ -452,5 +432,21 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 		}
 
 		w.redis.Del(ctx, key)
+	}
+}
+
+func encryptionMiddleware(enc *encryption.Encryptor) senna.Middleware {
+	return func(next senna.Handler) senna.Handler {
+		return func(ctx context.Context, job *senna.Job) error {
+			if job.Encrypted {
+				decrypted, err := enc.Decrypt(job.Args)
+				if err != nil {
+					return fmt.Errorf("failed to decrypt job args: %w", err)
+				}
+				job.Args = decrypted
+				job.Encrypted = false
+			}
+			return next(ctx, job)
+		}
 	}
 }

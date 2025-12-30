@@ -1,4 +1,4 @@
-package senna
+package worker
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -13,12 +14,12 @@ import (
 type fetcher struct {
 	client       *redis.Client
 	keys         *keys.Keys
-	queues       []QueueConfig
+	queues       []senna.QueueConfig
 	pollInterval time.Duration
 	totalWeight  int
 }
 
-func newFetcher(client *redis.Client, k *keys.Keys, queues []QueueConfig, pollInterval time.Duration) *fetcher {
+func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, pollInterval time.Duration) *fetcher {
 	var totalWeight int
 	for _, q := range queues {
 		if q.Priority < 1 {
@@ -59,7 +60,7 @@ func (f *fetcher) selectQueue() string {
 	return ""
 }
 
-func (f *fetcher) Fetch(ctx context.Context, workerID string) (*Job, error) {
+func (f *fetcher) Fetch(ctx context.Context, workerID string) (*senna.Job, error) {
 	queueName := f.selectQueue()
 	if queueName == "" {
 		return nil, nil
@@ -68,12 +69,8 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*Job, error) {
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
 
-	// Use non-blocking pop to allow responsive context cancellation.
-	// Redis blocking operations (BRPOPLPUSH) have a minimum 1 second timeout,
-	// which prevents quick cancellation.
 	result, err := f.client.RPopLPush(ctx, queueKey, inFlightKey).Result()
 	if err == redis.Nil {
-		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -85,19 +82,19 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*Job, error) {
 		return nil, err
 	}
 
-	var job Job
+	var job senna.Job
 	if err := json.Unmarshal([]byte(result), &job); err != nil {
 		return nil, err
 	}
 
-	job.raw = result
+	job.SetRaw(result)
 	return &job, nil
 }
 
-func (f *fetcher) Ack(ctx context.Context, workerID string, job *Job) error {
+func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) error {
 	inFlightKey := f.keys.InFlight(workerID)
 
-	payload := job.raw
+	payload := job.Raw()
 	if payload == "" {
 		data, err := job.Marshal()
 		if err != nil {
@@ -117,10 +114,10 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *Job) error {
 	return nil
 }
 
-func (f *fetcher) Nack(ctx context.Context, workerID string, job *Job, retryIn time.Duration) error {
+func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, retryIn time.Duration) error {
 	inFlightKey := f.keys.InFlight(workerID)
 
-	payload := job.raw
+	payload := job.Raw()
 	if payload == "" {
 		data, err := job.Marshal()
 		if err != nil {
@@ -149,10 +146,10 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *Job, retryIn t
 	return nil
 }
 
-func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *Job) error {
+func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Job) error {
 	inFlightKey := f.keys.InFlight(workerID)
 
-	payload := job.raw
+	payload := job.Raw()
 	if payload == "" {
 		data, err := job.Marshal()
 		if err != nil {
