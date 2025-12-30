@@ -534,6 +534,96 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
+	flushKeysBatch(t, "batch-empty:*")
+	flushKeysBatch(t, "senna:*")
+
+	c, err := client.New(&client.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-empty",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-empty",
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var completeCalled atomic.Bool
+	var successCalled atomic.Bool
+
+	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
+		completeCalled.Store(true)
+		return nil
+	})
+
+	w.Register("on_success", func(ctx context.Context, job *senna.Job) error {
+		successCalled.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = w.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Create an empty batch with callbacks
+	batch := client.NewBatch().
+		WithDescription("Empty batch test").
+		OnCompleteCallback("on_complete").
+		OnSuccessCallback("on_success")
+
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	// Batch should be immediately complete
+	status := c.BatchStatus(batch.ID)
+	if err := status.Refresh(ctx); err != nil {
+		t.Fatalf("failed to refresh status: %v", err)
+	}
+	if !status.Complete() {
+		t.Error("empty batch should be immediately complete")
+	}
+	if status.Pending() != 0 {
+		t.Errorf("expected 0 pending, got %d", status.Pending())
+	}
+
+	// Wait for callbacks to be processed
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if completeCalled.Load() && successCalled.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if !completeCalled.Load() {
+		t.Error("complete callback should have been called for empty batch")
+	}
+	if !successCalled.Load() {
+		t.Error("success callback should have been called for empty batch")
+	}
+}
+
 func TestBatch_InvalidatedBatchCompletes(t *testing.T) {
 	flushKeysBatch(t, "batch-invalidate:*")
 	flushKeysBatch(t, "senna:*")

@@ -224,6 +224,9 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	pipe := c.redis.Pipeline()
 
+	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
+	emptyBatch := len(batch.Jobs) == 0
+
 	// Build batch state for tracking
 	state := &senna.BatchState{
 		ID:            batch.ID,
@@ -234,8 +237,8 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		Successes:     0,
 		Dead:          false,
 		DeathFired:    false,
-		CompleteFired: false,
-		SuccessFired:  false,
+		CompleteFired: emptyBatch,
+		SuccessFired:  emptyBatch,
 		CreatedAt:     batch.CreatedAt,
 		CallbackQueue: batch.CallbackQueue,
 	}
@@ -283,7 +286,48 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	}
 
 	_, err = pipe.Exec(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// For empty batches, immediately enqueue callbacks
+	if emptyBatch {
+		c.enqueueEmptyBatchCallbacks(ctx, batch)
+	}
+
+	return nil
+}
+
+// enqueueEmptyBatchCallbacks enqueues callbacks for empty batches immediately.
+func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, batch *Batch) {
+	queue := batch.CallbackQueue
+	if queue == "" {
+		queue = c.settings.DefaultQueue
+	}
+
+	// OnComplete always fires for empty batches
+	if batch.OnComplete != nil {
+		c.enqueueBatchCallback(ctx, batch.OnComplete.JobType, batch.ID, batch.OnComplete.Options, queue)
+	}
+
+	// OnSuccess fires for empty batches (no jobs = no failures)
+	if batch.OnSuccess != nil {
+		c.enqueueBatchCallback(ctx, batch.OnSuccess.JobType, batch.ID, batch.OnSuccess.Options, queue)
+	}
+}
+
+func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID string, options map[string]any, queue string) {
+	args := map[string]any{
+		"batch_id": batchID,
+	}
+	for k, v := range options {
+		args[k] = v
+	}
+
+	job := senna.NewJob(jobType, args)
+	job.Queue = queue
+	data, _ := job.Marshal()
+	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
 }
 
 // BatchStatus returns the status of a batch.
