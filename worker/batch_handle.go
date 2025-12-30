@@ -43,7 +43,24 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 		return nil
 	}
 
-	// First, atomically update the batch state
+	// Pre-validate: marshal all jobs first to ensure they're serializable
+	// This prevents updating batch state for jobs that can't be enqueued
+	type preparedJob struct {
+		job  *senna.Job
+		data string
+	}
+	prepared := make([]preparedJob, 0, len(jobs))
+
+	for _, job := range jobs {
+		job.BatchID = bh.bid
+		data, err := job.Marshal()
+		if err != nil {
+			return fmt.Errorf("failed to marshal job %s: %w", job.ID, err)
+		}
+		prepared = append(prepared, preparedJob{job: job, data: string(data)})
+	}
+
+	// Now atomically update the batch state
 	keys := []string{
 		bh.keys.Batch(bh.bid),
 		bh.keys.BatchJobs(bh.bid),
@@ -51,9 +68,8 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 
 	args := make([]any, 0, len(jobs)+1)
 	args = append(args, len(jobs))
-	for _, job := range jobs {
-		job.BatchID = bh.bid
-		args = append(args, job.ID)
+	for _, p := range prepared {
+		args = append(args, p.job.ID)
 	}
 
 	result, err := batchAddJobsScript.Run(ctx, bh.redis, keys, args...)
@@ -82,14 +98,10 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 		}
 	}
 
-	// Now push the jobs to their queues
+	// Push the pre-marshaled jobs to their queues
 	pipe := bh.redis.Pipeline()
-	for _, job := range jobs {
-		data, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-		pipe.LPush(ctx, bh.keys.Queue(job.Queue), string(data))
+	for _, p := range prepared {
+		pipe.LPush(ctx, bh.keys.Queue(p.job.Queue), p.data)
 	}
 
 	_, err = pipe.Exec(ctx)
