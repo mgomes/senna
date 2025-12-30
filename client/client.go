@@ -227,6 +227,12 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
 	emptyBatch := len(batch.Jobs) == 0
 
+	// Use client's default queue if batch doesn't specify a callback queue
+	callbackQueue := batch.CallbackQueue
+	if callbackQueue == "" {
+		callbackQueue = c.settings.DefaultQueue
+	}
+
 	// Build batch state for tracking
 	state := &senna.BatchState{
 		ID:            batch.ID,
@@ -240,7 +246,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		CompleteFired: emptyBatch,
 		SuccessFired:  emptyBatch,
 		CreatedAt:     batch.CreatedAt,
-		CallbackQueue: batch.CallbackQueue,
+		CallbackQueue: callbackQueue,
 	}
 
 	if batch.OnComplete != nil {
@@ -292,19 +298,14 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 
 	// For empty batches, immediately enqueue callbacks
 	if emptyBatch {
-		c.enqueueEmptyBatchCallbacks(ctx, batch)
+		c.enqueueEmptyBatchCallbacks(ctx, batch, callbackQueue)
 	}
 
 	return nil
 }
 
 // enqueueEmptyBatchCallbacks enqueues callbacks for empty batches immediately.
-func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, batch *Batch) {
-	queue := batch.CallbackQueue
-	if queue == "" {
-		queue = c.settings.DefaultQueue
-	}
-
+func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, batch *Batch, queue string) {
 	// OnComplete always fires for empty batches
 	if batch.OnComplete != nil {
 		c.enqueueBatchCallback(ctx, batch.OnComplete.JobType, batch.ID, batch.OnComplete.Options, queue)

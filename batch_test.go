@@ -534,6 +534,95 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
+	flushKeysBatch(t, "batch-defqueue:*")
+	flushKeysBatch(t, "senna:*")
+
+	// Client with custom default queue
+	c, err := client.New(&client.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-defqueue",
+		Settings: client.Settings{
+			DefaultQueue: "custom",
+			DefaultRetry: 25,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Worker only listens to "custom" queue (not "default")
+	w, err := worker.New(&worker.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-defqueue",
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "custom", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var completeCalled atomic.Bool
+	var callbackQueue string
+	var mu sync.Mutex
+
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		return nil
+	})
+
+	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
+		mu.Lock()
+		callbackQueue = job.Queue
+		mu.Unlock()
+		completeCalled.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = w.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Create batch WITHOUT explicit callback queue - should use client's default
+	batch := client.NewBatch().
+		Add("batch_job", nil, client.WithQueue("custom")). // Job goes to custom queue
+		OnCompleteCallback("on_complete")                  // Callback queue should inherit from client
+
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	// Wait for callback to fire
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if completeCalled.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if !completeCalled.Load() {
+		t.Error("complete callback should have been called (should use client's default queue)")
+	}
+
+	mu.Lock()
+	if callbackQueue != "custom" {
+		t.Errorf("expected callback to run on 'custom' queue (client default), got '%s'", callbackQueue)
+	}
+	mu.Unlock()
+}
+
 func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
 	flushKeysBatch(t, "batch-empty:*")
 	flushKeysBatch(t, "senna:*")
