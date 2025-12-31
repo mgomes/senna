@@ -30,8 +30,20 @@ if removed == 0 then
     return '{"already_processed":true}'
 end
 
--- Track callbacks as simple strings to build JSON manually
+-- Track callbacks as encoded JSON strings (each is a complete JSON object)
 local callback_list = {}
+
+-- Helper to build a callback object with proper escaping
+local function make_callback(callback_type, callback_config)
+    local cb = {
+        callback_type = callback_type,
+        job_type = callback_config.job_type
+    }
+    if callback_config.options then
+        cb.options = callback_config.options
+    end
+    return cjson.encode(cb)
+end
 
 -- Update counters based on result
 if result_type == "success" then
@@ -54,12 +66,7 @@ elseif result_type == "death" then
         -- Fire death callback only once
         if not batch.death_fired and batch.on_death then
             batch.death_fired = true
-            local cb = '{"callback_type":"death","job_type":"' .. batch.on_death.job_type .. '"'
-            if batch.on_death.options then
-                cb = cb .. ',"options":' .. cjson.encode(batch.on_death.options)
-            end
-            cb = cb .. '}'
-            table.insert(callback_list, cb)
+            table.insert(callback_list, make_callback("death", batch.on_death))
         end
     end
 end
@@ -70,37 +77,33 @@ if batch.pending == 0 and not batch.complete_fired then
 
     -- Fire complete callback
     if batch.on_complete then
-        local cb = '{"callback_type":"complete","job_type":"' .. batch.on_complete.job_type .. '"'
-        if batch.on_complete.options then
-            cb = cb .. ',"options":' .. cjson.encode(batch.on_complete.options)
-        end
-        cb = cb .. '}'
-        table.insert(callback_list, cb)
+        table.insert(callback_list, make_callback("complete", batch.on_complete))
     end
 
     -- Fire success callback only if no deaths and not invalidated
     if not batch.dead and not batch.invalidated and not batch.success_fired and batch.on_success then
         batch.success_fired = true
-        local cb = '{"callback_type":"success","job_type":"' .. batch.on_success.job_type .. '"'
-        if batch.on_success.options then
-            cb = cb .. ',"options":' .. cjson.encode(batch.on_success.options)
-        end
-        cb = cb .. '}'
-        table.insert(callback_list, cb)
+        table.insert(callback_list, make_callback("success", batch.on_success))
     end
 end
 
 -- Save updated batch state
 redis.call('SET', batch_key, cjson.encode(batch), 'KEEPTTL')
 
--- Build JSON result manually to ensure callbacks is always an array
+-- Build result with proper escaping
+-- Use manual array construction to ensure callbacks is always an array (not object when empty)
 local callbacks_json = '[' .. table.concat(callback_list, ',') .. ']'
-local result = '{"callbacks":' .. callbacks_json
-result = result .. ',"pending":' .. (batch.pending or 0)
-result = result .. ',"successes":' .. (batch.successes or 0)
-result = result .. ',"failures":' .. (batch.failures or 0)
-result = result .. ',"dead":' .. (batch.dead and 'true' or 'false')
-result = result .. ',"invalidated":' .. (batch.invalidated and 'true' or 'false')
-result = result .. ',"callback_queue":"' .. (batch.callback_queue or 'default') .. '"}'
+local result = {
+    pending = batch.pending or 0,
+    successes = batch.successes or 0,
+    failures = batch.failures or 0,
+    dead = batch.dead or false,
+    invalidated = batch.invalidated or false,
+    callback_queue = batch.callback_queue or 'default'
+}
+-- Encode result, then inject the callbacks array to ensure it stays an array
+local result_json = cjson.encode(result)
+-- Insert callbacks array before the closing brace
+result_json = result_json:sub(1, -2) .. ',"callbacks":' .. callbacks_json .. '}'
 
-return result
+return result_json

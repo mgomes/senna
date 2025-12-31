@@ -534,6 +534,90 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestBatch_SpecialCharsInJobType(t *testing.T) {
+	flushKeysBatch(t, "batch-special:*")
+	flushKeysBatch(t, "senna:*")
+
+	c, err := client.New(&client.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-special",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-special",
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	var completeCalled atomic.Bool
+	var receivedJobType string
+	var mu sync.Mutex
+
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		return nil
+	})
+
+	// Job type with special JSON characters: quotes, backslashes, newlines
+	specialJobType := "callback:with\"quotes\\and\nnewlines"
+
+	w.Register(specialJobType, func(ctx context.Context, job *senna.Job) error {
+		mu.Lock()
+		receivedJobType = job.Type
+		mu.Unlock()
+		completeCalled.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = w.Run(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	batch := client.NewBatch().
+		Add("batch_job", nil).
+		OnCompleteCallback(specialJobType)
+
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if completeCalled.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if !completeCalled.Load() {
+		t.Error("callback with special characters should have been called")
+	}
+
+	mu.Lock()
+	if receivedJobType != specialJobType {
+		t.Errorf("expected job type %q, got %q", specialJobType, receivedJobType)
+	}
+	mu.Unlock()
+}
+
 func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 	flushKeysBatch(t, "batch-defqueue:*")
 	flushKeysBatch(t, "senna:*")
