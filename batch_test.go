@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -63,6 +64,47 @@ func TestBatch_CallbackOptions(t *testing.T) {
 	}
 	if batch.CallbackQueue != "critical" {
 		t.Errorf("expected callback queue 'critical', got '%s'", batch.CallbackQueue)
+	}
+}
+
+func TestBatch_UnsupportedOptions(t *testing.T) {
+	flushKeysBatch(t, "batch-unsupported:*")
+
+	c, err := client.New(&client.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-unsupported",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	batch := client.NewBatch().
+		Add("job", nil,
+			client.WithUniqueKey("unique", time.Minute),
+			client.WithEncryption(),
+			client.WithDelay(time.Second),
+		)
+
+	if len(batch.Jobs) != 0 {
+		t.Fatalf("batch should not accept unsupported job options, got %d jobs", len(batch.Jobs))
+	}
+
+	err = c.EnqueueBatch(ctx, batch)
+	if err == nil {
+		t.Fatal("expected enqueue batch to fail for unsupported options")
+	}
+	if !strings.Contains(err.Error(), "does not support options") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	exists, err := c.Redis().Exists(ctx, "batch-unsupported:batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to check batch state: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("batch state should not be created when options are unsupported")
 	}
 }
 

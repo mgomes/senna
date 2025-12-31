@@ -1,6 +1,8 @@
 package client
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mgomes/senna"
@@ -22,6 +24,7 @@ type Batch struct {
 	OnDeath       *CallbackConfig `json:"on_death,omitempty"`
 	CallbackQueue string          `json:"callback_queue,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
+	err           error           `json:"-"`
 }
 
 // NewBatch creates a new batch with a unique ID.
@@ -41,12 +44,21 @@ func (b *Batch) WithDescription(desc string) *Batch {
 
 // Add adds a job to the batch.
 func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) *Batch {
+	if b.err != nil {
+		return b
+	}
+
 	cfg := &enqueueConfig{
 		queue: "default",
 		retry: 25,
 	}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+
+	if unsupported := unsupportedBatchOptions(cfg); len(unsupported) > 0 {
+		b.err = fmt.Errorf("batch.Add does not support options: %s", strings.Join(unsupported, ", "))
+		return b
 	}
 
 	job := senna.NewJob(jobType, args)
@@ -89,4 +101,24 @@ func (b *Batch) OnDeathCallback(jobType string, options ...map[string]any) *Batc
 func (b *Batch) WithCallbackQueue(queue string) *Batch {
 	b.CallbackQueue = queue
 	return b
+}
+
+func unsupportedBatchOptions(cfg *enqueueConfig) []string {
+	var unsupported []string
+	if cfg.uniqueKey != "" {
+		unsupported = append(unsupported, "WithUniqueKey")
+	}
+	if cfg.encrypt {
+		unsupported = append(unsupported, "WithEncryption")
+	}
+	if cfg.delay > 0 {
+		unsupported = append(unsupported, "WithDelay")
+	}
+	if !cfg.at.IsZero() {
+		unsupported = append(unsupported, "WithScheduleAt")
+	}
+	if cfg.batchID != "" {
+		unsupported = append(unsupported, "WithBatch")
+	}
+	return unsupported
 }

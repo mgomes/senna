@@ -222,6 +222,10 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 }
 
 func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
+	if batch.err != nil {
+		return batch.err
+	}
+
 	pipe := c.redis.Pipeline()
 
 	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
