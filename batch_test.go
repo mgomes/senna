@@ -99,7 +99,6 @@ func TestBatch_SuccessCallback(t *testing.T) {
 	var successCallbackCalled atomic.Bool
 	var receivedBatchID string
 	var receivedOptions map[string]any
-	var mu sync.Mutex
 
 	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
 		jobsProcessed.Add(1)
@@ -107,18 +106,14 @@ func TestBatch_SuccessCallback(t *testing.T) {
 	})
 
 	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
-		completeCallbackCalled.Store(true)
-		mu.Lock()
 		receivedBatchID = job.Args["batch_id"].(string)
-		mu.Unlock()
+		completeCallbackCalled.Store(true)
 		return nil
 	})
 
 	w.Register("on_success", func(ctx context.Context, job *senna.Job) error {
-		successCallbackCalled.Store(true)
-		mu.Lock()
 		receivedOptions = job.Args
-		mu.Unlock()
+		successCallbackCalled.Store(true)
 		return nil
 	})
 
@@ -161,15 +156,12 @@ func TestBatch_SuccessCallback(t *testing.T) {
 	if !successCallbackCalled.Load() {
 		t.Error("success callback should have been called")
 	}
-
-	mu.Lock()
 	if receivedBatchID != batch.ID {
 		t.Errorf("expected batch ID '%s' in callback, got '%s'", batch.ID, receivedBatchID)
 	}
 	if receivedOptions["user_id"] != float64(123) {
 		t.Errorf("expected user_id 123 in callback options, got %v", receivedOptions["user_id"])
 	}
-	mu.Unlock()
 }
 
 func TestBatch_DeathCallback(t *testing.T) {
@@ -484,16 +476,15 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	}
 
 	var callbackQueue string
-	var mu sync.Mutex
+	var completeCalled atomic.Bool
 
 	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	})
 
 	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
-		mu.Lock()
 		callbackQueue = job.Queue
-		mu.Unlock()
+		completeCalled.Store(true)
 		return nil
 	})
 
@@ -515,10 +506,7 @@ func TestBatch_CallbackQueue(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		mu.Lock()
-		q := callbackQueue
-		mu.Unlock()
-		if q != "" {
+		if completeCalled.Load() {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -527,11 +515,9 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	cancel()
 	time.Sleep(100 * time.Millisecond)
 
-	mu.Lock()
 	if callbackQueue != "critical" {
 		t.Errorf("expected callback to run on 'critical' queue, got '%s'", callbackQueue)
 	}
-	mu.Unlock()
 }
 
 func TestBatch_SpecialCharsInJobType(t *testing.T) {
@@ -564,7 +550,6 @@ func TestBatch_SpecialCharsInJobType(t *testing.T) {
 
 	var completeCalled atomic.Bool
 	var receivedJobType string
-	var mu sync.Mutex
 
 	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
@@ -574,9 +559,7 @@ func TestBatch_SpecialCharsInJobType(t *testing.T) {
 	specialJobType := "callback:with\"quotes\\and\nnewlines"
 
 	w.Register(specialJobType, func(ctx context.Context, job *senna.Job) error {
-		mu.Lock()
 		receivedJobType = job.Type
-		mu.Unlock()
 		completeCalled.Store(true)
 		return nil
 	})
@@ -610,12 +593,9 @@ func TestBatch_SpecialCharsInJobType(t *testing.T) {
 	if !completeCalled.Load() {
 		t.Error("callback with special characters should have been called")
 	}
-
-	mu.Lock()
 	if receivedJobType != specialJobType {
 		t.Errorf("expected job type %q, got %q", specialJobType, receivedJobType)
 	}
-	mu.Unlock()
 }
 
 func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
@@ -654,16 +634,13 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 
 	var completeCalled atomic.Bool
 	var callbackQueue string
-	var mu sync.Mutex
 
 	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	})
 
 	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
-		mu.Lock()
 		callbackQueue = job.Queue
-		mu.Unlock()
 		completeCalled.Store(true)
 		return nil
 	})
@@ -699,12 +676,9 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 	if !completeCalled.Load() {
 		t.Error("complete callback should have been called (should use client's default queue)")
 	}
-
-	mu.Lock()
 	if callbackQueue != "custom" {
 		t.Errorf("expected callback to run on 'custom' queue (client default), got '%s'", callbackQueue)
 	}
-	mu.Unlock()
 }
 
 func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
