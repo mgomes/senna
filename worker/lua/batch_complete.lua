@@ -59,9 +59,15 @@ if result_type == "success" then
     batch.successes = (batch.successes or 0) + 1
     batch.pending = (batch.pending or 1) - 1
 elseif result_type == "failure" then
-    batch.failures = (batch.failures or 0) + 1
+    local newly_failed = redis.call('SADD', failed_key, job_id)
+    if newly_failed == 1 then
+        batch.failures = (batch.failures or 0) + 1
+    end
 elseif result_type == "death" then
-    batch.failures = (batch.failures or 0) + 1
+    local newly_failed = redis.call('SADD', failed_key, job_id)
+    if newly_failed == 1 then
+        batch.failures = (batch.failures or 0) + 1
+    end
     batch.pending = (batch.pending or 1) - 1
 
     -- Only track death state and fire callbacks if not invalidated
