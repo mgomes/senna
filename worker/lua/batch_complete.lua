@@ -24,10 +24,19 @@ end
 local batch = cjson.decode(batch_data)
 
 -- Remove job from pending set
-local removed = redis.call('SREM', jobs_key, job_id)
-if removed == 0 then
-    -- Job already processed, skip
-    return '{"already_processed":true}'
+local removed = 0
+if result_type ~= "failure" then
+    removed = redis.call('SREM', jobs_key, job_id)
+    if removed == 0 then
+        -- Job already processed, skip
+        return '{"already_processed":true}'
+    end
+else
+    -- For failures (retries), ensure the job is part of the batch without removing it.
+    local member = redis.call('SISMEMBER', jobs_key, job_id)
+    if member == 0 then
+        return '{"already_processed":true}'
+    end
 end
 
 -- Track callbacks as encoded JSON strings (each is a complete JSON object)
@@ -49,6 +58,8 @@ end
 if result_type == "success" then
     batch.successes = (batch.successes or 0) + 1
     batch.pending = (batch.pending or 1) - 1
+elseif result_type == "failure" then
+    batch.failures = (batch.failures or 0) + 1
 elseif result_type == "death" then
     batch.failures = (batch.failures or 0) + 1
     batch.pending = (batch.pending or 1) - 1

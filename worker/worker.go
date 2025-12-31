@@ -209,6 +209,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 
 	var retryErr *senna.RetryableError
 	if errors.As(err, &retryErr) {
+		w.updateBatchProgress(ctx, job, batchResultFailure)
 		_ = w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
 		return
 	}
@@ -232,6 +233,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	}
 	backoff := backoffFn(job.RetryCount)
 	if job.RetryCount < maxRetries {
+		w.updateBatchProgress(ctx, job, batchResultFailure)
 		_ = w.fetcher.Nack(ctx, w.id, job, backoff)
 	} else {
 		job.Error = err.Error()
@@ -245,6 +247,7 @@ type batchResult string
 
 const (
 	batchResultSuccess batchResult = "success"
+	batchResultFailure batchResult = "failure"
 	batchResultDeath   batchResult = "death"
 )
 
