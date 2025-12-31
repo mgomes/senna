@@ -158,15 +158,6 @@ func TestConcurrentLimiter_LockReclaim(t *testing.T) {
 	}
 }
 
-func heldCount(t *testing.T, limiter *ratelimit.ConcurrentLimiter, ctx context.Context) int {
-	t.Helper()
-	held, err := limiter.Held(ctx)
-	if err != nil {
-		return -1
-	}
-	return held
-}
-
 func TestConcurrentLimiter_Concurrent(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
