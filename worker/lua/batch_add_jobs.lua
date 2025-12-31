@@ -1,9 +1,9 @@
 -- batch_add_jobs.lua
--- Atomically add jobs to an existing batch
+-- Atomically add jobs to an existing batch and enqueue them
 -- KEYS[1] = batch state key
 -- KEYS[2] = batch jobs set key
 -- ARGV[1] = number of jobs to add
--- ARGV[2...] = job IDs to add
+-- ARGV[2..n] = alternating: job_id, queue_key, job_data (3 args per job)
 -- Returns: JSON with result
 
 local batch_key = KEYS[1]
@@ -28,10 +28,18 @@ if batch.complete_fired then
     return cjson.encode({error = "batch_complete"})
 end
 
--- Add job IDs to the pending set and update counters
-for i = 2, num_jobs + 1 do
-    local job_id = ARGV[i]
+-- Process jobs: add to pending set and enqueue atomically
+-- Args are: job_id, queue_key, job_data (3 per job)
+for i = 0, num_jobs - 1 do
+    local base = 2 + (i * 3)
+    local job_id = ARGV[base]
+    local queue_key = ARGV[base + 1]
+    local job_data = ARGV[base + 2]
+
+    -- Add job ID to pending set
     redis.call('SADD', jobs_key, job_id)
+    -- Enqueue the job
+    redis.call('LPUSH', queue_key, job_data)
 end
 
 batch.total = (batch.total or 0) + num_jobs

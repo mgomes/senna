@@ -38,16 +38,18 @@ func (bh *BatchHandle) BID() string {
 // AddJobs atomically adds jobs to the batch.
 // This is safe to call from within a job that is part of this batch.
 // All jobs are added atomically - either all are added or none are.
+// The Lua script handles both batch state updates and job enqueueing in a single
+// atomic operation, ensuring consistency even if Redis operations fail.
 func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 	if len(jobs) == 0 {
 		return nil
 	}
 
 	// Pre-validate: marshal all jobs first to ensure they're serializable
-	// This prevents updating batch state for jobs that can't be enqueued
 	type preparedJob struct {
-		job  *senna.Job
-		data string
+		job      *senna.Job
+		data     string
+		queueKey string
 	}
 	prepared := make([]preparedJob, 0, len(jobs))
 
@@ -57,19 +59,27 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 		if err != nil {
 			return fmt.Errorf("failed to marshal job %s: %w", job.ID, err)
 		}
-		prepared = append(prepared, preparedJob{job: job, data: string(data)})
+		prepared = append(prepared, preparedJob{
+			job:      job,
+			data:     string(data),
+			queueKey: bh.keys.Queue(job.Queue),
+		})
 	}
 
-	// Now atomically update the batch state
+	// Run Lua script that atomically:
+	// 1. Validates batch state
+	// 2. Updates counters and job set
+	// 3. Enqueues all jobs
 	keys := []string{
 		bh.keys.Batch(bh.bid),
 		bh.keys.BatchJobs(bh.bid),
 	}
 
-	args := make([]any, 0, len(jobs)+1)
-	args = append(args, len(jobs))
+	// Args: num_jobs, then for each job: job_id, queue_key, job_data
+	args := make([]any, 0, 1+len(prepared)*3)
+	args = append(args, len(prepared))
 	for _, p := range prepared {
-		args = append(args, p.job.ID)
+		args = append(args, p.job.ID, p.queueKey, p.data)
 	}
 
 	result, err := batchAddJobsScript.Run(ctx, bh.redis, keys, args...)
@@ -98,14 +108,7 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 		}
 	}
 
-	// Push the pre-marshaled jobs to their queues
-	pipe := bh.redis.Pipeline()
-	for _, p := range prepared {
-		pipe.LPush(ctx, bh.keys.Queue(p.job.Queue), p.data)
-	}
-
-	_, err = pipe.Exec(ctx)
-	return err
+	return nil
 }
 
 // Add is a convenience method to add a single job to the batch.
