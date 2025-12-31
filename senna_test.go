@@ -82,22 +82,38 @@ func TestWithinLimitCtx_RespectsContext(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "senna:ratelimit:*")
 
-	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
+	// Use concurrent limiter - it's more predictable for this test
+	// because it tracks active operations rather than time windows
+	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
 		Name:        "test-within-limit-ctx",
 		Limit:       1,
-		Interval:    time.Second,
+		LockTimeout: 5 * time.Second,
 		WaitTimeout: 5 * time.Second,
 	})
 
-	_ = WithinLimitCtx(context.Background(), limiter, func() error { return nil })
+	// First call acquires the only slot and holds it (we don't release)
+	blocker := make(chan struct{})
+	go func() {
+		_ = WithinLimitCtx(context.Background(), limiter, func() error {
+			<-blocker // Block until test is done
+			return nil
+		})
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Give the goroutine time to acquire the lock
+	time.Sleep(50 * time.Millisecond)
+
+	// Second call should block waiting for the slot, then context times out
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
 	err := WithinLimitCtx(ctx, limiter, func() error { return nil })
 
+	// Release the blocker
+	close(blocker)
+
 	if err == nil {
-		t.Error("expected context deadline exceeded error")
+		t.Error("expected error when context times out")
 	}
 }
 
