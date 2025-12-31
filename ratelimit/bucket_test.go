@@ -189,7 +189,7 @@ func TestBucketLimiter_PolicyRaise(t *testing.T) {
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
 		Name:        "test-raise",
 		Limit:       2,
-		Interval:    time.Second,
+		Interval:    time.Minute, // Long interval to avoid window boundary issues
 		WaitTimeout: 50 * time.Millisecond,
 		Policy:      ratelimit.PolicyRaise,
 	})
@@ -217,11 +217,13 @@ func TestBucketLimiter_ContextCancellation(t *testing.T) {
 	client := newTestClient(t)
 	flushKeys(t, client, "senna:ratelimit:bucket:test-cancel*")
 
+	// Use a long interval so retryIn will be long, and long waitTimeout so it waits
+	// instead of returning OverLimitError immediately. Context will expire first.
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
 		Name:        "test-cancel",
 		Limit:       1,
-		Interval:    time.Second,
-		WaitTimeout: 5 * time.Second,
+		Interval:    time.Minute,       // Long interval = long retryIn
+		WaitTimeout: 2 * time.Minute,   // Longer than interval so it waits
 		Policy:      ratelimit.PolicyRaise,
 	})
 
@@ -231,6 +233,7 @@ func TestBucketLimiter_ContextCancellation(t *testing.T) {
 		t.Fatalf("first acquire failed: %v", err)
 	}
 
+	// Context expires before the wait completes
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 

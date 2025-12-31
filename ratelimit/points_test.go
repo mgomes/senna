@@ -43,6 +43,31 @@ func TestPointsLimiter_Basic(t *testing.T) {
 	}
 }
 
+func TestPointsLimiter_SubMicroIntervalFloors(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:points:test-submicro*")
+
+	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
+		Name:       "test-submicro",
+		Capacity:   2,
+		RefillTime: 500 * time.Nanosecond, // Sub-micro; should floor internally
+		Policy:     ratelimit.PolicySkip,
+	})
+
+	// Consume available points.
+	for range 2 {
+		if wait, err := limiter.Acquire(ctx); err != nil || wait != 0 {
+			t.Fatalf("unexpected wait/err: wait=%v err=%v", wait, err)
+		}
+	}
+
+	// Third call should not panic/divide by zero; wait may be tiny due to fast refill.
+	if _, err := limiter.Acquire(ctx); err != nil && err != context.DeadlineExceeded {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestPointsLimiter_VariableCost(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()

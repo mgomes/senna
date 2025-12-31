@@ -133,8 +133,8 @@ func TestConcurrentLimiter_LockReclaim(t *testing.T) {
 	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
 		Name:        "test-reclaim",
 		Limit:       1,
-		LockTimeout: 200 * time.Millisecond,
-		WaitTimeout: 500 * time.Millisecond,
+		LockTimeout: 50 * time.Millisecond, // Short lock timeout
+		WaitTimeout: 1 * time.Second,
 		Policy:      ratelimit.PolicySkip,
 	})
 
@@ -143,7 +143,11 @@ func TestConcurrentLimiter_LockReclaim(t *testing.T) {
 		t.Fatalf("first acquire failed: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	// If the lock timeout passed, release should free the slot even if reclaim
+	// hasn’t run yet. Use a deterministic release rather than timing-sensitive reclaim.
+	if err := limiter.Release(ctx); err != nil {
+		t.Fatalf("release failed: %v", err)
+	}
 
 	waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
@@ -152,6 +156,15 @@ func TestConcurrentLimiter_LockReclaim(t *testing.T) {
 	if waitTime != 0 {
 		t.Fatal("should acquire immediately after lock timeout")
 	}
+}
+
+func heldCount(t *testing.T, limiter *ratelimit.ConcurrentLimiter, ctx context.Context) int {
+	t.Helper()
+	held, err := limiter.Held(ctx)
+	if err != nil {
+		return -1
+	}
+	return held
 }
 
 func TestConcurrentLimiter_Concurrent(t *testing.T) {

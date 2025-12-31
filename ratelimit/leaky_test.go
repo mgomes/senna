@@ -105,6 +105,29 @@ func TestLeakyLimiter_BurstThenSteady(t *testing.T) {
 	}
 }
 
+func TestLeakyLimiter_SubMicroDrainFloors(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:leaky:test-submicro*")
+
+	limiter := ratelimit.Leaky(client, ratelimit.LeakyConfig{
+		Name:        "test-submicro",
+		Capacity:    1,
+		DrainTime:   500 * time.Nanosecond, // Sub-micro; should floor internally
+		WaitTimeout: 50 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	if wait, err := limiter.Acquire(ctx); err != nil || wait != 0 {
+		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
+	}
+
+	// Second acquire should not panic/divide by zero; wait may be tiny due to fast drain.
+	if _, err := limiter.Acquire(ctx); err != nil && err != context.DeadlineExceeded {
+		t.Fatalf("second acquire error: %v", err)
+	}
+}
+
 func TestLeakyLimiter_Level(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()

@@ -68,7 +68,6 @@ func TestBatch_CallbackOptions(t *testing.T) {
 
 func TestBatch_SuccessCallback(t *testing.T) {
 	flushKeysBatch(t, "batch-success:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -166,7 +165,6 @@ func TestBatch_SuccessCallback(t *testing.T) {
 
 func TestBatch_DeathCallback(t *testing.T) {
 	flushKeysBatch(t, "batch-death:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -259,7 +257,6 @@ func TestBatch_DeathCallback(t *testing.T) {
 
 func TestBatch_Status(t *testing.T) {
 	flushKeysBatch(t, "batch-status:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -333,7 +330,6 @@ func TestBatch_InvalidBatchStatus(t *testing.T) {
 
 func TestBatch_DynamicJobAdding(t *testing.T) {
 	flushKeysBatch(t, "batch-dynamic:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -449,7 +445,6 @@ func TestBatch_ValidWithinBatch(t *testing.T) {
 
 func TestBatch_CallbackQueue(t *testing.T) {
 	flushKeysBatch(t, "batch-cbqueue:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -522,7 +517,6 @@ func TestBatch_CallbackQueue(t *testing.T) {
 
 func TestBatch_SpecialCharsInJobType(t *testing.T) {
 	flushKeysBatch(t, "batch-special:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -600,7 +594,6 @@ func TestBatch_SpecialCharsInJobType(t *testing.T) {
 
 func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 	flushKeysBatch(t, "batch-defqueue:*")
-	flushKeysBatch(t, "senna:*")
 
 	// Client with custom default queue
 	c, err := client.New(&client.Config{
@@ -683,7 +676,6 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 
 func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
 	flushKeysBatch(t, "batch-empty:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
@@ -773,7 +765,6 @@ func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
 
 func TestBatch_InvalidatedBatchCompletes(t *testing.T) {
 	flushKeysBatch(t, "batch-invalidate:*")
-	flushKeysBatch(t, "senna:*")
 
 	c, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
