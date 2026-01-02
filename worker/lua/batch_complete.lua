@@ -23,6 +23,11 @@ end
 
 local batch = cjson.decode(batch_data)
 
+-- For legacy batches that lack a pending count, initialize it from the jobs set.
+if batch.pending == nil then
+    batch.pending = redis.call('SCARD', jobs_key)
+end
+
 -- Remove job from pending set
 local removed = 0
 if result_type ~= "failure" then
