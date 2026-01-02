@@ -125,16 +125,16 @@ func TestConcurrentLimiter_AutoRelease(t *testing.T) {
 	}
 }
 
-func TestConcurrentLimiter_LockReclaim(t *testing.T) {
+func TestConcurrentLimiter_ReleaseFreesSlot(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
-	flushKeys(t, client, "senna:ratelimit:concurrent:test-reclaim*")
+	flushKeys(t, client, "senna:ratelimit:concurrent:test-release*")
 
 	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
-		Name:        "test-reclaim",
+		Name:        "test-release",
 		Limit:       1,
-		LockTimeout: 50 * time.Millisecond, // Short lock timeout
-		WaitTimeout: 1 * time.Second,
+		LockTimeout: time.Minute,
+		WaitTimeout: 100 * time.Millisecond,
 		Policy:      ratelimit.PolicySkip,
 	})
 
@@ -143,18 +143,17 @@ func TestConcurrentLimiter_LockReclaim(t *testing.T) {
 		t.Fatalf("first acquire failed: %v", err)
 	}
 
-	// If the lock timeout passed, release should free the slot even if reclaim
-	// hasn’t run yet. Use a deterministic release rather than timing-sensitive reclaim.
+	// Release should free the slot for reuse
 	if err := limiter.Release(ctx); err != nil {
 		t.Fatalf("release failed: %v", err)
 	}
 
 	waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
-		t.Fatalf("acquire after reclaim failed: %v", err)
+		t.Fatalf("acquire after release failed: %v", err)
 	}
 	if waitTime != 0 {
-		t.Fatal("should acquire immediately after lock timeout")
+		t.Fatal("should acquire immediately after release")
 	}
 }
 

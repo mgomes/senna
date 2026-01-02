@@ -93,10 +93,9 @@ func TestBatch_TTLSetsExpire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read jobs ttl: %v", err)
 	}
-	failedTTL, err := c.Redis().TTL(ctx, "batch-ttl:batch:"+batch.ID+":failed").Result()
-	if err != nil {
-		t.Fatalf("failed to read failed ttl: %v", err)
-	}
+
+	// Note: :failed key is only created when jobs actually fail,
+	// so we don't check its TTL here
 
 	minTTL := 25 * 24 * time.Hour
 	if stateTTL <= minTTL {
@@ -104,9 +103,6 @@ func TestBatch_TTLSetsExpire(t *testing.T) {
 	}
 	if jobsTTL <= minTTL {
 		t.Fatalf("expected jobs ttl > %v, got %v", minTTL, jobsTTL)
-	}
-	if failedTTL <= minTTL {
-		t.Fatalf("expected failed ttl > %v, got %v", minTTL, failedTTL)
 	}
 }
 
