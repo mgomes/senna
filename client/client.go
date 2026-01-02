@@ -226,6 +226,8 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		return batch.err
 	}
 
+	const batchTTL = 30 * 24 * time.Hour
+
 	pipe := c.redis.Pipeline()
 
 	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
@@ -278,7 +280,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	}
 
 	// Store batch state with 30 day expiration (like Sidekiq)
-	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), 30*24*time.Hour)
+	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), batchTTL)
 
 	// Add to batches set for iteration
 	pipe.SAdd(ctx, c.keys.Batches(), batch.ID)
@@ -294,6 +296,10 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		pipe.LPush(ctx, c.keys.Queue(job.Queue), string(data))
 		pipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
 	}
+
+	// Ensure batch job/failed sets expire alongside the batch state
+	pipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
+	pipe.Expire(ctx, c.keys.BatchFailed(batch.ID), batchTTL)
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
