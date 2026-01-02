@@ -381,7 +381,12 @@ func (w *Worker) heartbeat(ctx context.Context) {
 }
 
 func (w *Worker) scheduler(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	interval := w.config.Settings.ScheduledPollInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -399,7 +404,12 @@ func (w *Worker) enqueueScheduled(ctx context.Context) {
 	now := float64(time.Now().Unix())
 
 	for {
-		items, err := w.redis.ZPopMin(ctx, w.keys.Scheduled(), 100).Result()
+		// Fetch jobs due now or in the past (score <= now)
+		items, err := w.redis.ZRangeByScoreWithScores(ctx, w.keys.Scheduled(), &redis.ZRangeBy{
+			Min:   "-inf",
+			Max:   fmt.Sprintf("%f", now),
+			Count: 100,
+		}).Result()
 		if err != nil {
 			return
 		}
@@ -408,13 +418,13 @@ func (w *Worker) enqueueScheduled(ctx context.Context) {
 		}
 
 		for _, z := range items {
-			if z.Score > now {
-				w.redis.ZAdd(ctx, w.keys.Scheduled(), z)
+			data, ok := z.Member.(string)
+			if !ok {
 				continue
 			}
 
-			data, ok := z.Member.(string)
-			if !ok {
+			// Remove from scheduled set
+			if err := w.redis.ZRem(ctx, w.keys.Scheduled(), z.Member).Err(); err != nil {
 				continue
 			}
 
@@ -432,7 +442,12 @@ func (w *Worker) enqueueRetries(ctx context.Context) {
 	now := float64(time.Now().Unix())
 
 	for {
-		items, err := w.redis.ZPopMin(ctx, w.keys.Retry(), 100).Result()
+		// Fetch retries due now or in the past (score <= now)
+		items, err := w.redis.ZRangeByScoreWithScores(ctx, w.keys.Retry(), &redis.ZRangeBy{
+			Min:   "-inf",
+			Max:   fmt.Sprintf("%f", now),
+			Count: 100,
+		}).Result()
 		if err != nil {
 			return
 		}
@@ -441,13 +456,13 @@ func (w *Worker) enqueueRetries(ctx context.Context) {
 		}
 
 		for _, z := range items {
-			if z.Score > now {
-				w.redis.ZAdd(ctx, w.keys.Retry(), z)
+			data, ok := z.Member.(string)
+			if !ok {
 				continue
 			}
 
-			data, ok := z.Member.(string)
-			if !ok {
+			// Remove from retry set
+			if err := w.redis.ZRem(ctx, w.keys.Retry(), z.Member).Err(); err != nil {
 				continue
 			}
 
