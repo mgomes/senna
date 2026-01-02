@@ -67,6 +67,49 @@ func TestBatch_CallbackOptions(t *testing.T) {
 	}
 }
 
+func TestBatch_TTLSetsExpire(t *testing.T) {
+	flushKeysBatch(t, "batch-ttl:*")
+
+	c, err := client.New(&client.Config{
+		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Namespace: "batch-ttl",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	batch := client.NewBatch().Add("job", nil)
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("enqueue batch failed: %v", err)
+	}
+
+	stateTTL, err := c.Redis().TTL(ctx, "batch-ttl:batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to read state ttl: %v", err)
+	}
+	jobsTTL, err := c.Redis().TTL(ctx, "batch-ttl:batch:"+batch.ID+":jobs").Result()
+	if err != nil {
+		t.Fatalf("failed to read jobs ttl: %v", err)
+	}
+	failedTTL, err := c.Redis().TTL(ctx, "batch-ttl:batch:"+batch.ID+":failed").Result()
+	if err != nil {
+		t.Fatalf("failed to read failed ttl: %v", err)
+	}
+
+	minTTL := 25 * 24 * time.Hour
+	if stateTTL <= minTTL {
+		t.Fatalf("expected state ttl > %v, got %v", minTTL, stateTTL)
+	}
+	if jobsTTL <= minTTL {
+		t.Fatalf("expected jobs ttl > %v, got %v", minTTL, jobsTTL)
+	}
+	if failedTTL <= minTTL {
+		t.Fatalf("expected failed ttl > %v, got %v", minTTL, failedTTL)
+	}
+}
+
 func TestBatch_UnsupportedOptions(t *testing.T) {
 	flushKeysBatch(t, "batch-unsupported:*")
 
