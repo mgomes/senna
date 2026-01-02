@@ -56,6 +56,7 @@ type WorkerSettings struct {
 	ShutdownTimeout time.Duration
 	PollInterval    time.Duration
 	HeartbeatRate   time.Duration
+	PeriodicEnabled bool
 }
 
 func DefaultWorkerSettings() WorkerSettings {
@@ -137,5 +138,11 @@ func WithMetrics(addr, prefix string) Option {
 		c.Metrics.Enabled = true
 		c.Metrics.StatsdAddr = addr
 		c.Metrics.Prefix = prefix
+	}
+}
+
+func WithPeriodicEnabled() Option {
+	return func(c *Config) {
+		c.Worker.PeriodicEnabled = true
 	}
 }
