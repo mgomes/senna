@@ -16,6 +16,7 @@ import (
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
+	"github.com/mgomes/senna/periodic"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -28,6 +29,7 @@ type Worker struct {
 	fetcher    *fetcher
 	encryptor  *encryption.Encryptor
 	middleware []senna.Middleware
+	periodic   *periodic.Scheduler
 	running    bool
 	mu         sync.RWMutex
 	stopCh     chan struct{}
@@ -77,6 +79,10 @@ func New(cfg *Config) (*Worker, error) {
 
 	w.Use(senna.RecoveryMiddleware())
 
+	if cfg.Settings.PeriodicEnabled {
+		w.periodic = periodic.NewScheduler(client, k)
+	}
+
 	return w, nil
 }
 
@@ -110,6 +116,24 @@ func (w *Worker) Use(mw ...senna.Middleware) {
 	w.pool.Use(mw...)
 }
 
+// Periodic registers a periodic job that runs on the given cron schedule.
+// The worker must have PeriodicEnabled set to true in its config.
+// Returns an error if periodic jobs are not enabled or if the cron expression is invalid.
+func (w *Worker) Periodic(cronExpr, jobType string, opts ...periodic.Option) error {
+	if w.periodic == nil {
+		return errors.New("periodic jobs not enabled; set PeriodicEnabled: true in worker config")
+	}
+	return w.periodic.Register(cronExpr, jobType, opts...)
+}
+
+// PeriodicJobs returns all registered periodic jobs.
+func (w *Worker) PeriodicJobs() []*periodic.Job {
+	if w.periodic == nil {
+		return nil
+	}
+	return w.periodic.Jobs()
+}
+
 func (w *Worker) Run(ctx context.Context) error {
 	w.mu.Lock()
 	if w.running {
@@ -131,6 +155,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	go w.scheduler(ctx)
 	go w.reaper(ctx)
 
+	if w.periodic != nil {
+		w.periodic.Start(ctx)
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < w.config.Settings.Concurrency; i++ {
 		wg.Add(1)
@@ -147,6 +175,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	cancel()
+
+	if w.periodic != nil {
+		w.periodic.Stop()
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), w.config.Settings.ShutdownTimeout)
 	defer shutdownCancel()

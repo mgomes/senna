@@ -490,3 +490,84 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 		t.Fatalf("after success expected failures=1 pending=0 successes=1, got failures=%d pending=%d successes=%d", updated.Failures, updated.Pending, updated.Successes)
 	}
 }
+
+func TestWorker_Periodic_NotEnabled(t *testing.T) {
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-periodic-disabled",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	err = w.Periodic("* * * * *", "test_job")
+	if err == nil {
+		t.Error("expected error when periodic is not enabled")
+	}
+
+	jobs := w.PeriodicJobs()
+	if jobs != nil {
+		t.Error("expected nil jobs when periodic is not enabled")
+	}
+}
+
+func TestWorker_Periodic_Enabled(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-periodic-enabled:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-periodic-enabled",
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+			PeriodicEnabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	err = w.Periodic("0 * * * *", "hourly_job")
+	if err != nil {
+		t.Fatalf("failed to register periodic job: %v", err)
+	}
+
+	jobs := w.PeriodicJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 periodic job, got %d", len(jobs))
+	}
+	if jobs[0].JobType != "hourly_job" {
+		t.Errorf("expected job type 'hourly_job', got '%s'", jobs[0].JobType)
+	}
+}
+
+func TestWorker_Periodic_InvalidCron(t *testing.T) {
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-periodic-invalid",
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+			PeriodicEnabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	err = w.Periodic("invalid", "test_job")
+	if err == nil {
+		t.Error("expected error for invalid cron expression")
+	}
+}
