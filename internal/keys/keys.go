@@ -13,6 +13,10 @@ func New(namespace string) *Keys {
 	return &Keys{namespace: namespace}
 }
 
+func (k *Keys) Namespace() string {
+	return k.namespace
+}
+
 func (k *Keys) prefix(parts ...string) string {
 	key := k.namespace
 	for _, p := range parts {
@@ -63,6 +67,18 @@ func (k *Keys) Batch(id string) string {
 
 func (k *Keys) BatchJobs(id string) string {
 	return k.prefix("batch", id, "jobs")
+}
+
+func (k *Keys) BatchFailed(id string) string {
+	return k.prefix("batch", id, "failed")
+}
+
+func (k *Keys) Batches() string {
+	return k.prefix("batches")
+}
+
+func (k *Keys) DeadBatches() string {
+	return k.prefix("batches", "dead")
 }
 
 func (k *Keys) Unique(key string) string {

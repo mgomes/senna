@@ -12,10 +12,10 @@ import (
 
 func TestWithinLimit_Success(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-within-limit*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-within-limit",
+		Name:     "senna-test-within-limit",
 		Limit:    10,
 		Interval: time.Second,
 	})
@@ -36,10 +36,10 @@ func TestWithinLimit_Success(t *testing.T) {
 
 func TestWithinLimit_FunctionError(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-within-limit-error*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-within-limit-error",
+		Name:     "senna-test-within-limit-error",
 		Limit:    10,
 		Interval: time.Second,
 	})
@@ -56,10 +56,10 @@ func TestWithinLimit_FunctionError(t *testing.T) {
 
 func TestWithinLimit_OverLimit(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-within-limit-over*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:        "test-within-limit-over",
+		Name:        "senna-test-within-limit-over",
 		Limit:       2,
 		Interval:    time.Second,
 		WaitTimeout: 10 * time.Millisecond,
@@ -80,33 +80,49 @@ func TestWithinLimit_OverLimit(t *testing.T) {
 
 func TestWithinLimitCtx_RespectsContext(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:concurrent:senna-test-within-limit-ctx*")
 
-	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:        "test-within-limit-ctx",
+	// Use concurrent limiter - it's more predictable for this test
+	// because it tracks active operations rather than time windows
+	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
+		Name:        "senna-test-within-limit-ctx",
 		Limit:       1,
-		Interval:    time.Second,
+		LockTimeout: 5 * time.Second,
 		WaitTimeout: 5 * time.Second,
 	})
 
-	_ = WithinLimitCtx(context.Background(), limiter, func() error { return nil })
+	// First call acquires the only slot and holds it (we don't release)
+	blocker := make(chan struct{})
+	go func() {
+		_ = WithinLimitCtx(context.Background(), limiter, func() error {
+			<-blocker // Block until test is done
+			return nil
+		})
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Give the goroutine time to acquire the lock
+	time.Sleep(50 * time.Millisecond)
+
+	// Second call should block waiting for the slot, then context times out
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
 	err := WithinLimitCtx(ctx, limiter, func() error { return nil })
 
+	// Release the blocker
+	close(blocker)
+
 	if err == nil {
-		t.Error("expected context deadline exceeded error")
+		t.Error("expected error when context times out")
 	}
 }
 
 func TestRateLimitMiddleware_AllowsWithinLimit(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-allow*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-mw-allow",
+		Name:     "senna-test-mw-allow",
 		Limit:    10,
 		Interval: time.Second,
 	})
@@ -132,10 +148,10 @@ func TestRateLimitMiddleware_AllowsWithinLimit(t *testing.T) {
 
 func TestRateLimitMiddleware_BlocksOverLimit(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-block*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:        "test-mw-block",
+		Name:        "senna-test-mw-block",
 		Limit:       1,
 		Interval:    time.Second,
 		WaitTimeout: 10 * time.Millisecond,
@@ -167,10 +183,10 @@ func TestRateLimitMiddleware_BlocksOverLimit(t *testing.T) {
 
 func TestRateLimitMiddlewareWithReschedule_AllowsWithinLimit(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-reschedule-allow*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-mw-reschedule-allow",
+		Name:     "senna-test-mw-reschedule-allow",
 		Limit:    10,
 		Interval: time.Second,
 	})
@@ -196,10 +212,10 @@ func TestRateLimitMiddlewareWithReschedule_AllowsWithinLimit(t *testing.T) {
 
 func TestRateLimitMiddlewareWithReschedule_ReturnsRetryableError(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-reschedule*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:        "test-mw-reschedule",
+		Name:        "senna-test-mw-reschedule",
 		Limit:       1,
 		Interval:    time.Second,
 		WaitTimeout: 10 * time.Millisecond,
@@ -228,10 +244,10 @@ func TestRateLimitMiddlewareWithReschedule_ReturnsRetryableError(t *testing.T) {
 
 func TestRateLimitMiddleware_ConcurrentAccess(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-concurrent*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:        "test-mw-concurrent",
+		Name:        "senna-test-mw-concurrent",
 		Limit:       5,
 		Interval:    time.Second,
 		WaitTimeout: 10 * time.Millisecond,
@@ -285,10 +301,10 @@ func TestWithinLimit_UnlimitedLimiter(t *testing.T) {
 
 func TestRateLimitMiddleware_PreservesJobContext(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-context*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-mw-context",
+		Name:     "senna-test-mw-context",
 		Limit:    10,
 		Interval: time.Second,
 	})
@@ -317,10 +333,10 @@ func TestRateLimitMiddleware_PreservesJobContext(t *testing.T) {
 
 func TestRateLimitMiddleware_PropagatesHandlerError(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "senna:ratelimit:*")
+	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-mw-error*")
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
-		Name:     "test-mw-error",
+		Name:     "senna-test-mw-error",
 		Limit:    10,
 		Interval: time.Second,
 	})

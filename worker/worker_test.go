@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -434,5 +435,58 @@ func TestWorker_MiddlewareOrder(t *testing.T) {
 		if order[start+i] != v {
 			t.Errorf("expected order[%d]='%s', got '%s'", i, v, order[start+i])
 		}
+	}
+}
+
+func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-failures:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-batch-failures",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	job := senna.NewJob("batch-job", nil)
+	job.BatchID = "batch-1"
+
+	state := senna.BatchState{
+		ID:        job.BatchID,
+		Total:     1,
+		Pending:   1,
+		Failures:  0,
+		Successes: 0,
+		CreatedAt: time.Now(),
+	}
+	data, _ := json.Marshal(state)
+	redisClient.Set(context.Background(), w.keys.Batch(job.BatchID), string(data), 0)
+	redisClient.SAdd(context.Background(), w.keys.BatchJobs(job.BatchID), job.ID)
+
+	w.updateBatchProgress(context.Background(), job, batchResultFailure)
+
+	stateJSON, _ := redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
+	var updated senna.BatchState
+	_ = json.Unmarshal([]byte(stateJSON), &updated)
+	if updated.Failures != 1 || updated.Pending != 1 {
+		t.Fatalf("expected failures=1 pending=1 after first failure, got failures=%d pending=%d", updated.Failures, updated.Pending)
+	}
+
+	w.updateBatchProgress(context.Background(), job, batchResultFailure)
+	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
+	_ = json.Unmarshal([]byte(stateJSON), &updated)
+	if updated.Failures != 1 || updated.Pending != 1 {
+		t.Fatalf("expected failures to remain 1, got failures=%d pending=%d", updated.Failures, updated.Pending)
+	}
+
+	w.updateBatchProgress(context.Background(), job, batchResultSuccess)
+	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
+	_ = json.Unmarshal([]byte(stateJSON), &updated)
+	if updated.Failures != 1 || updated.Pending != 0 || updated.Successes != 1 {
+		t.Fatalf("after success expected failures=1 pending=0 successes=1, got failures=%d pending=%d successes=%d", updated.Failures, updated.Pending, updated.Successes)
 	}
 }

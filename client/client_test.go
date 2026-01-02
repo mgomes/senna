@@ -348,14 +348,14 @@ func TestBatch_Builder(t *testing.T) {
 	if batch.Jobs[1].Queue != "critical" {
 		t.Errorf("expected queue 'critical', got '%s'", batch.Jobs[1].Queue)
 	}
-	if batch.OnComplete != "on_complete" {
-		t.Errorf("expected OnComplete 'on_complete', got '%s'", batch.OnComplete)
+	if batch.OnComplete == nil || batch.OnComplete.JobType != "on_complete" {
+		t.Errorf("expected OnComplete.JobType 'on_complete', got '%v'", batch.OnComplete)
 	}
-	if batch.OnSuccess != "on_success" {
-		t.Errorf("expected OnSuccess 'on_success', got '%s'", batch.OnSuccess)
+	if batch.OnSuccess == nil || batch.OnSuccess.JobType != "on_success" {
+		t.Errorf("expected OnSuccess.JobType 'on_success', got '%v'", batch.OnSuccess)
 	}
-	if batch.OnDeath != "on_death" {
-		t.Errorf("expected OnDeath 'on_death', got '%s'", batch.OnDeath)
+	if batch.OnDeath == nil || batch.OnDeath.JobType != "on_death" {
+		t.Errorf("expected OnDeath.JobType 'on_death', got '%v'", batch.OnDeath)
 	}
 }
 

@@ -222,13 +222,68 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 }
 
 func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
+	if batch.err != nil {
+		return batch.err
+	}
+
+	const batchTTL = 30 * 24 * time.Hour
+
 	pipe := c.redis.Pipeline()
 
-	batchData, err := json.Marshal(batch)
+	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
+	emptyBatch := len(batch.Jobs) == 0
+
+	// Use client's default queue if batch doesn't specify a callback queue
+	callbackQueue := batch.CallbackQueue
+	if callbackQueue == "" {
+		callbackQueue = c.settings.DefaultQueue
+	}
+
+	// Build batch state for tracking
+	state := &senna.BatchState{
+		ID:            batch.ID,
+		Description:   batch.Description,
+		Total:         len(batch.Jobs),
+		Pending:       len(batch.Jobs),
+		Failures:      0,
+		Successes:     0,
+		Dead:          false,
+		DeathFired:    false,
+		CompleteFired: emptyBatch,
+		SuccessFired:  emptyBatch,
+		CreatedAt:     batch.CreatedAt,
+		CallbackQueue: callbackQueue,
+	}
+
+	if batch.OnComplete != nil {
+		state.OnComplete = &senna.CallbackInfo{
+			JobType: batch.OnComplete.JobType,
+			Options: batch.OnComplete.Options,
+		}
+	}
+	if batch.OnSuccess != nil {
+		state.OnSuccess = &senna.CallbackInfo{
+			JobType: batch.OnSuccess.JobType,
+			Options: batch.OnSuccess.Options,
+		}
+	}
+	if batch.OnDeath != nil {
+		state.OnDeath = &senna.CallbackInfo{
+			JobType: batch.OnDeath.JobType,
+			Options: batch.OnDeath.Options,
+		}
+	}
+
+	batchData, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), 7*24*time.Hour)
+
+	// Store batch state with 30 day expiration (like Sidekiq)
+	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), batchTTL)
+
+	// Add to batches set for iteration
+	pipe.SAdd(ctx, c.keys.Batches(), batch.ID)
 
 	for _, job := range batch.Jobs {
 		job.BatchID = batch.ID
@@ -242,6 +297,51 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		pipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
 	}
 
+	// Ensure batch job/failed sets expire alongside the batch state
+	pipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
+	pipe.Expire(ctx, c.keys.BatchFailed(batch.ID), batchTTL)
+
 	_, err = pipe.Exec(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// For empty batches, immediately enqueue callbacks
+	if emptyBatch {
+		c.enqueueEmptyBatchCallbacks(ctx, batch, callbackQueue)
+	}
+
+	return nil
+}
+
+// enqueueEmptyBatchCallbacks enqueues callbacks for empty batches immediately.
+func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, batch *Batch, queue string) {
+	// OnComplete always fires for empty batches
+	if batch.OnComplete != nil {
+		c.enqueueBatchCallback(ctx, batch.OnComplete.JobType, batch.ID, batch.OnComplete.Options, queue)
+	}
+
+	// OnSuccess fires for empty batches (no jobs = no failures)
+	if batch.OnSuccess != nil {
+		c.enqueueBatchCallback(ctx, batch.OnSuccess.JobType, batch.ID, batch.OnSuccess.Options, queue)
+	}
+}
+
+func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID string, options map[string]any, queue string) {
+	args := map[string]any{
+		"batch_id": batchID,
+	}
+	for k, v := range options {
+		args[k] = v
+	}
+
+	job := senna.NewJob(jobType, args)
+	job.Queue = queue
+	data, _ := job.Marshal()
+	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
+}
+
+// BatchStatus returns the status of a batch.
+func (c *Client) BatchStatus(bid string) *senna.BatchStatus {
+	return senna.NewBatchStatus(c.redis, c.keys.Namespace(), bid)
 }

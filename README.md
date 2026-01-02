@@ -356,37 +356,179 @@ w.Use(senna.RateLimitMiddlewareWithReschedule(limiter))
 
 ## Batch Jobs
 
-Process related jobs as a group and get notified when all complete.
+Batches allow you to monitor a collection of jobs as a group. You can create a set of jobs to execute in parallel and then execute callbacks when all jobs are finished.
+
+### Creating a Batch
 
 ```go
 // Create a batch
 batch := client.NewBatch().
-    Add("process_image", map[string]any{"image_id": 1}).
-    Add("process_image", map[string]any{"image_id": 2}).
-    Add("process_image", map[string]any{"image_id": 3}).
+    WithDescription("Process uploaded spreadsheet").
+    Add("process_row", map[string]any{"row_id": 1}).
+    Add("process_row", map[string]any{"row_id": 2}).
+    Add("process_row", map[string]any{"row_id": 3}).
     OnCompleteCallback("batch_finished")
 
-// Enqueue the batch
+// Enqueue the batch atomically
 err := c.EnqueueBatch(ctx, batch)
-
-// Register the callback handler
-w.Register("batch_finished", func(ctx context.Context, job *senna.Job) error {
-    batchID := job.Args["batch_id"].(string)
-    fmt.Printf("Batch %s completed!\n", batchID)
-    return nil
-})
+fmt.Printf("Started Batch %s\n", batch.ID)
 ```
 
-You can also set callbacks for success (all jobs succeeded) or death (any job failed permanently):
+### Callbacks
+
+Senna can notify you when a batch completes with three callback types:
+
+1. **complete** - when all jobs in the batch have run once, successful or not
+2. **success** - when all jobs in the batch have completed successfully
+3. **death** - the first time a batch job dies (exhausts retries)
 
 ```go
 batch := client.NewBatch().
     Add("job1", nil).
     Add("job2", nil).
-    OnCompleteCallback("on_complete").    // Always called
-    OnSuccessCallback("on_success").      // Called if all succeed
-    OnDeathCallback("on_death")           // Called if any fail permanently
+    OnCompleteCallback("on_complete").           // Always called when all jobs finish
+    OnSuccessCallback("on_success").             // Only if ALL jobs succeed
+    OnDeathCallback("on_death")                  // First time any job dies
+
+// Register callback handlers
+w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
+    batchID := job.Args["batch_id"].(string)
+    fmt.Printf("Batch %s completed\n", batchID)
+    return nil
+})
 ```
+
+### Callback Options
+
+You can pass options to callbacks that will be included in the callback job's args:
+
+```go
+batch := client.NewBatch().
+    Add("sync_user", map[string]any{"user_id": 123}).
+    OnSuccessCallback("notify_user", map[string]any{
+        "email": "user@example.com",
+        "template": "sync_complete",
+    })
+
+// In the callback handler:
+w.Register("notify_user", func(ctx context.Context, job *senna.Job) error {
+    batchID := job.Args["batch_id"].(string)
+    email := job.Args["email"].(string)
+    template := job.Args["template"].(string)
+    // Send notification...
+    return nil
+})
+```
+
+### Callback Queue
+
+You can specify a different queue for callback jobs:
+
+```go
+batch := client.NewBatch().
+    Add("job1", nil).
+    OnCompleteCallback("on_complete").
+    WithCallbackQueue("critical")  // Callbacks run on "critical" queue
+```
+
+### Adding Jobs Dynamically
+
+You can add jobs to a batch from within an executing job:
+
+```go
+w.Register("parent_job", func(ctx context.Context, job *senna.Job) error {
+    // Get batch handle from context
+    batch := worker.BatchFromContext(ctx)
+    if batch == nil {
+        return nil // Not in a batch
+    }
+
+    fmt.Printf("Working within batch %s\n", batch.BID())
+
+    // Add more jobs to this batch
+    for _, childID := range getChildIDs() {
+        if err := batch.Add(ctx, "child_job", map[string]any{"id": childID}); err != nil {
+            return err
+        }
+    }
+
+    return nil
+})
+```
+
+### Batch Status
+
+Query the status of a batch programmatically:
+
+```go
+status := c.BatchStatus(batchID)
+if err := status.Refresh(ctx); err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("Total: %d\n", status.Total())       // Total jobs in batch
+fmt.Printf("Pending: %d\n", status.Pending())   // Jobs not yet complete
+fmt.Printf("Successes: %d\n", status.Successes())
+fmt.Printf("Failures: %d\n", status.Failures())
+fmt.Printf("Complete: %v\n", status.Complete()) // All jobs have run
+fmt.Printf("Dead: %v\n", status.Dead())         // Any job has died
+
+// Block until batch completes
+ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+defer cancel()
+if err := status.Join(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Canceling a Batch
+
+You can invalidate a batch so remaining jobs skip execution:
+
+```go
+// From within a batch job:
+batch := worker.BatchFromContext(ctx)
+if err := batch.Invalidate(ctx); err != nil {
+    return err
+}
+
+// Jobs should check validity:
+w.Register("cancelable_job", func(ctx context.Context, job *senna.Job) error {
+    valid, err := worker.ValidWithinBatch(ctx)
+    if err != nil || !valid {
+        return nil // Skip execution
+    }
+    // Do work...
+    return nil
+})
+```
+
+### Iterating Batches
+
+You can iterate through all known batches:
+
+```go
+batchSet := senna.NewBatchSet(redisClient, "myapp")
+err := batchSet.Each(ctx, func(status *senna.BatchStatus) error {
+    fmt.Printf("Batch %s: %d pending\n", status.BID(), status.Pending())
+    return nil
+})
+
+// Iterate dead batches (those with failed jobs)
+deadSet := senna.NewDeadBatchSet(redisClient, "myapp")
+err = deadSet.Each(ctx, func(status *senna.BatchStatus) error {
+    failedJIDs, _ := status.FailedJIDs(ctx)
+    fmt.Printf("Dead batch %s: %v\n", status.BID(), failedJIDs)
+    return nil
+})
+```
+
+### Notes
+
+- Batches expire after 30 days if not completed
+- Death and success callbacks are not mutually exclusive - death firing means success won't fire without manual intervention
+- Don't disable retries in batch jobs - if a job fails without retrying, it disappears and the batch may never complete
+- Empty batches (with zero jobs) are valid and will immediately fire callbacks
 
 ## Encryption
 

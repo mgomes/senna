@@ -184,7 +184,7 @@ func TestIntegration_ScheduledJob(t *testing.T) {
 
 func TestIntegration_RateLimitedJob(t *testing.T) {
 	flushKeys(t, "integration-ratelimit:*")
-	flushKeys(t, "senna:ratelimit:*")
+	flushKeys(t, "senna:ratelimit:bucket:test-integration-limiter*")
 
 	client, err := client.New(&client.Config{
 		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
