@@ -401,30 +401,23 @@ func (w *Worker) scheduler(ctx context.Context) {
 }
 
 func (w *Worker) enqueueScheduled(ctx context.Context) {
-	now := float64(time.Now().Unix())
+	now := fmt.Sprintf("%d", time.Now().Unix())
 
 	for {
-		// Fetch jobs due now or in the past (score <= now)
-		items, err := w.redis.ZRangeByScoreWithScores(ctx, w.keys.Scheduled(), &redis.ZRangeBy{
-			Min:   "-inf",
-			Max:   fmt.Sprintf("%f", now),
-			Count: 100,
-		}).Result()
+		// Atomically pop jobs due now or in the past
+		result, err := popDueJobsScript.Run(ctx, w.redis, []string{w.keys.Scheduled()}, now, 100)
 		if err != nil {
 			return
 		}
-		if len(items) == 0 {
+
+		items, ok := result.([]any)
+		if !ok || len(items) == 0 {
 			return
 		}
 
-		for _, z := range items {
-			data, ok := z.Member.(string)
+		for _, item := range items {
+			data, ok := item.(string)
 			if !ok {
-				continue
-			}
-
-			// Remove from scheduled set
-			if err := w.redis.ZRem(ctx, w.keys.Scheduled(), z.Member).Err(); err != nil {
 				continue
 			}
 
@@ -439,30 +432,23 @@ func (w *Worker) enqueueScheduled(ctx context.Context) {
 }
 
 func (w *Worker) enqueueRetries(ctx context.Context) {
-	now := float64(time.Now().Unix())
+	now := fmt.Sprintf("%d", time.Now().Unix())
 
 	for {
-		// Fetch retries due now or in the past (score <= now)
-		items, err := w.redis.ZRangeByScoreWithScores(ctx, w.keys.Retry(), &redis.ZRangeBy{
-			Min:   "-inf",
-			Max:   fmt.Sprintf("%f", now),
-			Count: 100,
-		}).Result()
+		// Atomically pop retries due now or in the past
+		result, err := popDueJobsScript.Run(ctx, w.redis, []string{w.keys.Retry()}, now, 100)
 		if err != nil {
 			return
 		}
-		if len(items) == 0 {
+
+		items, ok := result.([]any)
+		if !ok || len(items) == 0 {
 			return
 		}
 
-		for _, z := range items {
-			data, ok := z.Member.(string)
+		for _, item := range items {
+			data, ok := item.(string)
 			if !ok {
-				continue
-			}
-
-			// Remove from retry set
-			if err := w.redis.ZRem(ctx, w.keys.Retry(), z.Member).Err(); err != nil {
 				continue
 			}
 

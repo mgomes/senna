@@ -839,3 +839,62 @@ func TestWorker_ScheduledPollInterval_DefaultValue(t *testing.T) {
 		t.Errorf("expected default ScheduledPollInterval 5s, got %v", settings.ScheduledPollInterval)
 	}
 }
+
+func TestWorker_Scheduler_ConcurrentWorkers_NoDuplicates(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-concurrent:*")
+
+	// Create multiple workers
+	workers := make([]*Worker, 3)
+	for i := range workers {
+		w, err := New(&Config{
+			Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+			Namespace: "test-scheduler-concurrent",
+			Settings:  senna.DefaultWorkerSettings(),
+		})
+		if err != nil {
+			t.Fatalf("failed to create worker %d: %v", i, err)
+		}
+		workers[i] = w
+		defer func() { _ = w.redis.Close() }()
+	}
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	// Add 10 jobs
+	for i := 0; i < 10; i++ {
+		job := senna.NewJob("concurrent_job", map[string]any{"index": i})
+		jobData, _ := job.Marshal()
+		redisClient.ZAdd(ctx, workers[0].keys.Scheduled(), redis.Z{
+			Score:  float64(pastTime.Unix()),
+			Member: string(jobData),
+		})
+	}
+
+	// Run schedulers concurrently from all workers
+	done := make(chan struct{})
+	for _, w := range workers {
+		go func(w *Worker) {
+			w.enqueueScheduled(ctx)
+			done <- struct{}{}
+		}(w)
+	}
+
+	// Wait for all workers
+	for range workers {
+		<-done
+	}
+
+	// Verify exactly 10 jobs in queue (no duplicates)
+	queueLen, _ := redisClient.LLen(ctx, workers[0].keys.Queue("default")).Result()
+	if queueLen != 10 {
+		t.Errorf("expected exactly 10 jobs in queue (no duplicates), got %d", queueLen)
+	}
+
+	// Verify scheduled set is empty
+	scheduledLen, _ := redisClient.ZCard(ctx, workers[0].keys.Scheduled()).Result()
+	if scheduledLen != 0 {
+		t.Errorf("expected 0 jobs in scheduled, got %d", scheduledLen)
+	}
+}
