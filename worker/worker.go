@@ -497,32 +497,41 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 		w.redis.HDel(ctx, w.keys.Workers(), id)
 	}
 
+	// Use SCAN instead of KEYS to avoid blocking Redis on large databases
 	pattern := w.keys.InFlight("*")
-	foundKeys, err := w.redis.Keys(ctx, pattern).Result()
-	if err != nil {
-		return
-	}
-
-	for _, key := range foundKeys {
-		workerID := key[len(w.keys.InFlight("")):]
-		if activeWorkers[workerID] {
-			continue
-		}
-
-		jobs, err := w.redis.LRange(ctx, key, 0, -1).Result()
+	var cursor uint64
+	for {
+		keys, nextCursor, err := w.redis.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
-			continue
+			return
 		}
 
-		for _, data := range jobs {
-			var job senna.Job
-			if err := json.Unmarshal([]byte(data), &job); err != nil {
+		for _, key := range keys {
+			workerID := key[len(w.keys.InFlight("")):]
+			if activeWorkers[workerID] {
 				continue
 			}
-			w.redis.LPush(ctx, w.keys.Queue(job.Queue), data)
+
+			jobs, err := w.redis.LRange(ctx, key, 0, -1).Result()
+			if err != nil {
+				continue
+			}
+
+			for _, data := range jobs {
+				var job senna.Job
+				if err := json.Unmarshal([]byte(data), &job); err != nil {
+					continue
+				}
+				w.redis.LPush(ctx, w.keys.Queue(job.Queue), data)
+			}
+
+			w.redis.Del(ctx, key)
 		}
 
-		w.redis.Del(ctx, key)
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
 	}
 }
 
