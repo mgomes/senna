@@ -62,7 +62,7 @@ func New(cfg *Config) (*Worker, error) {
 		keys:    k,
 		config:  cfg,
 		pool:    newWorkerPool(cfg.Settings.Concurrency),
-		fetcher: newFetcher(client, k, cfg.Settings.Queues, cfg.Settings.PollInterval),
+		fetcher: newFetcher(client, k, cfg.Settings.Queues, cfg.Settings.PollInterval, cfg.Settings.StrictPriority),
 		stopCh:  make(chan struct{}),
 	}
 
