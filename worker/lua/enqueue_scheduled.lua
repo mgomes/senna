@@ -24,27 +24,33 @@ end
 local enqueued = 0
 for _, data in ipairs(items) do
     local ok, job = pcall(cjson.decode, data)
+    local should_enqueue = false
+    local queue = "default"
+
     if ok and type(job) == "table" then
-        local queue = job.queue or "default"
-        if type(queue) == "string" and queue ~= "" then
-            local queue_key = queue_prefix .. queue
-
-            -- Remove this item from the sorted set
-            redis.call('ZREM', zset_key, data)
-
-            -- Add queue to known queues set
-            redis.call('SADD', queues_key, queue)
-
-            -- Push job to queue
-            redis.call('LPUSH', queue_key, data)
-            enqueued = enqueued + 1
-        else
-            -- Invalid queue value, remove but don't enqueue (job is lost)
-            redis.call('ZREM', zset_key, data)
+        -- Use queue from job, defaulting to "default" if nil/missing
+        -- Empty string is allowed (preserves existing behavior)
+        if job.queue == nil then
+            should_enqueue = true
+        elseif type(job.queue) == "string" then
+            queue = job.queue
+            should_enqueue = true
         end
-    else
-        -- Malformed JSON, remove but don't enqueue (job is lost)
-        redis.call('ZREM', zset_key, data)
+        -- Non-string queue value (e.g., number, boolean) falls through with should_enqueue = false
+    end
+
+    -- Always remove from the sorted set
+    redis.call('ZREM', zset_key, data)
+
+    if should_enqueue then
+        local queue_key = queue_prefix .. queue
+
+        -- Add queue to known queues set
+        redis.call('SADD', queues_key, queue)
+
+        -- Push job to queue
+        redis.call('LPUSH', queue_key, data)
+        enqueued = enqueued + 1
     end
 end
 
