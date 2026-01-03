@@ -10,17 +10,17 @@ import (
 	"github.com/mgomes/senna"
 )
 
-func TestWorkerPool_Register(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Register(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	called := false
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		called = true
 		return nil
 	}, nil)
 
 	job := senna.NewJob("test_job", nil)
-	_, err := pool.process(context.Background(), job)
+	_, err := registry.process(context.Background(), job)
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
 	}
@@ -29,20 +29,20 @@ func TestWorkerPool_Register(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Register_WithOptions(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Register_WithOptions(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	opts := &JobOptions{
 		MaxRetries: 3,
 		Timeout:    time.Second,
 	}
 
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	}, opts)
 
 	job := senna.NewJob("test_job", nil)
-	returnedOpts, err := pool.process(context.Background(), job)
+	returnedOpts, err := registry.process(context.Background(), job)
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
 	}
@@ -54,32 +54,32 @@ func TestWorkerPool_Register_WithOptions(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Use(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Use(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	var order []string
 
-	pool.Use(func(next senna.Handler) senna.Handler {
+	registry.Use(func(next senna.Handler) senna.Handler {
 		return func(ctx context.Context, job *senna.Job) error {
 			order = append(order, "mw1")
 			return next(ctx, job)
 		}
 	})
 
-	pool.Use(func(next senna.Handler) senna.Handler {
+	registry.Use(func(next senna.Handler) senna.Handler {
 		return func(ctx context.Context, job *senna.Job) error {
 			order = append(order, "mw2")
 			return next(ctx, job)
 		}
 	})
 
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		order = append(order, "handler")
 		return nil
 	}, nil)
 
 	job := senna.NewJob("test_job", nil)
-	_, _ = pool.process(context.Background(), job)
+	_, _ = registry.process(context.Background(), job)
 
 	expected := []string{"mw1", "mw2", "handler"}
 	if len(order) != len(expected) {
@@ -92,17 +92,17 @@ func TestWorkerPool_Use(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Process_Success(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Process_Success(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	result := ""
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		result = job.Args["message"].(string)
 		return nil
 	}, nil)
 
 	job := senna.NewJob("test_job", map[string]any{"message": "hello"})
-	_, err := pool.process(context.Background(), job)
+	_, err := registry.process(context.Background(), job)
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
 	}
@@ -111,11 +111,11 @@ func TestWorkerPool_Process_Success(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Process_JobNotFound(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Process_JobNotFound(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	job := senna.NewJob("unknown_job", nil)
-	_, err := pool.process(context.Background(), job)
+	_, err := registry.process(context.Background(), job)
 
 	var notFoundErr *senna.JobNotFoundError
 	if !errors.As(err, &notFoundErr) {
@@ -123,30 +123,30 @@ func TestWorkerPool_Process_JobNotFound(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Process_WithTimeout(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Process_WithTimeout(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	opts := &JobOptions{
 		Timeout: 50 * time.Millisecond,
 	}
 
-	pool.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
 		time.Sleep(500 * time.Millisecond)
 		return nil
 	}, opts)
 
 	job := senna.NewJob("slow_job", nil)
-	_, err := pool.process(context.Background(), job)
+	_, err := registry.process(context.Background(), job)
 
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 	}
 }
 
-func TestWorkerPool_Process_SetsProcessedAt(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Process_SetsProcessedAt(t *testing.T) {
+	registry := newHandlerRegistry()
 
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		return nil
 	}, nil)
 
@@ -156,7 +156,7 @@ func TestWorkerPool_Process_SetsProcessedAt(t *testing.T) {
 	}
 
 	before := time.Now()
-	_, _ = pool.process(context.Background(), job)
+	_, _ = registry.process(context.Background(), job)
 	after := time.Now()
 
 	if job.ProcessedAt == nil {
@@ -167,8 +167,8 @@ func TestWorkerPool_Process_SetsProcessedAt(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
-	pool := newWorkerPool(10)
+func TestHandlerRegistry_Process_WithMaxConcurrency(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	opts := &JobOptions{
 		MaxConcurrency: 2,
@@ -177,7 +177,7 @@ func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
 	var maxConcurrent atomic.Int32
 	var currentConcurrent atomic.Int32
 
-	pool.Register("limited_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("limited_job", func(ctx context.Context, job *senna.Job) error {
 		current := currentConcurrent.Add(1)
 		defer currentConcurrent.Add(-1)
 
@@ -196,7 +196,7 @@ func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
 	for range 10 {
 		go func() {
 			job := senna.NewJob("limited_job", nil)
-			_, _ = pool.process(context.Background(), job)
+			_, _ = registry.process(context.Background(), job)
 			done <- struct{}{}
 		}()
 	}
@@ -210,201 +210,29 @@ func TestWorkerPool_Process_WithMaxConcurrency(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_Submit_Success(t *testing.T) {
-	pool := newWorkerPool(5)
-
-	ctx := context.Background()
-	pool.Start(ctx)
-	defer pool.Stop()
-
-	job := senna.NewJob("test_job", nil)
-	ok := pool.Submit(job)
-	if !ok {
-		t.Error("Submit should return true")
-	}
-}
-
-func TestWorkerPool_Submit_ChannelFull(t *testing.T) {
-	pool := newWorkerPool(1)
-
-	for i := 0; i < pool.concurrency*2; i++ {
-		pool.Submit(senna.NewJob("test", nil))
-	}
-
-	ok := pool.Submit(senna.NewJob("test", nil))
-	if ok {
-		t.Error("Submit should return false when channel is full")
-	}
-}
-
-func TestWorkerPool_SubmitWait_Success(t *testing.T) {
-	pool := newWorkerPool(5)
-
-	ctx := context.Background()
-	pool.Start(ctx)
-	defer func() {
-		pool.Stop()
-		pool.Wait()
-	}()
-
-	job := senna.NewJob("test_job", nil)
-	ok := pool.SubmitWait(ctx, job)
-	if !ok {
-		t.Error("SubmitWait should return true")
-	}
-}
-
-func TestWorkerPool_SubmitWait_ContextCanceled(t *testing.T) {
-	pool := newWorkerPool(1)
-
-	for i := 0; i < pool.concurrency*2; i++ {
-		pool.Submit(senna.NewJob("test", nil))
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	ok := pool.SubmitWait(ctx, senna.NewJob("test", nil))
-	if ok {
-		t.Error("SubmitWait should return false when context is canceled")
-	}
-}
-
-func TestWorkerPool_Drain_CompletesGracefully(t *testing.T) {
-	pool := newWorkerPool(2)
-
-	var processed atomic.Int32
-
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
-		time.Sleep(50 * time.Millisecond)
-		processed.Add(1)
-		return nil
-	}, nil)
-
-	ctx := context.Background()
-	pool.Start(ctx)
-
-	for range 4 {
-		pool.Submit(senna.NewJob("test_job", nil))
-	}
-
-	pool.Stop()
-
-	drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := pool.Drain(drainCtx)
-	if err != nil {
-		t.Fatalf("Drain failed: %v", err)
-	}
-
-	if processed.Load() != 4 {
-		t.Errorf("expected 4 processed jobs, got %d", processed.Load())
-	}
-}
-
-func TestWorkerPool_Drain_Timeout(t *testing.T) {
-	pool := newWorkerPool(1)
-
-	pool.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
-		time.Sleep(5 * time.Second)
-		return nil
-	}, nil)
-
-	ctx := context.Background()
-	pool.Start(ctx)
-
-	pool.Submit(senna.NewJob("slow_job", nil))
-
-	time.Sleep(50 * time.Millisecond)
-
-	pool.Stop()
-
-	drainCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	err := pool.Drain(drainCtx)
-	if err != context.DeadlineExceeded {
-		t.Errorf("expected context.DeadlineExceeded, got %v", err)
-	}
-}
-
-func TestWorkerPool_Wait(t *testing.T) {
-	pool := newWorkerPool(2)
-
-	var processed atomic.Int32
-
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
-		time.Sleep(50 * time.Millisecond)
-		processed.Add(1)
-		return nil
-	}, nil)
-
-	ctx := context.Background()
-	pool.Start(ctx)
-
-	for range 4 {
-		pool.Submit(senna.NewJob("test_job", nil))
-	}
-
-	pool.Stop()
-	pool.Wait()
-
-	if processed.Load() != 4 {
-		t.Errorf("expected 4 processed jobs, got %d", processed.Load())
-	}
-}
-
-func TestWorkerPool_Process_ReturnsError(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_Process_ReturnsError(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	expectedErr := errors.New("job failed")
-	pool.Register("failing_job", func(ctx context.Context, job *senna.Job) error {
+	registry.Register("failing_job", func(ctx context.Context, job *senna.Job) error {
 		return expectedErr
 	}, nil)
 
 	job := senna.NewJob("failing_job", nil)
-	_, err := pool.process(context.Background(), job)
+	_, err := registry.process(context.Background(), job)
 
 	if err != expectedErr {
 		t.Errorf("expected error to propagate, got %v", err)
 	}
 }
 
-func TestWorkerPool_WorkerExitsOnContextCancel(t *testing.T) {
-	pool := newWorkerPool(2)
-
-	pool.Register("test_job", func(ctx context.Context, job *senna.Job) error {
-		return nil
-	}, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	pool.Start(ctx)
-
-	time.Sleep(50 * time.Millisecond)
-
-	cancel()
-
-	done := make(chan struct{})
-	go func() {
-		pool.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Error("workers should exit when context is canceled")
-	}
-}
-
-func TestWorkerPool_ConcurrentRegistration(t *testing.T) {
-	pool := newWorkerPool(5)
+func TestHandlerRegistry_ConcurrentRegistration(t *testing.T) {
+	registry := newHandlerRegistry()
 
 	done := make(chan struct{})
 	for i := range 10 {
 		go func(id int) {
-			pool.Register("job_"+string(rune('a'+id)), func(ctx context.Context, job *senna.Job) error {
+			registry.Register("job_"+string(rune('a'+id)), func(ctx context.Context, job *senna.Job) error {
 				return nil
 			}, nil)
 			done <- struct{}{}

@@ -9,13 +9,12 @@ import (
 	"github.com/mgomes/senna/ratelimit"
 )
 
-type workerPool struct {
-	concurrency int
-	handlers    map[string]handlerEntry
-	middleware  []senna.Middleware
-	jobs        chan *senna.Job
-	wg          sync.WaitGroup
-	mu          sync.RWMutex
+// handlerRegistry manages job handlers and middleware.
+// It's a simplified pool that just dispatches jobs to handlers.
+type handlerRegistry struct {
+	handlers   map[string]handlerEntry
+	middleware []senna.Middleware
+	mu         sync.RWMutex
 }
 
 type handlerEntry struct {
@@ -38,64 +37,39 @@ type UniqueConfig struct {
 	TTL time.Duration
 }
 
-func newWorkerPool(concurrency int) *workerPool {
-	return &workerPool{
-		concurrency: concurrency,
-		handlers:    make(map[string]handlerEntry),
-		jobs:        make(chan *senna.Job, concurrency*2),
+func newHandlerRegistry() *handlerRegistry {
+	return &handlerRegistry{
+		handlers: make(map[string]handlerEntry),
 	}
 }
 
-func (p *workerPool) Register(jobType string, handler senna.Handler, opts *JobOptions) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (r *handlerRegistry) Register(jobType string, handler senna.Handler, opts *JobOptions) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	var sema chan struct{}
 	if opts != nil && opts.MaxConcurrency > 0 {
 		sema = make(chan struct{}, opts.MaxConcurrency)
 	}
 
-	p.handlers[jobType] = handlerEntry{
+	r.handlers[jobType] = handlerEntry{
 		handler: handler,
 		options: opts,
 		sema:    sema,
 	}
 }
 
-func (p *workerPool) Use(mw ...senna.Middleware) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.middleware = append(p.middleware, mw...)
+func (r *handlerRegistry) Use(mw ...senna.Middleware) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.middleware = append(r.middleware, mw...)
 }
 
-func (p *workerPool) Start(ctx context.Context) {
-	for i := 0; i < p.concurrency; i++ {
-		p.wg.Add(1)
-		go p.worker(ctx, i)
-	}
-}
-
-func (p *workerPool) worker(ctx context.Context, id int) {
-	defer p.wg.Done()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case job, ok := <-p.jobs:
-			if !ok {
-				return
-			}
-			_, _ = p.process(ctx, job)
-		}
-	}
-}
-
-func (p *workerPool) process(ctx context.Context, job *senna.Job) (*JobOptions, error) {
-	p.mu.RLock()
-	entry, ok := p.handlers[job.Type]
-	middleware := p.middleware
-	p.mu.RUnlock()
+func (r *handlerRegistry) process(ctx context.Context, job *senna.Job) (*JobOptions, error) {
+	r.mu.RLock()
+	entry, ok := r.handlers[job.Type]
+	middleware := r.middleware
+	r.mu.RUnlock()
 
 	if !ok {
 		return nil, &senna.JobNotFoundError{JobID: job.ID}
@@ -126,47 +100,6 @@ func (p *workerPool) process(ctx context.Context, job *senna.Job) (*JobOptions, 
 	job.ProcessedAt = &now
 
 	return entry.options, handler(ctx, job)
-}
-
-func (p *workerPool) Submit(job *senna.Job) bool {
-	select {
-	case p.jobs <- job:
-		return true
-	default:
-		return false
-	}
-}
-
-func (p *workerPool) SubmitWait(ctx context.Context, job *senna.Job) bool {
-	select {
-	case p.jobs <- job:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (p *workerPool) Stop() {
-	close(p.jobs)
-}
-
-func (p *workerPool) Wait() {
-	p.wg.Wait()
-}
-
-func (p *workerPool) Drain(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
 func rateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) senna.Middleware {

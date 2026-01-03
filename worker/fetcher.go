@@ -110,7 +110,7 @@ func (f *fetcher) fetchStrict(ctx context.Context, workerID string) (*senna.Job,
 	return nil, nil
 }
 
-// fetchFromQueue attempts to fetch a job from a specific queue
+// fetchFromQueue attempts to fetch a job from a specific queue (non-blocking)
 func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string) (*senna.Job, error) {
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
@@ -125,6 +125,121 @@ func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string
 		}
 	}
 	if err != nil {
+		return nil, err
+	}
+
+	var job senna.Job
+	if err := json.Unmarshal([]byte(result), &job); err != nil {
+		return nil, err
+	}
+
+	job.SetRaw(result)
+	return &job, nil
+}
+
+// BlockingFetch blocks until a job is available, then atomically moves it to in-flight.
+// Uses BLMOVE (Redis 6.2+) for efficient blocking without polling.
+func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	if f.strictPriority {
+		return f.blockingFetchStrict(ctx, workerID, timeout)
+	}
+	return f.blockingFetchWeighted(ctx, workerID, timeout)
+}
+
+// blockingFetchWeighted uses weighted random selection to honor queue priorities,
+// while still checking all queues to avoid unnecessary blocking
+func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	// First, try a weighted-random queue to honor priorities
+	// This ensures weighted fairness when multiple queues have jobs
+	primaryQueue := f.selectQueueWeighted()
+	if primaryQueue != "" {
+		job, err := f.fetchFromQueue(ctx, workerID, primaryQueue)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+
+	// Primary queue empty - check remaining queues to avoid blocking
+	// when jobs are available elsewhere
+	for _, q := range f.queues {
+		if q.Paused || q.Name == primaryQueue {
+			continue
+		}
+		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+
+	// All queues empty, block on a weighted random queue
+	blockQueue := f.selectQueueWeighted()
+	if blockQueue == "" {
+		// All queues paused, wait and retry
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
+	return f.blockingFetchFromQueue(ctx, workerID, blockQueue, timeout)
+}
+
+// blockingFetchStrict tries all queues non-blocking in priority order,
+// then blocks on the HIGHEST priority queue so high-priority jobs wake us immediately
+func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	activeQueues := make([]senna.QueueConfig, 0, len(f.queues))
+	for _, q := range f.queues {
+		if !q.Paused {
+			activeQueues = append(activeQueues, q)
+		}
+	}
+
+	if len(activeQueues) == 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
+
+	// Try ALL queues non-blocking in priority order (high to low)
+	for _, q := range activeQueues {
+		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+
+	// Block on HIGHEST priority queue - ensures high-priority jobs wake us immediately
+	// Low-priority jobs will be picked up on the next cycle after timeout
+	return f.blockingFetchFromQueue(ctx, workerID, activeQueues[0].Name, timeout)
+}
+
+// blockingFetchFromQueue uses BLMOVE to block until a job is available
+func (f *fetcher) blockingFetchFromQueue(ctx context.Context, workerID, queueName string, timeout time.Duration) (*senna.Job, error) {
+	queueKey := f.keys.Queue(queueName)
+	inFlightKey := f.keys.InFlight(workerID)
+
+	result, err := f.client.BLMove(ctx, queueKey, inFlightKey, "RIGHT", "LEFT", timeout).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 
