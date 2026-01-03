@@ -205,10 +205,13 @@ func (w *Worker) Close() error {
 // workerLoop blocks on Redis waiting for jobs, then processes them.
 // Uses BLMOVE for efficient blocking without polling.
 func (w *Worker) workerLoop(ctx context.Context) {
-	// Block timeout - how long to wait for a job before cycling
-	// This allows checking context cancellation and queue rotation
-	// Keep this relatively short to ensure responsiveness across multiple queues
-	blockTimeout := 1 * time.Second
+	// Block timeout controls how long we wait before cycling.
+	// This allows checking context cancellation and rotating across queues.
+	// Uses configured PollInterval to honor user's latency/load tuning preferences.
+	blockTimeout := w.config.Settings.PollInterval
+	if blockTimeout <= 0 {
+		blockTimeout = 100 * time.Millisecond
+	}
 
 	for {
 		select {
