@@ -651,3 +651,307 @@ func TestClient_MultipleScheduledJobs_OrderedByTime(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_EnqueueBulk_Basic(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	argsList := []map[string]any{
+		{"user_id": 1},
+		{"user_id": 2},
+		{"user_id": 3},
+	}
+
+	jobs, err := client.EnqueueBulk(ctx, "bulk_job", argsList)
+	if err != nil {
+		t.Fatalf("EnqueueBulk failed: %v", err)
+	}
+
+	if len(jobs) != 3 {
+		t.Fatalf("expected 3 jobs, got %d", len(jobs))
+	}
+
+	// Verify all jobs have unique IDs
+	ids := make(map[string]bool)
+	for _, job := range jobs {
+		if ids[job.ID] {
+			t.Error("duplicate job ID found")
+		}
+		ids[job.ID] = true
+	}
+
+	// Verify jobs are in queue
+	queueLen, _ := redisClient.LLen(ctx, "test-bulk:queue:default").Result()
+	if queueLen != 3 {
+		t.Errorf("expected 3 jobs in queue, got %d", queueLen)
+	}
+}
+
+func TestClient_EnqueueBulk_EmptyList(t *testing.T) {
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-empty",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	jobs, err := client.EnqueueBulk(context.Background(), "bulk_job", nil)
+	if err != nil {
+		t.Fatalf("EnqueueBulk with empty list should not error: %v", err)
+	}
+	if jobs != nil {
+		t.Error("expected nil jobs for empty list")
+	}
+}
+
+func TestClient_EnqueueBulk_WithQueue(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-queue:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-queue",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	argsList := []map[string]any{
+		{"id": 1},
+		{"id": 2},
+	}
+
+	jobs, err := client.EnqueueBulk(ctx, "bulk_job", argsList, WithQueue("critical"))
+	if err != nil {
+		t.Fatalf("EnqueueBulk failed: %v", err)
+	}
+
+	for _, job := range jobs {
+		if job.Queue != "critical" {
+			t.Errorf("expected queue 'critical', got '%s'", job.Queue)
+		}
+	}
+
+	// Verify jobs are in critical queue
+	criticalLen, _ := redisClient.LLen(ctx, "test-bulk-queue:queue:critical").Result()
+	if criticalLen != 2 {
+		t.Errorf("expected 2 jobs in critical queue, got %d", criticalLen)
+	}
+
+	// Verify queue was added to queues set
+	isMember, _ := redisClient.SIsMember(ctx, "test-bulk-queue:queues", "critical").Result()
+	if !isMember {
+		t.Error("critical queue should be in queues set")
+	}
+}
+
+func TestClient_EnqueueBulk_WithRetry(t *testing.T) {
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-retry",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	argsList := []map[string]any{
+		{"id": 1},
+	}
+
+	jobs, err := client.EnqueueBulk(context.Background(), "bulk_job", argsList, WithRetry(5))
+	if err != nil {
+		t.Fatalf("EnqueueBulk failed: %v", err)
+	}
+
+	if jobs[0].Retry != 5 {
+		t.Errorf("expected retry 5, got %d", jobs[0].Retry)
+	}
+}
+
+func TestClient_EnqueueBulk_UniqueKeyNotSupported(t *testing.T) {
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-unique",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	argsList := []map[string]any{
+		{"id": 1},
+	}
+
+	_, err = client.EnqueueBulk(context.Background(), "bulk_job", argsList, WithUniqueKey("key", time.Hour))
+	if err == nil {
+		t.Error("expected error when using unique key with bulk enqueue")
+	}
+}
+
+func TestClient_EnqueueBulkIn_Scheduled(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-in:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-in",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	argsList := []map[string]any{
+		{"id": 1},
+		{"id": 2},
+		{"id": 3},
+	}
+
+	jobs, err := client.EnqueueBulkIn(ctx, time.Hour, "delayed_bulk_job", argsList)
+	if err != nil {
+		t.Fatalf("EnqueueBulkIn failed: %v", err)
+	}
+
+	if len(jobs) != 3 {
+		t.Fatalf("expected 3 jobs, got %d", len(jobs))
+	}
+
+	// Verify jobs are in scheduled set, not queue
+	scheduledLen, _ := redisClient.ZCard(ctx, "test-bulk-in:scheduled").Result()
+	if scheduledLen != 3 {
+		t.Errorf("expected 3 jobs in scheduled, got %d", scheduledLen)
+	}
+
+	queueLen, _ := redisClient.LLen(ctx, "test-bulk-in:queue:default").Result()
+	if queueLen != 0 {
+		t.Errorf("expected 0 jobs in queue, got %d", queueLen)
+	}
+}
+
+func TestClient_EnqueueBulkAt_Scheduled(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-at:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-at",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	futureTime := time.Date(2030, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	argsList := []map[string]any{
+		{"id": 1},
+		{"id": 2},
+	}
+
+	jobs, err := client.EnqueueBulkAt(ctx, futureTime, "scheduled_bulk_job", argsList)
+	if err != nil {
+		t.Fatalf("EnqueueBulkAt failed: %v", err)
+	}
+
+	if len(jobs) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(jobs))
+	}
+
+	// Verify all jobs have the same score (timestamp)
+	items, _ := redisClient.ZRangeWithScores(ctx, "test-bulk-at:scheduled", 0, -1).Result()
+	expectedScore := float64(futureTime.Unix())
+	for _, item := range items {
+		if item.Score != expectedScore {
+			t.Errorf("expected score %f, got %f", expectedScore, item.Score)
+		}
+	}
+}
+
+func TestClient_EnqueueBulk_LargeVolume(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-large:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-large",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	// Create 1000 jobs
+	argsList := make([]map[string]any, 1000)
+	for i := range argsList {
+		argsList[i] = map[string]any{"index": i}
+	}
+
+	jobs, err := client.EnqueueBulk(ctx, "large_bulk_job", argsList)
+	if err != nil {
+		t.Fatalf("EnqueueBulk failed: %v", err)
+	}
+
+	if len(jobs) != 1000 {
+		t.Fatalf("expected 1000 jobs, got %d", len(jobs))
+	}
+
+	// Verify all jobs are in queue
+	queueLen, _ := redisClient.LLen(ctx, "test-bulk-large:queue:default").Result()
+	if queueLen != 1000 {
+		t.Errorf("expected 1000 jobs in queue, got %d", queueLen)
+	}
+}
+
+func TestClient_EnqueueBulk_WithBatch(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-batch:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-batch",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	argsList := []map[string]any{
+		{"id": 1},
+		{"id": 2},
+	}
+
+	jobs, err := client.EnqueueBulk(ctx, "batch_bulk_job", argsList, WithBatch("batch-123"))
+	if err != nil {
+		t.Fatalf("EnqueueBulk failed: %v", err)
+	}
+
+	for _, job := range jobs {
+		if job.BatchID != "batch-123" {
+			t.Errorf("expected batch ID 'batch-123', got '%s'", job.BatchID)
+		}
+	}
+}
