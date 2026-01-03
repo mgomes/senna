@@ -372,10 +372,10 @@ func (w *Worker) heartbeat(ctx context.Context) {
 				"queues":      w.config.Settings.Queues,
 				"concurrency": w.config.Settings.Concurrency,
 				"started_at":  time.Now().Unix(),
+				"beat_at":     time.Now().Unix(),
 			}
 			data, _ := json.Marshal(info)
 			w.redis.HSet(ctx, w.keys.Workers(), w.id, string(data))
-			w.redis.Expire(ctx, w.keys.Workers(), 60*time.Second)
 		}
 	}
 }
@@ -476,15 +476,43 @@ func (w *Worker) reaper(ctx context.Context) {
 	}
 }
 
+// workerHeartbeatTimeout defines how long a worker can go without heartbeating
+// before it's considered dead and its in-flight jobs are recovered.
+const workerHeartbeatTimeout = 60 * time.Second
+
 func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 	workers, err := w.redis.HGetAll(ctx, w.keys.Workers()).Result()
 	if err != nil {
 		return
 	}
 
+	now := time.Now().Unix()
 	activeWorkers := make(map[string]bool)
-	for id := range workers {
-		activeWorkers[id] = true
+	staleWorkers := make([]string, 0)
+
+	for id, data := range workers {
+		var info map[string]any
+		if err := json.Unmarshal([]byte(data), &info); err != nil {
+			continue
+		}
+
+		beatAt, ok := info["beat_at"].(float64)
+		if !ok {
+			// Legacy entry without beat_at, treat as stale
+			staleWorkers = append(staleWorkers, id)
+			continue
+		}
+
+		if now-int64(beatAt) > int64(workerHeartbeatTimeout.Seconds()) {
+			staleWorkers = append(staleWorkers, id)
+		} else {
+			activeWorkers[id] = true
+		}
+	}
+
+	// Clean up stale worker entries from the hash
+	for _, id := range staleWorkers {
+		w.redis.HDel(ctx, w.keys.Workers(), id)
 	}
 
 	pattern := w.keys.InFlight("*")
@@ -494,7 +522,7 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 	}
 
 	for _, key := range foundKeys {
-		workerID := key[len(w.keys.InFlight(""))+1:]
+		workerID := key[len(w.keys.InFlight("")):]
 		if activeWorkers[workerID] {
 			continue
 		}
