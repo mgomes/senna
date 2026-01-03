@@ -19,22 +19,33 @@ if #items == 0 then
     return 0
 end
 
--- Remove the items from the sorted set
-redis.call('ZREM', zset_key, unpack(items))
-
--- Parse each job and push to appropriate queue
+-- Parse each job, remove from zset, and push to queue
+-- Use pcall to safely handle malformed JSON without aborting the script
 local enqueued = 0
 for _, data in ipairs(items) do
-    local job = cjson.decode(data)
-    local queue = job.queue or "default"
-    local queue_key = queue_prefix .. queue
+    local ok, job = pcall(cjson.decode, data)
+    if ok and type(job) == "table" then
+        local queue = job.queue or "default"
+        if type(queue) == "string" and queue ~= "" then
+            local queue_key = queue_prefix .. queue
 
-    -- Add queue to known queues set
-    redis.call('SADD', queues_key, queue)
+            -- Remove this item from the sorted set
+            redis.call('ZREM', zset_key, data)
 
-    -- Push job to queue
-    redis.call('LPUSH', queue_key, data)
-    enqueued = enqueued + 1
+            -- Add queue to known queues set
+            redis.call('SADD', queues_key, queue)
+
+            -- Push job to queue
+            redis.call('LPUSH', queue_key, data)
+            enqueued = enqueued + 1
+        else
+            -- Invalid queue value, remove but don't enqueue (job is lost)
+            redis.call('ZREM', zset_key, data)
+        end
+    else
+        -- Malformed JSON, remove but don't enqueue (job is lost)
+        redis.call('ZREM', zset_key, data)
+    end
 end
 
 return enqueued
