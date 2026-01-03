@@ -402,62 +402,44 @@ func (w *Worker) scheduler(ctx context.Context) {
 
 func (w *Worker) enqueueScheduled(ctx context.Context) {
 	now := fmt.Sprintf("%d", time.Now().Unix())
+	queuePrefix := w.keys.Queue("")
 
 	for {
-		// Atomically pop jobs due now or in the past
-		result, err := popDueJobsScript.Run(ctx, w.redis, []string{w.keys.Scheduled()}, now, 100)
+		// Atomically pop due jobs and push to their queues
+		result, err := enqueueScheduledScript.Run(
+			ctx, w.redis,
+			[]string{w.keys.Scheduled(), w.keys.Queues()},
+			now, 100, queuePrefix,
+		)
 		if err != nil {
 			return
 		}
 
-		items, ok := result.([]any)
-		if !ok || len(items) == 0 {
+		count, ok := result.(int64)
+		if !ok || count == 0 {
 			return
-		}
-
-		for _, item := range items {
-			data, ok := item.(string)
-			if !ok {
-				continue
-			}
-
-			var job senna.Job
-			if err := json.Unmarshal([]byte(data), &job); err != nil {
-				continue
-			}
-
-			w.redis.LPush(ctx, w.keys.Queue(job.Queue), data)
 		}
 	}
 }
 
 func (w *Worker) enqueueRetries(ctx context.Context) {
 	now := fmt.Sprintf("%d", time.Now().Unix())
+	queuePrefix := w.keys.Queue("")
 
 	for {
-		// Atomically pop retries due now or in the past
-		result, err := popDueJobsScript.Run(ctx, w.redis, []string{w.keys.Retry()}, now, 100)
+		// Atomically pop due retries and push to their queues
+		result, err := enqueueScheduledScript.Run(
+			ctx, w.redis,
+			[]string{w.keys.Retry(), w.keys.Queues()},
+			now, 100, queuePrefix,
+		)
 		if err != nil {
 			return
 		}
 
-		items, ok := result.([]any)
-		if !ok || len(items) == 0 {
+		count, ok := result.(int64)
+		if !ok || count == 0 {
 			return
-		}
-
-		for _, item := range items {
-			data, ok := item.(string)
-			if !ok {
-				continue
-			}
-
-			var job senna.Job
-			if err := json.Unmarshal([]byte(data), &job); err != nil {
-				continue
-			}
-
-			w.redis.LPush(ctx, w.keys.Queue(job.Queue), data)
 		}
 	}
 }
