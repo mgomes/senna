@@ -955,3 +955,105 @@ func TestClient_EnqueueBulk_WithBatch(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_EnqueueBulk_FiltersUnmarshalableJobs(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-filter:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-filter",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	// Channels and functions cannot be JSON marshaled
+	unmarshalable := make(chan int)
+
+	argsList := []map[string]any{
+		{"id": 1},                      // valid
+		{"id": 2, "bad": unmarshalable}, // cannot marshal - has channel
+		{"id": 3},                      // valid
+		{"id": 4, "fn": func() {}},     // cannot marshal - has function
+		{"id": 5},                      // valid
+	}
+
+	jobs, err := client.EnqueueBulk(ctx, "filter_job", argsList)
+	if err != nil {
+		t.Fatalf("EnqueueBulk failed: %v", err)
+	}
+
+	// Should only return the 3 valid jobs
+	if len(jobs) != 3 {
+		t.Errorf("expected 3 jobs returned, got %d", len(jobs))
+	}
+
+	// Verify returned jobs have correct IDs
+	expectedIDs := map[float64]bool{1: true, 3: true, 5: true}
+	for _, job := range jobs {
+		id, ok := job.Args["id"].(float64)
+		if !ok {
+			// Try int (before marshal it's int, after unmarshal it's float64)
+			if intID, ok := job.Args["id"].(int); ok {
+				id = float64(intID)
+			}
+		}
+		if !expectedIDs[id] {
+			t.Errorf("unexpected job with id %v in returned jobs", job.Args["id"])
+		}
+	}
+
+	// Verify only 3 jobs are in Redis
+	queueLen, err := redisClient.LLen(ctx, "test-bulk-filter:queue:default").Result()
+	if err != nil {
+		t.Fatalf("failed to get queue length: %v", err)
+	}
+	if queueLen != 3 {
+		t.Errorf("expected 3 jobs in queue, got %d", queueLen)
+	}
+}
+
+func TestClient_EnqueueBulkIn_FiltersUnmarshalableJobs(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-filter-scheduled:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-bulk-filter-scheduled",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	argsList := []map[string]any{
+		{"id": 1},                          // valid
+		{"id": 2, "bad": make(chan bool)},  // cannot marshal
+		{"id": 3},                          // valid
+	}
+
+	jobs, err := client.EnqueueBulkIn(ctx, time.Hour, "scheduled_filter_job", argsList)
+	if err != nil {
+		t.Fatalf("EnqueueBulkIn failed: %v", err)
+	}
+
+	// Should only return the 2 valid jobs
+	if len(jobs) != 2 {
+		t.Errorf("expected 2 jobs returned, got %d", len(jobs))
+	}
+
+	// Verify only 2 jobs are in the scheduled set
+	scheduledCount, err := redisClient.ZCard(ctx, "test-bulk-filter-scheduled:scheduled").Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled count: %v", err)
+	}
+	if scheduledCount != 2 {
+		t.Errorf("expected 2 jobs in scheduled set, got %d", scheduledCount)
+	}
+}

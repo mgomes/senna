@@ -188,9 +188,16 @@ func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, arg
 	return c.Enqueue(ctx, jobType, args, opts...)
 }
 
+// enqueuedJob pairs a job with its marshaled data for bulk operations.
+type enqueuedJob struct {
+	job  *senna.Job
+	data []byte
+}
+
 // EnqueueBulk enqueues multiple jobs of the same type in a single Redis round trip.
 // All jobs share the same options (queue, retry, etc.) but have different arguments.
-// Returns the list of created jobs. Jobs that fail validation are skipped.
+// Returns only the jobs that were successfully enqueued. Jobs that fail to marshal
+// or encrypt are silently skipped.
 func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
 	if len(argsList) == 0 {
 		return nil, nil
@@ -209,8 +216,8 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 		return nil, fmt.Errorf("unique keys are not supported in bulk enqueue")
 	}
 
-	// Build all jobs first
-	jobs := make([]*senna.Job, 0, len(argsList))
+	// Build and marshal all jobs upfront, only keeping those that succeed
+	enqueued := make([]enqueuedJob, 0, len(argsList))
 	for _, args := range argsList {
 		job := senna.NewJob(jobType, args)
 		job.Queue = cfg.queue
@@ -220,16 +227,21 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 		if cfg.encrypt && c.encryptor != nil {
 			encryptedArgs, err := c.encryptor.Encrypt(args)
 			if err != nil {
-				continue // Skip jobs that fail encryption
+				continue
 			}
 			job.Args = encryptedArgs
 			job.Encrypted = true
 		}
 
-		jobs = append(jobs, job)
+		data, err := job.Marshal()
+		if err != nil {
+			continue
+		}
+
+		enqueued = append(enqueued, enqueuedJob{job: job, data: data})
 	}
 
-	if len(jobs) == 0 {
+	if len(enqueued) == 0 {
 		return nil, nil
 	}
 
@@ -247,12 +259,8 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	if scheduleAt.IsZero() {
 		// Immediate enqueue - group jobs by queue
 		jobsByQueue := make(map[string][]string)
-		for _, job := range jobs {
-			data, err := job.Marshal()
-			if err != nil {
-				continue
-			}
-			jobsByQueue[job.Queue] = append(jobsByQueue[job.Queue], string(data))
+		for _, ej := range enqueued {
+			jobsByQueue[ej.job.Queue] = append(jobsByQueue[ej.job.Queue], string(ej.data))
 		}
 
 		// Add all queues to the queues set
@@ -262,7 +270,6 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 
 		// Push jobs to their respective queues
 		for queue, jobDataList := range jobsByQueue {
-			// Convert to []any for LPush
 			args := make([]any, len(jobDataList))
 			for i, d := range jobDataList {
 				args[i] = d
@@ -272,16 +279,12 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	} else {
 		// Scheduled enqueue
 		score := float64(scheduleAt.Unix())
-		members := make([]redis.Z, 0, len(jobs))
-		for _, job := range jobs {
-			data, err := job.Marshal()
-			if err != nil {
-				continue
-			}
-			members = append(members, redis.Z{
+		members := make([]redis.Z, len(enqueued))
+		for i, ej := range enqueued {
+			members[i] = redis.Z{
 				Score:  score,
-				Member: string(data),
-			})
+				Member: string(ej.data),
+			}
 		}
 		pipe.ZAdd(ctx, c.keys.Scheduled(), members...)
 	}
@@ -289,6 +292,12 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// Extract only the successfully enqueued jobs
+	jobs := make([]*senna.Job, len(enqueued))
+	for i, ej := range enqueued {
+		jobs[i] = ej.job
 	}
 
 	return jobs, nil
