@@ -46,10 +46,10 @@ func TestFetcher_SelectQueue_SingleQueue(t *testing.T) {
 
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	for range 10 {
-		queue := f.selectQueue()
+		queue := f.selectQueueWeighted()
 		if queue != "default" {
 			t.Errorf("expected 'default', got '%s'", queue)
 		}
@@ -64,13 +64,13 @@ func TestFetcher_SelectQueue_MultipleQueues(t *testing.T) {
 		{Name: "critical", Priority: 10},
 		{Name: "default", Priority: 5},
 		{Name: "low", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	counts := make(map[string]int)
 	iterations := 10000
 
 	for i := 0; i < iterations; i++ {
-		queue := f.selectQueue()
+		queue := f.selectQueueWeighted()
 		counts[queue]++
 	}
 
@@ -96,10 +96,10 @@ func TestFetcher_SelectQueue_PausedQueues(t *testing.T) {
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "critical", Priority: 10, Paused: true},
 		{Name: "default", Priority: 5},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	for range 100 {
-		queue := f.selectQueue()
+		queue := f.selectQueueWeighted()
 		if queue != "default" {
 			t.Errorf("expected 'default' (critical is paused), got '%s'", queue)
 		}
@@ -113,9 +113,9 @@ func TestFetcher_SelectQueue_AllPaused(t *testing.T) {
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "critical", Priority: 10, Paused: true},
 		{Name: "default", Priority: 5, Paused: true},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
-	queue := f.selectQueue()
+	queue := f.selectQueueWeighted()
 	if queue != "" {
 		t.Errorf("expected empty string when all paused, got '%s'", queue)
 	}
@@ -127,9 +127,9 @@ func TestFetcher_SelectQueue_ZeroPriority(t *testing.T) {
 
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 0},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
-	queue := f.selectQueue()
+	queue := f.selectQueueWeighted()
 	if queue != "default" {
 		t.Errorf("expected 'default' (priority normalized to 1), got '%s'", queue)
 	}
@@ -142,7 +142,7 @@ func TestFetcher_Fetch_Success(t *testing.T) {
 	k := keys.New("test-fetch")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 	job := senna.NewJob("test_job", map[string]any{"id": 123})
@@ -176,7 +176,7 @@ func TestFetcher_Fetch_EmptyQueue(t *testing.T) {
 	k := keys.New("test-fetch-empty")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 50*time.Millisecond)
+	}, 50*time.Millisecond, false)
 
 	ctx := context.Background()
 	fetched, err := f.Fetch(ctx, "worker-1")
@@ -195,7 +195,7 @@ func TestFetcher_Fetch_ContextCanceled(t *testing.T) {
 	k := keys.New("test-fetch-cancel")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 5*time.Second)
+	}, 5*time.Second, false)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -220,7 +220,7 @@ func TestFetcher_Ack_RemovesFromInFlight(t *testing.T) {
 	k := keys.New("test-ack")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -248,7 +248,7 @@ func TestFetcher_Ack_CleansUniqueKey(t *testing.T) {
 	k := keys.New("test-ack-unique")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -279,7 +279,7 @@ func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 	k := keys.New("test-nack")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -312,7 +312,7 @@ func TestFetcher_Nack_IncrementsRetryCount(t *testing.T) {
 	k := keys.New("test-nack-count")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -343,7 +343,7 @@ func TestFetcher_Nack_NoRetry(t *testing.T) {
 	k := keys.New("test-nack-no-retry")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -371,7 +371,7 @@ func TestFetcher_MoveToDead_AddsToDeadSet(t *testing.T) {
 	k := keys.New("test-dead")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -404,7 +404,7 @@ func TestFetcher_MoveToDead_SetsFailedAt(t *testing.T) {
 	k := keys.New("test-dead-time")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -439,7 +439,7 @@ func TestFetcher_MoveToDead_CleansUniqueKey(t *testing.T) {
 	k := keys.New("test-dead-unique")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -467,7 +467,7 @@ func TestFetcher_AckWithoutRaw(t *testing.T) {
 	k := keys.New("test-ack-noraw")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
-	}, 100*time.Millisecond)
+	}, 100*time.Millisecond, false)
 
 	ctx := context.Background()
 
@@ -485,5 +485,125 @@ func TestFetcher_AckWithoutRaw(t *testing.T) {
 	inFlightLen, _ := client.LLen(ctx, k.InFlight("worker-1")).Result()
 	if inFlightLen != 0 {
 		t.Errorf("expected 0 jobs in-flight, got %d", inFlightLen)
+	}
+}
+
+func TestFetcher_StrictPriority_ProcessesHighPriorityFirst(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-strict:*")
+
+	k := keys.New("test-strict")
+
+	// Create fetcher with strict priority enabled
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "low", Priority: 1},
+		{Name: "critical", Priority: 10},
+		{Name: "default", Priority: 5},
+	}, 100*time.Millisecond, true) // strict = true
+
+	ctx := context.Background()
+
+	// Add jobs to all queues
+	lowJob := senna.NewJob("low_job", nil)
+	lowJob.Queue = "low"
+	lowData, _ := lowJob.Marshal()
+	client.LPush(ctx, k.Queue("low"), string(lowData))
+
+	defaultJob := senna.NewJob("default_job", nil)
+	defaultJob.Queue = "default"
+	defaultData, _ := defaultJob.Marshal()
+	client.LPush(ctx, k.Queue("default"), string(defaultData))
+
+	criticalJob := senna.NewJob("critical_job", nil)
+	criticalJob.Queue = "critical"
+	criticalData, _ := criticalJob.Marshal()
+	client.LPush(ctx, k.Queue("critical"), string(criticalData))
+
+	// With strict priority, should always get critical first
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched.Type != "critical_job" {
+		t.Errorf("expected critical_job first, got %s", fetched.Type)
+	}
+
+	// Then default
+	fetched, err = f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched.Type != "default_job" {
+		t.Errorf("expected default_job second, got %s", fetched.Type)
+	}
+
+	// Then low
+	fetched, err = f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched.Type != "low_job" {
+		t.Errorf("expected low_job third, got %s", fetched.Type)
+	}
+}
+
+func TestFetcher_StrictPriority_SkipsPausedQueues(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-strict-paused:*")
+
+	k := keys.New("test-strict-paused")
+
+	// Create fetcher with critical queue paused
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "critical", Priority: 10, Paused: true},
+		{Name: "default", Priority: 5},
+	}, 100*time.Millisecond, true)
+
+	ctx := context.Background()
+
+	// Add jobs to both queues
+	criticalJob := senna.NewJob("critical_job", nil)
+	criticalData, _ := criticalJob.Marshal()
+	client.LPush(ctx, k.Queue("critical"), string(criticalData))
+
+	defaultJob := senna.NewJob("default_job", nil)
+	defaultData, _ := defaultJob.Marshal()
+	client.LPush(ctx, k.Queue("default"), string(defaultData))
+
+	// Should skip critical (paused) and get default
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched.Type != "default_job" {
+		t.Errorf("expected default_job (critical is paused), got %s", fetched.Type)
+	}
+}
+
+func TestFetcher_StrictPriority_TriesNextQueueWhenEmpty(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-strict-empty:*")
+
+	k := keys.New("test-strict-empty")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "critical", Priority: 10},
+		{Name: "default", Priority: 5},
+	}, 100*time.Millisecond, true)
+
+	ctx := context.Background()
+
+	// Only add job to default queue (critical is empty)
+	defaultJob := senna.NewJob("default_job", nil)
+	defaultData, _ := defaultJob.Marshal()
+	client.LPush(ctx, k.Queue("default"), string(defaultData))
+
+	// Should try critical first (empty), then get default
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched.Type != "default_job" {
+		t.Errorf("expected default_job, got %s", fetched.Type)
 	}
 }

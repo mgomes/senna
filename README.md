@@ -628,8 +628,28 @@ senna.WorkerSettings{
     ShutdownTimeout: 30 * time.Second,     // Time to wait for jobs during shutdown
     PollInterval:    100 * time.Millisecond, // How often to check for new jobs
     HeartbeatRate:   5 * time.Second,      // Worker heartbeat interval
+    StrictPriority:  false,                // Use strict ordering instead of weighted random
 }
 ```
+
+### Queue Priority Modes
+
+By default, Senna uses **weighted random** queue selection. With priorities of 10:5:1, the critical queue will be checked ~62.5% of the time, default ~31.25%, and low ~6.25%. This ensures all queues get processed while still favoring higher priority.
+
+Enable **strict priority** to always process higher priority queues first:
+
+```go
+senna.WorkerSettings{
+    Queues: []senna.QueueConfig{
+        {Name: "critical", Priority: 10},
+        {Name: "default", Priority: 5},
+        {Name: "low", Priority: 1},
+    },
+    StrictPriority: true,
+}
+```
+
+With strict priority, jobs in the `critical` queue are always processed before `default`, and `default` before `low`. This can lead to starvation of lower priority queues if higher priority queues always have work.
 
 ### Client Settings
 

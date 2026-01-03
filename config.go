@@ -58,6 +58,7 @@ type WorkerSettings struct {
 	ScheduledPollInterval time.Duration
 	HeartbeatRate         time.Duration
 	PeriodicEnabled       bool
+	StrictPriority        bool // If true, always process higher priority queues first (can starve lower priority)
 }
 
 func DefaultWorkerSettings() WorkerSettings {
@@ -152,5 +153,11 @@ func WithPeriodicEnabled() Option {
 func WithScheduledPollInterval(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.ScheduledPollInterval = d
+	}
+}
+
+func WithStrictPriority() Option {
+	return func(c *Config) {
+		c.Worker.StrictPriority = true
 	}
 }
