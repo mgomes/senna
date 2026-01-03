@@ -10,13 +10,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        go-versions: ["1.25"]
+        go-version: ["1.24", "1.25"]
         store:
-          - name: redis
+          - name: redis-6
+            image: redis:6.2-alpine
+          - name: redis-7
             image: redis:7-alpine
-          - name: valkey
+          - name: redis-8
+            image: redis:8-alpine
+          - name: valkey-7
+            image: valkey/valkey:7-alpine
+          - name: valkey-8
             image: valkey/valkey:8-alpine
+
+    name: Go ${{ matrix.go-version }} / ${{ matrix.store.name }}
 
     services:
       store:
@@ -35,7 +44,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-versions }}
+          go-version: ${{ matrix.go-version }}
 
       - name: Download dependencies
         run: go mod download
