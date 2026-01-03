@@ -898,3 +898,63 @@ func TestWorker_Scheduler_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 		t.Errorf("expected 0 jobs in scheduled, got %d", scheduledLen)
 	}
 }
+
+func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-retry-concurrent:*")
+
+	// Create multiple workers
+	workers := make([]*Worker, 3)
+	for i := range workers {
+		w, err := New(&Config{
+			Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+			Namespace: "test-retry-concurrent",
+			Settings:  senna.DefaultWorkerSettings(),
+		})
+		if err != nil {
+			t.Fatalf("failed to create worker %d: %v", i, err)
+		}
+		workers[i] = w
+		defer func() { _ = w.redis.Close() }()
+	}
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	// Add 10 retry jobs
+	for i := 0; i < 10; i++ {
+		job := senna.NewJob("retry_job", map[string]any{"index": i})
+		job.RetryCount = 1
+		jobData, _ := job.Marshal()
+		redisClient.ZAdd(ctx, workers[0].keys.Retry(), redis.Z{
+			Score:  float64(pastTime.Unix()),
+			Member: string(jobData),
+		})
+	}
+
+	// Run retry processors concurrently from all workers
+	done := make(chan struct{})
+	for _, w := range workers {
+		go func(w *Worker) {
+			w.enqueueRetries(ctx)
+			done <- struct{}{}
+		}(w)
+	}
+
+	// Wait for all workers
+	for range workers {
+		<-done
+	}
+
+	// Verify exactly 10 jobs in queue (no duplicates)
+	queueLen, _ := redisClient.LLen(ctx, workers[0].keys.Queue("default")).Result()
+	if queueLen != 10 {
+		t.Errorf("expected exactly 10 retry jobs in queue (no duplicates), got %d", queueLen)
+	}
+
+	// Verify retry set is empty
+	retryLen, _ := redisClient.ZCard(ctx, workers[0].keys.Retry()).Result()
+	if retryLen != 0 {
+		t.Errorf("expected 0 jobs in retry set, got %d", retryLen)
+	}
+}
