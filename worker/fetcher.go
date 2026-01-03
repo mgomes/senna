@@ -69,7 +69,7 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*senna.Job, error
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
 
-	result, err := f.client.RPopLPush(ctx, queueKey, inFlightKey).Result()
+	result, err := f.client.LMove(ctx, queueKey, inFlightKey, "RIGHT", "LEFT").Result()
 	if err == redis.Nil {
 		select {
 		case <-ctx.Done():
