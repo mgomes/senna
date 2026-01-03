@@ -958,3 +958,144 @@ func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 		t.Errorf("expected 0 jobs in retry set, got %d", retryLen)
 	}
 }
+
+func TestWorker_RequeueOrphanedJobs_StaleHeartbeat(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-orphan:*")
+
+	ctx := context.Background()
+	ns := "test-orphan"
+
+	// Create a worker to get access to keys helper
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: ns,
+		Settings: senna.WorkerSettings{
+			Concurrency:   1,
+			Queues:        []senna.QueueConfig{{Name: "default"}},
+			HeartbeatRate: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	// Simulate a crashed worker by:
+	// 1. Adding a stale heartbeat entry (beat_at in the past)
+	// 2. Adding jobs to its in-flight list
+	crashedWorkerID := "crashed-worker-123"
+	staleTime := time.Now().Add(-2 * workerHeartbeatTimeout).Unix()
+
+	workerInfo := map[string]any{
+		"hostname":   "crashed-host",
+		"pid":        12345,
+		"beat_at":    staleTime,
+		"started_at": staleTime,
+	}
+	workerData, _ := json.Marshal(workerInfo)
+	redisClient.HSet(ctx, w.keys.Workers(), crashedWorkerID, string(workerData))
+
+	// Add orphaned jobs to the crashed worker's in-flight list
+	job1 := senna.NewJob("orphan_job", map[string]any{"id": 1})
+	job1.Queue = "default"
+	data1, _ := job1.Marshal()
+
+	job2 := senna.NewJob("orphan_job", map[string]any{"id": 2})
+	job2.Queue = "default"
+	data2, _ := job2.Marshal()
+
+	inFlightKey := w.keys.InFlight(crashedWorkerID)
+	redisClient.LPush(ctx, inFlightKey, string(data1), string(data2))
+
+	// Verify setup
+	inFlightLen, _ := redisClient.LLen(ctx, inFlightKey).Result()
+	if inFlightLen != 2 {
+		t.Fatalf("expected 2 jobs in crashed worker's in-flight, got %d", inFlightLen)
+	}
+
+	// Run orphan recovery
+	w.requeueOrphanedJobs(ctx)
+
+	// Verify orphaned jobs were requeued
+	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if queueLen != 2 {
+		t.Errorf("expected 2 jobs requeued to default queue, got %d", queueLen)
+	}
+
+	// Verify in-flight list was cleaned up
+	inFlightLen, _ = redisClient.LLen(ctx, inFlightKey).Result()
+	if inFlightLen != 0 {
+		t.Errorf("expected 0 jobs in crashed worker's in-flight after recovery, got %d", inFlightLen)
+	}
+
+	// Verify stale worker was removed from workers hash
+	exists, _ := redisClient.HExists(ctx, w.keys.Workers(), crashedWorkerID).Result()
+	if exists {
+		t.Error("expected stale worker to be removed from workers hash")
+	}
+}
+
+func TestWorker_RequeueOrphanedJobs_ActiveWorkerNotAffected(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-orphan-active:*")
+
+	ctx := context.Background()
+	ns := "test-orphan-active"
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: ns,
+		Settings: senna.WorkerSettings{
+			Concurrency:   1,
+			Queues:        []senna.QueueConfig{{Name: "default"}},
+			HeartbeatRate: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	// Simulate an active worker with recent heartbeat
+	activeWorkerID := "active-worker-456"
+	recentTime := time.Now().Unix()
+
+	workerInfo := map[string]any{
+		"hostname":   "active-host",
+		"pid":        67890,
+		"beat_at":    recentTime,
+		"started_at": recentTime,
+	}
+	workerData, _ := json.Marshal(workerInfo)
+	redisClient.HSet(ctx, w.keys.Workers(), activeWorkerID, string(workerData))
+
+	// Add jobs to active worker's in-flight list (simulating jobs being processed)
+	job := senna.NewJob("active_job", map[string]any{"id": 1})
+	job.Queue = "default"
+	data, _ := job.Marshal()
+
+	inFlightKey := w.keys.InFlight(activeWorkerID)
+	redisClient.LPush(ctx, inFlightKey, string(data))
+
+	// Run orphan recovery
+	w.requeueOrphanedJobs(ctx)
+
+	// Verify active worker's in-flight jobs were NOT requeued
+	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if queueLen != 0 {
+		t.Errorf("expected 0 jobs requeued (active worker should not be affected), got %d", queueLen)
+	}
+
+	// Verify in-flight list is still intact
+	inFlightLen, _ := redisClient.LLen(ctx, inFlightKey).Result()
+	if inFlightLen != 1 {
+		t.Errorf("expected 1 job still in active worker's in-flight, got %d", inFlightLen)
+	}
+
+	// Verify active worker still in workers hash
+	exists, _ := redisClient.HExists(ctx, w.keys.Workers(), activeWorkerID).Result()
+	if !exists {
+		t.Error("expected active worker to remain in workers hash")
+	}
+}
