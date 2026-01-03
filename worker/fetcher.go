@@ -178,8 +178,8 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 	return f.blockingFetchFromQueue(ctx, workerID, queueName, timeout)
 }
 
-// blockingFetchStrict tries higher priority queues first (non-blocking),
-// then blocks on the lowest priority queue
+// blockingFetchStrict tries all queues non-blocking in priority order,
+// then blocks on the HIGHEST priority queue so high-priority jobs wake us immediately
 func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
 	activeQueues := make([]senna.QueueConfig, 0, len(f.queues))
 	for _, q := range f.queues {
@@ -197,9 +197,9 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, time
 		}
 	}
 
-	// Try higher priority queues non-blocking first
-	for i := 0; i < len(activeQueues)-1; i++ {
-		job, err := f.fetchFromQueue(ctx, workerID, activeQueues[i].Name)
+	// Try ALL queues non-blocking in priority order (high to low)
+	for _, q := range activeQueues {
+		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -208,8 +208,9 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, time
 		}
 	}
 
-	// Block on lowest priority queue
-	return f.blockingFetchFromQueue(ctx, workerID, activeQueues[len(activeQueues)-1].Name, timeout)
+	// Block on HIGHEST priority queue - ensures high-priority jobs wake us immediately
+	// Low-priority jobs will be picked up on the next cycle after timeout
+	return f.blockingFetchFromQueue(ctx, workerID, activeQueues[0].Name, timeout)
 }
 
 // blockingFetchFromQueue uses BLMOVE to block until a job is available
