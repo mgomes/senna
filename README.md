@@ -6,6 +6,7 @@ Senna is a background job processing library for Go, backed by Redis or Valkey. 
 
 - **Redis** 6.2+
 - **Valkey** 7.2+
+- **DragonflyDB** (latest)
 
 ## Features
 

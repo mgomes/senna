@@ -24,6 +24,8 @@ jobs:
             image: valkey/valkey:7-alpine
           - name: valkey-8
             image: valkey/valkey:8-alpine
+          - name: dragonfly
+            image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
 
     name: Go ${{ matrix.go-version }} / ${{ matrix.store.name }}
 
