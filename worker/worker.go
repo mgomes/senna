@@ -207,7 +207,8 @@ func (w *Worker) Close() error {
 func (w *Worker) workerLoop(ctx context.Context) {
 	// Block timeout - how long to wait for a job before cycling
 	// This allows checking context cancellation and queue rotation
-	blockTimeout := 2 * time.Second
+	// Keep this relatively short to ensure responsiveness across multiple queues
+	blockTimeout := 1 * time.Second
 
 	for {
 		select {

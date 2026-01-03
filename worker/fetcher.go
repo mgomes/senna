@@ -146,20 +146,16 @@ func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout ti
 	return f.blockingFetchWeighted(ctx, workerID, timeout)
 }
 
-// blockingFetchWeighted tries all queues non-blocking first (weighted order),
+// blockingFetchWeighted tries all queues non-blocking first,
 // then blocks on a randomly selected queue if all are empty
 func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
-	// First, try all queues non-blocking in weighted random order
-	// This ensures we don't miss jobs on other queues while blocking
-	tried := make(map[string]bool)
-	for i := 0; i < len(f.queues); i++ {
-		queueName := f.selectQueueWeighted()
-		if queueName == "" || tried[queueName] {
+	// First, try ALL queues non-blocking to ensure we don't miss jobs
+	// while blocking on another queue
+	for _, q := range f.queues {
+		if q.Paused {
 			continue
 		}
-		tried[queueName] = true
-
-		job, err := f.fetchFromQueue(ctx, workerID, queueName)
+		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
 		if err != nil {
 			return nil, err
 		}
