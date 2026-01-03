@@ -9,6 +9,10 @@ import (
 	"github.com/mgomes/senna/ratelimit"
 )
 
+// JobProcessor is called by pool workers to process a job.
+// It should handle ack/nack and any post-processing.
+type JobProcessor func(ctx context.Context, job *senna.Job)
+
 type workerPool struct {
 	concurrency int
 	handlers    map[string]handlerEntry
@@ -68,14 +72,14 @@ func (p *workerPool) Use(mw ...senna.Middleware) {
 	p.middleware = append(p.middleware, mw...)
 }
 
-func (p *workerPool) Start(ctx context.Context) {
+func (p *workerPool) Start(ctx context.Context, processor JobProcessor) {
 	for i := 0; i < p.concurrency; i++ {
 		p.wg.Add(1)
-		go p.worker(ctx, i)
+		go p.worker(ctx, processor)
 	}
 }
 
-func (p *workerPool) worker(ctx context.Context, id int) {
+func (p *workerPool) worker(ctx context.Context, processor JobProcessor) {
 	defer p.wg.Done()
 
 	for {
@@ -86,7 +90,7 @@ func (p *workerPool) worker(ctx context.Context, id int) {
 			if !ok {
 				return
 			}
-			_, _ = p.process(ctx, job)
+			processor(ctx, job)
 		}
 	}
 }

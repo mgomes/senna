@@ -214,7 +214,9 @@ func TestWorkerPool_Submit_Success(t *testing.T) {
 	pool := newWorkerPool(5)
 
 	ctx := context.Background()
-	pool.Start(ctx)
+	pool.Start(ctx, func(ctx context.Context, job *senna.Job) {
+		_, _ = pool.process(ctx, job)
+	})
 	defer pool.Stop()
 
 	job := senna.NewJob("test_job", nil)
@@ -241,7 +243,9 @@ func TestWorkerPool_SubmitWait_Success(t *testing.T) {
 	pool := newWorkerPool(5)
 
 	ctx := context.Background()
-	pool.Start(ctx)
+	pool.Start(ctx, func(ctx context.Context, job *senna.Job) {
+		_, _ = pool.process(ctx, job)
+	})
 	defer func() {
 		pool.Stop()
 		pool.Wait()
@@ -282,7 +286,9 @@ func TestWorkerPool_Drain_CompletesGracefully(t *testing.T) {
 	}, nil)
 
 	ctx := context.Background()
-	pool.Start(ctx)
+	pool.Start(ctx, func(ctx context.Context, job *senna.Job) {
+		_, _ = pool.process(ctx, job)
+	})
 
 	for range 4 {
 		pool.Submit(senna.NewJob("test_job", nil))
@@ -312,7 +318,9 @@ func TestWorkerPool_Drain_Timeout(t *testing.T) {
 	}, nil)
 
 	ctx := context.Background()
-	pool.Start(ctx)
+	pool.Start(ctx, func(ctx context.Context, job *senna.Job) {
+		_, _ = pool.process(ctx, job)
+	})
 
 	pool.Submit(senna.NewJob("slow_job", nil))
 
@@ -341,7 +349,9 @@ func TestWorkerPool_Wait(t *testing.T) {
 	}, nil)
 
 	ctx := context.Background()
-	pool.Start(ctx)
+	pool.Start(ctx, func(ctx context.Context, job *senna.Job) {
+		_, _ = pool.process(ctx, job)
+	})
 
 	for range 4 {
 		pool.Submit(senna.NewJob("test_job", nil))
@@ -379,7 +389,9 @@ func TestWorkerPool_WorkerExitsOnContextCancel(t *testing.T) {
 	}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	pool.Start(ctx)
+	pool.Start(ctx, func(ctx context.Context, job *senna.Job) {
+		_, _ = pool.process(ctx, job)
+	})
 
 	time.Sleep(50 * time.Millisecond)
 

@@ -149,7 +149,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	w.pool.Start(ctx)
+	// Start pool workers that consume from the jobs channel
+	w.pool.Start(ctx, w.processJob)
 
 	go w.heartbeat(ctx)
 	go w.scheduler(ctx)
@@ -159,11 +160,14 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.periodic.Start(ctx)
 	}
 
-	var wg sync.WaitGroup
-	for i := 0; i < w.config.Settings.Concurrency; i++ {
-		wg.Add(1)
+	// Start fetchers that pull jobs from Redis and submit to pool
+	// Use 2 fetchers to keep the pool fed without excessive Redis connections
+	var fetcherWg sync.WaitGroup
+	numFetchers := 2
+	for i := 0; i < numFetchers; i++ {
+		fetcherWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer fetcherWg.Done()
 			w.fetchLoop(ctx)
 		}()
 	}
@@ -180,11 +184,13 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.periodic.Stop()
 	}
 
+	// Wait for fetchers to stop, then close the jobs channel
+	fetcherWg.Wait()
+	w.pool.Stop()
+
+	// Drain waits for pool workers to finish processing
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), w.config.Settings.ShutdownTimeout)
 	defer shutdownCancel()
-
-	w.pool.Stop()
-	wg.Wait()
 
 	return w.pool.Drain(shutdownCtx)
 }
@@ -220,7 +226,11 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 			continue
 		}
 
-		w.processJob(ctx, job)
+		// Submit to pool; blocks if channel is full (back-pressure)
+		if !w.pool.SubmitWait(ctx, job) {
+			// Context was cancelled, exit the loop
+			return
+		}
 	}
 }
 
