@@ -188,6 +188,133 @@ func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, arg
 	return c.Enqueue(ctx, jobType, args, opts...)
 }
 
+// enqueuedJob pairs a job with its marshaled data for bulk operations.
+type enqueuedJob struct {
+	job  *senna.Job
+	data []byte
+}
+
+// EnqueueBulk enqueues multiple jobs of the same type in a single Redis round trip.
+// All jobs share the same options (queue, retry, etc.) but have different arguments.
+// Returns only the jobs that were successfully enqueued. Jobs that fail to marshal
+// or encrypt are silently skipped.
+func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
+	if len(argsList) == 0 {
+		return nil, nil
+	}
+
+	cfg := &enqueueConfig{
+		queue: c.settings.DefaultQueue,
+		retry: c.settings.DefaultRetry,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Unique keys are not supported in bulk operations
+	if cfg.uniqueKey != "" {
+		return nil, fmt.Errorf("unique keys are not supported in bulk enqueue")
+	}
+
+	// Build and marshal all jobs upfront, only keeping those that succeed
+	enqueued := make([]enqueuedJob, 0, len(argsList))
+	for _, args := range argsList {
+		job := senna.NewJob(jobType, args)
+		job.Queue = cfg.queue
+		job.Retry = cfg.retry
+		job.BatchID = cfg.batchID
+
+		if cfg.encrypt && c.encryptor != nil {
+			encryptedArgs, err := c.encryptor.Encrypt(args)
+			if err != nil {
+				continue
+			}
+			job.Args = encryptedArgs
+			job.Encrypted = true
+		}
+
+		data, err := job.Marshal()
+		if err != nil {
+			continue
+		}
+
+		enqueued = append(enqueued, enqueuedJob{job: job, data: data})
+	}
+
+	if len(enqueued) == 0 {
+		return nil, nil
+	}
+
+	// Determine if we're scheduling or enqueueing immediately
+	var scheduleAt time.Time
+	if !cfg.at.IsZero() {
+		scheduleAt = cfg.at
+	} else if cfg.delay > 0 {
+		scheduleAt = time.Now().Add(cfg.delay)
+	}
+
+	// Use pipeline for efficiency
+	pipe := c.redis.Pipeline()
+
+	if scheduleAt.IsZero() {
+		// Immediate enqueue - group jobs by queue
+		jobsByQueue := make(map[string][]string)
+		for _, ej := range enqueued {
+			jobsByQueue[ej.job.Queue] = append(jobsByQueue[ej.job.Queue], string(ej.data))
+		}
+
+		// Add all queues to the queues set
+		for queue := range jobsByQueue {
+			pipe.SAdd(ctx, c.keys.Queues(), queue)
+		}
+
+		// Push jobs to their respective queues
+		for queue, jobDataList := range jobsByQueue {
+			args := make([]any, len(jobDataList))
+			for i, d := range jobDataList {
+				args[i] = d
+			}
+			pipe.LPush(ctx, c.keys.Queue(queue), args...)
+		}
+	} else {
+		// Scheduled enqueue
+		score := float64(scheduleAt.Unix())
+		members := make([]redis.Z, len(enqueued))
+		for i, ej := range enqueued {
+			members[i] = redis.Z{
+				Score:  score,
+				Member: string(ej.data),
+			}
+		}
+		pipe.ZAdd(ctx, c.keys.Scheduled(), members...)
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract only the successfully enqueued jobs
+	jobs := make([]*senna.Job, len(enqueued))
+	for i, ej := range enqueued {
+		jobs[i] = ej.job
+	}
+
+	return jobs, nil
+}
+
+// EnqueueBulkIn schedules multiple jobs to run after a delay.
+func (c *Client) EnqueueBulkIn(ctx context.Context, d time.Duration, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
+	opts = append(opts, WithDelay(d))
+	return c.EnqueueBulk(ctx, jobType, argsList, opts...)
+}
+
+// EnqueueBulkAt schedules multiple jobs to run at a specific time.
+func (c *Client) EnqueueBulkAt(ctx context.Context, t time.Time, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
+	opts = append(opts, WithScheduleAt(t))
+	return c.EnqueueBulk(ctx, jobType, argsList, opts...)
+}
+
 func (c *Client) enqueueNow(ctx context.Context, job *senna.Job) (*senna.Job, error) {
 	data, err := job.Marshal()
 	if err != nil {
