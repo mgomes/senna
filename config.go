@@ -51,21 +51,23 @@ func (c RedisConfig) Options() *redis.Options {
 }
 
 type WorkerSettings struct {
-	Concurrency     int
-	Queues          []QueueConfig
-	ShutdownTimeout time.Duration
-	PollInterval    time.Duration
-	HeartbeatRate   time.Duration
-	PeriodicEnabled bool
+	Concurrency           int
+	Queues                []QueueConfig
+	ShutdownTimeout       time.Duration
+	PollInterval          time.Duration
+	ScheduledPollInterval time.Duration
+	HeartbeatRate         time.Duration
+	PeriodicEnabled       bool
 }
 
 func DefaultWorkerSettings() WorkerSettings {
 	return WorkerSettings{
-		Concurrency:     10,
-		Queues:          []QueueConfig{{Name: "default", Priority: 1}},
-		ShutdownTimeout: 30 * time.Second,
-		PollInterval:    100 * time.Millisecond,
-		HeartbeatRate:   5 * time.Second,
+		Concurrency:           10,
+		Queues:                []QueueConfig{{Name: "default", Priority: 1}},
+		ShutdownTimeout:       30 * time.Second,
+		PollInterval:          100 * time.Millisecond,
+		ScheduledPollInterval: 5 * time.Second,
+		HeartbeatRate:         5 * time.Second,
 	}
 }
 
@@ -144,5 +146,11 @@ func WithMetrics(addr, prefix string) Option {
 func WithPeriodicEnabled() Option {
 	return func(c *Config) {
 		c.Worker.PeriodicEnabled = true
+	}
+}
+
+func WithScheduledPollInterval(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.ScheduledPollInterval = d
 	}
 }

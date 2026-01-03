@@ -438,3 +438,216 @@ func TestClient_MultipleQueues(t *testing.T) {
 		t.Errorf("expected 1 in low, got %d", lowLen)
 	}
 }
+
+func TestClient_EnqueueIn_CorrectTimestamp(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-ts:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-schedule-ts",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	delay := 10 * time.Minute
+	beforeEnqueue := time.Now()
+
+	_, err = client.EnqueueIn(ctx, delay, "delayed_job", nil)
+	if err != nil {
+		t.Fatalf("enqueue in failed: %v", err)
+	}
+
+	items, err := redisClient.ZRangeWithScores(ctx, "test-schedule-ts:scheduled", 0, -1).Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 scheduled job, got %d", len(items))
+	}
+
+	score := items[0].Score
+	expectedMin := float64(beforeEnqueue.Add(delay).Unix())
+	expectedMax := float64(beforeEnqueue.Add(delay).Unix() + 2)
+
+	if score < expectedMin || score > expectedMax {
+		t.Errorf("score %f not in expected range [%f, %f]", score, expectedMin, expectedMax)
+	}
+}
+
+func TestClient_EnqueueAt_CorrectTimestamp(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-at:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-schedule-at",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	scheduledTime := time.Date(2030, 6, 15, 14, 30, 0, 0, time.UTC)
+
+	_, err = client.EnqueueAt(ctx, scheduledTime, "future_job", nil)
+	if err != nil {
+		t.Fatalf("enqueue at failed: %v", err)
+	}
+
+	items, err := redisClient.ZRangeWithScores(ctx, "test-schedule-at:scheduled", 0, -1).Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 scheduled job, got %d", len(items))
+	}
+
+	score := items[0].Score
+	expectedScore := float64(scheduledTime.Unix())
+
+	if score != expectedScore {
+		t.Errorf("expected score %f, got %f", expectedScore, score)
+	}
+}
+
+func TestClient_EnqueueIn_WithOptions(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-opts:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-schedule-opts",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	job, err := client.EnqueueIn(ctx, time.Hour, "delayed_job",
+		map[string]any{"user_id": 123},
+		WithQueue("emails"),
+		WithRetry(3),
+	)
+	if err != nil {
+		t.Fatalf("enqueue in failed: %v", err)
+	}
+
+	if job.Queue != "emails" {
+		t.Errorf("expected queue 'emails', got '%s'", job.Queue)
+	}
+	if job.Retry != 3 {
+		t.Errorf("expected retry 3, got %d", job.Retry)
+	}
+	if job.Args["user_id"] != 123 {
+		t.Errorf("expected user_id 123, got %v", job.Args["user_id"])
+	}
+}
+
+func TestClient_EnqueueAt_InThePast(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-past:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-schedule-past",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Hour)
+
+	_, err = client.EnqueueAt(ctx, pastTime, "past_job", nil)
+	if err != nil {
+		t.Fatalf("enqueue at past time failed: %v", err)
+	}
+
+	// Job should still be in scheduled set (worker will move it)
+	length, err := redisClient.ZCard(ctx, "test-schedule-past:scheduled").Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled length: %v", err)
+	}
+	if length != 1 {
+		t.Errorf("expected 1 scheduled job, got %d", length)
+	}
+
+	// Check the score is in the past
+	items, _ := redisClient.ZRangeWithScores(ctx, "test-schedule-past:scheduled", 0, -1).Result()
+	if items[0].Score > float64(time.Now().Unix()) {
+		t.Error("job scheduled in the past should have past timestamp")
+	}
+}
+
+func TestClient_EnqueueIn_ZeroDuration(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-zero:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-schedule-zero",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+
+	// Zero duration should schedule for now (goes to scheduled set with current timestamp)
+	_, err = client.EnqueueIn(ctx, 0, "immediate_job", nil)
+	if err != nil {
+		t.Fatalf("enqueue in with zero duration failed: %v", err)
+	}
+
+	// Should be in the queue immediately (delay of 0 means enqueue now)
+	queueLen, _ := redisClient.LLen(ctx, "test-schedule-zero:queue:default").Result()
+	if queueLen != 1 {
+		t.Errorf("expected 1 job in queue (zero delay), got %d", queueLen)
+	}
+}
+
+func TestClient_MultipleScheduledJobs_OrderedByTime(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-order:*")
+
+	client, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-schedule-order",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Schedule in reverse order
+	_, _ = client.EnqueueAt(ctx, now.Add(3*time.Hour), "job3", nil)
+	_, _ = client.EnqueueAt(ctx, now.Add(1*time.Hour), "job1", nil)
+	_, _ = client.EnqueueAt(ctx, now.Add(2*time.Hour), "job2", nil)
+
+	items, err := redisClient.ZRangeWithScores(ctx, "test-schedule-order:scheduled", 0, -1).Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled items: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 scheduled jobs, got %d", len(items))
+	}
+
+	// Verify they're ordered by score (earliest first)
+	for i := 1; i < len(items); i++ {
+		if items[i].Score < items[i-1].Score {
+			t.Error("scheduled jobs should be ordered by timestamp")
+		}
+	}
+}

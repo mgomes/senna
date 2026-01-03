@@ -381,7 +381,12 @@ func (w *Worker) heartbeat(ctx context.Context) {
 }
 
 func (w *Worker) scheduler(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	interval := w.config.Settings.ScheduledPollInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -396,24 +401,22 @@ func (w *Worker) scheduler(ctx context.Context) {
 }
 
 func (w *Worker) enqueueScheduled(ctx context.Context) {
-	now := float64(time.Now().Unix())
+	now := fmt.Sprintf("%d", time.Now().Unix())
 
 	for {
-		items, err := w.redis.ZPopMin(ctx, w.keys.Scheduled(), 100).Result()
+		// Atomically pop jobs due now or in the past
+		result, err := popDueJobsScript.Run(ctx, w.redis, []string{w.keys.Scheduled()}, now, 100)
 		if err != nil {
 			return
 		}
-		if len(items) == 0 {
+
+		items, ok := result.([]any)
+		if !ok || len(items) == 0 {
 			return
 		}
 
-		for _, z := range items {
-			if z.Score > now {
-				w.redis.ZAdd(ctx, w.keys.Scheduled(), z)
-				continue
-			}
-
-			data, ok := z.Member.(string)
+		for _, item := range items {
+			data, ok := item.(string)
 			if !ok {
 				continue
 			}
@@ -429,24 +432,22 @@ func (w *Worker) enqueueScheduled(ctx context.Context) {
 }
 
 func (w *Worker) enqueueRetries(ctx context.Context) {
-	now := float64(time.Now().Unix())
+	now := fmt.Sprintf("%d", time.Now().Unix())
 
 	for {
-		items, err := w.redis.ZPopMin(ctx, w.keys.Retry(), 100).Result()
+		// Atomically pop retries due now or in the past
+		result, err := popDueJobsScript.Run(ctx, w.redis, []string{w.keys.Retry()}, now, 100)
 		if err != nil {
 			return
 		}
-		if len(items) == 0 {
+
+		items, ok := result.([]any)
+		if !ok || len(items) == 0 {
 			return
 		}
 
-		for _, z := range items {
-			if z.Score > now {
-				w.redis.ZAdd(ctx, w.keys.Retry(), z)
-				continue
-			}
-
-			data, ok := z.Member.(string)
+		for _, item := range items {
+			data, ok := item.(string)
 			if !ok {
 				continue
 			}

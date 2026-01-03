@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestWorker_New_DefaultSettings(t *testing.T) {
@@ -569,5 +570,391 @@ func TestWorker_Periodic_InvalidCron(t *testing.T) {
 	err = w.Periodic("invalid", "test_job")
 	if err == nil {
 		t.Error("expected error for invalid cron expression")
+	}
+}
+
+func TestWorker_Scheduler_EnqueuesDueJobs(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-due:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-scheduler-due",
+		Settings: senna.WorkerSettings{
+			Concurrency:           1,
+			Queues:                []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout:       time.Second,
+			PollInterval:          50 * time.Millisecond,
+			ScheduledPollInterval: 100 * time.Millisecond,
+			HeartbeatRate:         time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+
+	// Add a job scheduled in the past (should be enqueued immediately)
+	pastTime := time.Now().Add(-time.Minute)
+	job := senna.NewJob("past_job", nil)
+	jobData, _ := job.Marshal()
+	redisClient.ZAdd(ctx, w.keys.Scheduled(), redis.Z{
+		Score:  float64(pastTime.Unix()),
+		Member: string(jobData),
+	})
+
+	// Call enqueueScheduled directly
+	w.enqueueScheduled(ctx)
+
+	// Job should now be in the queue
+	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if queueLen != 1 {
+		t.Errorf("expected 1 job in queue, got %d", queueLen)
+	}
+
+	// Scheduled set should be empty
+	scheduledLen, _ := redisClient.ZCard(ctx, w.keys.Scheduled()).Result()
+	if scheduledLen != 0 {
+		t.Errorf("expected 0 jobs in scheduled, got %d", scheduledLen)
+	}
+}
+
+func TestWorker_Scheduler_KeepsFutureJobs(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-future:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-scheduler-future",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+
+	// Add a job scheduled in the future
+	futureTime := time.Now().Add(time.Hour)
+	job := senna.NewJob("future_job", nil)
+	jobData, _ := job.Marshal()
+	redisClient.ZAdd(ctx, w.keys.Scheduled(), redis.Z{
+		Score:  float64(futureTime.Unix()),
+		Member: string(jobData),
+	})
+
+	// Call enqueueScheduled
+	w.enqueueScheduled(ctx)
+
+	// Job should still be in scheduled set
+	scheduledLen, _ := redisClient.ZCard(ctx, w.keys.Scheduled()).Result()
+	if scheduledLen != 1 {
+		t.Errorf("expected 1 job in scheduled, got %d", scheduledLen)
+	}
+
+	// Queue should be empty
+	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if queueLen != 0 {
+		t.Errorf("expected 0 jobs in queue, got %d", queueLen)
+	}
+}
+
+func TestWorker_Scheduler_ProcessesMixedJobs(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-mixed:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-scheduler-mixed",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+
+	// Add jobs: 2 due, 2 future
+	now := time.Now()
+
+	jobs := []struct {
+		offset time.Duration
+		name   string
+	}{
+		{-2 * time.Minute, "past1"},
+		{-1 * time.Minute, "past2"},
+		{1 * time.Hour, "future1"},
+		{2 * time.Hour, "future2"},
+	}
+
+	for _, j := range jobs {
+		job := senna.NewJob(j.name, nil)
+		jobData, _ := job.Marshal()
+		redisClient.ZAdd(ctx, w.keys.Scheduled(), redis.Z{
+			Score:  float64(now.Add(j.offset).Unix()),
+			Member: string(jobData),
+		})
+	}
+
+	// Call enqueueScheduled
+	w.enqueueScheduled(ctx)
+
+	// 2 due jobs should be in queue
+	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if queueLen != 2 {
+		t.Errorf("expected 2 jobs in queue, got %d", queueLen)
+	}
+
+	// 2 future jobs should remain in scheduled
+	scheduledLen, _ := redisClient.ZCard(ctx, w.keys.Scheduled()).Result()
+	if scheduledLen != 2 {
+		t.Errorf("expected 2 jobs in scheduled, got %d", scheduledLen)
+	}
+}
+
+func TestWorker_Scheduler_EnqueuesRetries(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-retry:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-scheduler-retry",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+
+	// Add a job to the retry set with past timestamp
+	pastTime := time.Now().Add(-time.Minute)
+	job := senna.NewJob("retry_job", nil)
+	job.RetryCount = 1
+	jobData, _ := job.Marshal()
+	redisClient.ZAdd(ctx, w.keys.Retry(), redis.Z{
+		Score:  float64(pastTime.Unix()),
+		Member: string(jobData),
+	})
+
+	// Call enqueueRetries
+	w.enqueueRetries(ctx)
+
+	// Job should now be in the queue
+	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if queueLen != 1 {
+		t.Errorf("expected 1 job in queue, got %d", queueLen)
+	}
+
+	// Retry set should be empty
+	retryLen, _ := redisClient.ZCard(ctx, w.keys.Retry()).Result()
+	if retryLen != 0 {
+		t.Errorf("expected 0 jobs in retry, got %d", retryLen)
+	}
+}
+
+func TestWorker_Scheduler_RoutesToCorrectQueue(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-queue:*")
+
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-scheduler-queue",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	// Add jobs to different queues
+	job1 := senna.NewJob("job1", nil)
+	job1.Queue = "critical"
+	data1, _ := job1.Marshal()
+	redisClient.ZAdd(ctx, w.keys.Scheduled(), redis.Z{
+		Score:  float64(pastTime.Unix()),
+		Member: string(data1),
+	})
+
+	job2 := senna.NewJob("job2", nil)
+	job2.Queue = "low"
+	data2, _ := job2.Marshal()
+	redisClient.ZAdd(ctx, w.keys.Scheduled(), redis.Z{
+		Score:  float64(pastTime.Unix()),
+		Member: string(data2),
+	})
+
+	// Call enqueueScheduled
+	w.enqueueScheduled(ctx)
+
+	// Check jobs are in correct queues
+	criticalLen, _ := redisClient.LLen(ctx, w.keys.Queue("critical")).Result()
+	lowLen, _ := redisClient.LLen(ctx, w.keys.Queue("low")).Result()
+
+	if criticalLen != 1 {
+		t.Errorf("expected 1 job in critical queue, got %d", criticalLen)
+	}
+	if lowLen != 1 {
+		t.Errorf("expected 1 job in low queue, got %d", lowLen)
+	}
+}
+
+func TestWorker_ScheduledPollInterval_Configurable(t *testing.T) {
+	customInterval := 50 * time.Millisecond
+	w, err := New(&Config{
+		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Namespace: "test-scheduler-interval",
+		Settings: senna.WorkerSettings{
+			Concurrency:           1,
+			Queues:                []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout:       time.Second,
+			PollInterval:          50 * time.Millisecond,
+			ScheduledPollInterval: customInterval,
+			HeartbeatRate:         time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	if w.config.Settings.ScheduledPollInterval != customInterval {
+		t.Errorf("expected ScheduledPollInterval %v, got %v",
+			customInterval, w.config.Settings.ScheduledPollInterval)
+	}
+}
+
+func TestWorker_ScheduledPollInterval_DefaultValue(t *testing.T) {
+	settings := senna.DefaultWorkerSettings()
+
+	if settings.ScheduledPollInterval != 5*time.Second {
+		t.Errorf("expected default ScheduledPollInterval 5s, got %v", settings.ScheduledPollInterval)
+	}
+}
+
+func TestWorker_Scheduler_ConcurrentWorkers_NoDuplicates(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-concurrent:*")
+
+	// Create multiple workers
+	workers := make([]*Worker, 3)
+	for i := range workers {
+		w, err := New(&Config{
+			Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+			Namespace: "test-scheduler-concurrent",
+			Settings:  senna.DefaultWorkerSettings(),
+		})
+		if err != nil {
+			t.Fatalf("failed to create worker %d: %v", i, err)
+		}
+		workers[i] = w
+		defer func() { _ = w.redis.Close() }()
+	}
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	// Add 10 jobs
+	for i := 0; i < 10; i++ {
+		job := senna.NewJob("concurrent_job", map[string]any{"index": i})
+		jobData, _ := job.Marshal()
+		redisClient.ZAdd(ctx, workers[0].keys.Scheduled(), redis.Z{
+			Score:  float64(pastTime.Unix()),
+			Member: string(jobData),
+		})
+	}
+
+	// Run schedulers concurrently from all workers
+	done := make(chan struct{})
+	for _, w := range workers {
+		go func(w *Worker) {
+			w.enqueueScheduled(ctx)
+			done <- struct{}{}
+		}(w)
+	}
+
+	// Wait for all workers
+	for range workers {
+		<-done
+	}
+
+	// Verify exactly 10 jobs in queue (no duplicates)
+	queueLen, _ := redisClient.LLen(ctx, workers[0].keys.Queue("default")).Result()
+	if queueLen != 10 {
+		t.Errorf("expected exactly 10 jobs in queue (no duplicates), got %d", queueLen)
+	}
+
+	// Verify scheduled set is empty
+	scheduledLen, _ := redisClient.ZCard(ctx, workers[0].keys.Scheduled()).Result()
+	if scheduledLen != 0 {
+		t.Errorf("expected 0 jobs in scheduled, got %d", scheduledLen)
+	}
+}
+
+func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-retry-concurrent:*")
+
+	// Create multiple workers
+	workers := make([]*Worker, 3)
+	for i := range workers {
+		w, err := New(&Config{
+			Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+			Namespace: "test-retry-concurrent",
+			Settings:  senna.DefaultWorkerSettings(),
+		})
+		if err != nil {
+			t.Fatalf("failed to create worker %d: %v", i, err)
+		}
+		workers[i] = w
+		defer func() { _ = w.redis.Close() }()
+	}
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	// Add 10 retry jobs
+	for i := 0; i < 10; i++ {
+		job := senna.NewJob("retry_job", map[string]any{"index": i})
+		job.RetryCount = 1
+		jobData, _ := job.Marshal()
+		redisClient.ZAdd(ctx, workers[0].keys.Retry(), redis.Z{
+			Score:  float64(pastTime.Unix()),
+			Member: string(jobData),
+		})
+	}
+
+	// Run retry processors concurrently from all workers
+	done := make(chan struct{})
+	for _, w := range workers {
+		go func(w *Worker) {
+			w.enqueueRetries(ctx)
+			done <- struct{}{}
+		}(w)
+	}
+
+	// Wait for all workers
+	for range workers {
+		<-done
+	}
+
+	// Verify exactly 10 jobs in queue (no duplicates)
+	queueLen, _ := redisClient.LLen(ctx, workers[0].keys.Queue("default")).Result()
+	if queueLen != 10 {
+		t.Errorf("expected exactly 10 retry jobs in queue (no duplicates), got %d", queueLen)
+	}
+
+	// Verify retry set is empty
+	retryLen, _ := redisClient.ZCard(ctx, workers[0].keys.Retry()).Result()
+	if retryLen != 0 {
+		t.Errorf("expected 0 jobs in retry set, got %d", retryLen)
 	}
 }

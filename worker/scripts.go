@@ -15,6 +15,10 @@ var batchAddJobsLua string
 //go:embed lua/batch_invalidate.lua
 var batchInvalidateLua string
 
+//go:embed lua/pop_due_jobs.lua
+var popDueJobsLua string
+
 var batchCompleteScript = script.New("batch_complete", batchCompleteLua)
 var batchAddJobsScript = script.New("batch_add_jobs", batchAddJobsLua)
 var batchInvalidateScript = script.New("batch_invalidate", batchInvalidateLua)
+var popDueJobsScript = script.New("pop_due_jobs", popDueJobsLua)
