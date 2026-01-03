@@ -119,7 +119,7 @@ func TestWorker_Register_WithOptions(t *testing.T) {
 	}, WithMaxRetries(3), WithJobTimeout(time.Second))
 
 	job := senna.NewJob("test_job", nil)
-	opts, _ := w.pool.process(context.Background(), job)
+	opts, _ := w.handlers.process(context.Background(), job)
 
 	if !called {
 		t.Error("handler should have been called")
@@ -156,7 +156,7 @@ func TestWorker_Use_AddsMiddleware(t *testing.T) {
 	})
 
 	job := senna.NewJob("test_job", nil)
-	_, _ = w.pool.process(context.Background(), job)
+	_, _ = w.handlers.process(context.Background(), job)
 
 	if !middlewareCalled {
 		t.Error("middleware should have been called")
@@ -272,7 +272,7 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 	}, WithMaxRetries(1))
 
 	job := senna.NewJob("failing_job", nil)
-	opts, err := w.pool.process(context.Background(), job)
+	opts, err := w.handlers.process(context.Background(), job)
 
 	if err == nil {
 		t.Error("expected error from handler")
@@ -302,7 +302,7 @@ func TestWorker_ProcessJob_RetryableError(t *testing.T) {
 	})
 
 	job := senna.NewJob("retryable_job", nil)
-	_, err = w.pool.process(context.Background(), job)
+	_, err = w.handlers.process(context.Background(), job)
 
 	var retryErr *senna.RetryableError
 	if !errors.As(err, &retryErr) {
@@ -354,8 +354,8 @@ func TestWorker_MultipleHandlers(t *testing.T) {
 		return nil
 	})
 
-	_, _ = w.pool.process(context.Background(), senna.NewJob("job_type_1", nil))
-	_, _ = w.pool.process(context.Background(), senna.NewJob("job_type_2", nil))
+	_, _ = w.handlers.process(context.Background(), senna.NewJob("job_type_1", nil))
+	_, _ = w.handlers.process(context.Background(), senna.NewJob("job_type_2", nil))
 
 	if !job1Called.Load() {
 		t.Error("job_type_1 handler should have been called")
@@ -381,7 +381,7 @@ func TestWorker_UnknownJobType(t *testing.T) {
 	})
 
 	job := senna.NewJob("unknown_job", nil)
-	_, err = w.pool.process(context.Background(), job)
+	_, err = w.handlers.process(context.Background(), job)
 
 	var notFoundErr *senna.JobNotFoundError
 	if !errors.As(err, &notFoundErr) {
@@ -425,7 +425,7 @@ func TestWorker_MiddlewareOrder(t *testing.T) {
 		return nil
 	})
 
-	_, _ = w.pool.process(context.Background(), senna.NewJob("test_job", nil))
+	_, _ = w.handlers.process(context.Background(), senna.NewJob("test_job", nil))
 
 	expected := []string{"mw1-before", "mw2-before", "handler", "mw2-after", "mw1-after"}
 	start := len(order) - len(expected)

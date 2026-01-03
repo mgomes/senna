@@ -110,7 +110,7 @@ func (f *fetcher) fetchStrict(ctx context.Context, workerID string) (*senna.Job,
 	return nil, nil
 }
 
-// fetchFromQueue attempts to fetch a job from a specific queue
+// fetchFromQueue attempts to fetch a job from a specific queue (non-blocking)
 func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string) (*senna.Job, error) {
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
@@ -125,6 +125,111 @@ func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string
 		}
 	}
 	if err != nil {
+		return nil, err
+	}
+
+	var job senna.Job
+	if err := json.Unmarshal([]byte(result), &job); err != nil {
+		return nil, err
+	}
+
+	job.SetRaw(result)
+	return &job, nil
+}
+
+// BlockingFetch blocks until a job is available, then atomically moves it to in-flight.
+// Uses BLMOVE (Redis 6.2+) for efficient blocking without polling.
+func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	if f.strictPriority {
+		return f.blockingFetchStrict(ctx, workerID, timeout)
+	}
+	return f.blockingFetchWeighted(ctx, workerID, timeout)
+}
+
+// blockingFetchWeighted tries all queues non-blocking first (weighted order),
+// then blocks on a randomly selected queue if all are empty
+func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	// First, try all queues non-blocking in weighted random order
+	// This ensures we don't miss jobs on other queues while blocking
+	tried := make(map[string]bool)
+	for i := 0; i < len(f.queues); i++ {
+		queueName := f.selectQueueWeighted()
+		if queueName == "" || tried[queueName] {
+			continue
+		}
+		tried[queueName] = true
+
+		job, err := f.fetchFromQueue(ctx, workerID, queueName)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+
+	// All queues empty, block on a randomly selected one
+	queueName := f.selectQueueWeighted()
+	if queueName == "" {
+		// All queues paused, wait and retry
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
+	return f.blockingFetchFromQueue(ctx, workerID, queueName, timeout)
+}
+
+// blockingFetchStrict tries higher priority queues first (non-blocking),
+// then blocks on the lowest priority queue
+func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	activeQueues := make([]senna.QueueConfig, 0, len(f.queues))
+	for _, q := range f.queues {
+		if !q.Paused {
+			activeQueues = append(activeQueues, q)
+		}
+	}
+
+	if len(activeQueues) == 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
+
+	// Try higher priority queues non-blocking first
+	for i := 0; i < len(activeQueues)-1; i++ {
+		job, err := f.fetchFromQueue(ctx, workerID, activeQueues[i].Name)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+
+	// Block on lowest priority queue
+	return f.blockingFetchFromQueue(ctx, workerID, activeQueues[len(activeQueues)-1].Name, timeout)
+}
+
+// blockingFetchFromQueue uses BLMOVE to block until a job is available
+func (f *fetcher) blockingFetchFromQueue(ctx context.Context, workerID, queueName string, timeout time.Duration) (*senna.Job, error) {
+	queueKey := f.keys.Queue(queueName)
+	inFlightKey := f.keys.InFlight(workerID)
+
+	result, err := f.client.BLMove(ctx, queueKey, inFlightKey, "RIGHT", "LEFT", timeout).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 

@@ -25,7 +25,7 @@ type Worker struct {
 	redis      *redis.Client
 	keys       *keys.Keys
 	config     *Config
-	pool       *workerPool
+	handlers   *handlerRegistry
 	fetcher    *fetcher
 	encryptor  *encryption.Encryptor
 	middleware []senna.Middleware
@@ -57,13 +57,13 @@ func New(cfg *Config) (*Worker, error) {
 	id := fmt.Sprintf("%s:%d:%s", hostname(), os.Getpid(), uuid.New().String()[:8])
 
 	w := &Worker{
-		id:      id,
-		redis:   client,
-		keys:    k,
-		config:  cfg,
-		pool:    newWorkerPool(cfg.Settings.Concurrency),
-		fetcher: newFetcher(client, k, cfg.Settings.Queues, cfg.Settings.PollInterval, cfg.Settings.StrictPriority),
-		stopCh:  make(chan struct{}),
+		id:       id,
+		redis:    client,
+		keys:     k,
+		config:   cfg,
+		handlers: newHandlerRegistry(),
+		fetcher:  newFetcher(client, k, cfg.Settings.Queues, cfg.Settings.PollInterval, cfg.Settings.StrictPriority),
+		stopCh:   make(chan struct{}),
 	}
 
 	if cfg.Encryption != nil && cfg.Encryption.Enabled {
@@ -106,14 +106,14 @@ func (w *Worker) Register(jobType string, handler senna.Handler, opts ...JobOpti
 	for _, opt := range opts {
 		opt(jobOpts)
 	}
-	w.pool.Register(jobType, handler, jobOpts)
+	w.handlers.Register(jobType, handler, jobOpts)
 }
 
 func (w *Worker) Use(mw ...senna.Middleware) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.middleware = append(w.middleware, mw...)
-	w.pool.Use(mw...)
+	w.handlers.Use(mw...)
 }
 
 // Periodic registers a periodic job that runs on the given cron schedule.
@@ -149,9 +149,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start pool workers that consume from the jobs channel
-	w.pool.Start(ctx, w.processJob)
-
 	go w.heartbeat(ctx)
 	go w.scheduler(ctx)
 	go w.reaper(ctx)
@@ -160,15 +157,13 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.periodic.Start(ctx)
 	}
 
-	// Start fetchers that pull jobs from Redis and submit to pool
-	// Use 2 fetchers to keep the pool fed without excessive Redis connections
-	var fetcherWg sync.WaitGroup
-	numFetchers := 2
-	for i := 0; i < numFetchers; i++ {
-		fetcherWg.Add(1)
+	// Start worker goroutines that block on Redis for jobs
+	var wg sync.WaitGroup
+	for i := 0; i < w.config.Settings.Concurrency; i++ {
+		wg.Add(1)
 		go func() {
-			defer fetcherWg.Done()
-			w.fetchLoop(ctx)
+			defer wg.Done()
+			w.workerLoop(ctx)
 		}()
 	}
 
@@ -184,15 +179,19 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.periodic.Stop()
 	}
 
-	// Wait for fetchers to stop, then close the jobs channel
-	fetcherWg.Wait()
-	w.pool.Stop()
+	// Wait for all workers to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-	// Drain waits for pool workers to finish processing
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), w.config.Settings.ShutdownTimeout)
-	defer shutdownCancel()
-
-	return w.pool.Drain(shutdownCtx)
+	select {
+	case <-done:
+		return nil
+	case <-time.After(w.config.Settings.ShutdownTimeout):
+		return context.DeadlineExceeded
+	}
 }
 
 func (w *Worker) Stop() {
@@ -203,7 +202,13 @@ func (w *Worker) Close() error {
 	return w.redis.Close()
 }
 
-func (w *Worker) fetchLoop(ctx context.Context) {
+// workerLoop blocks on Redis waiting for jobs, then processes them.
+// Uses BLMOVE for efficient blocking without polling.
+func (w *Worker) workerLoop(ctx context.Context) {
+	// Block timeout - how long to wait for a job before cycling
+	// This allows checking context cancellation and queue rotation
+	blockTimeout := 2 * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -211,7 +216,7 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 		default:
 		}
 
-		job, err := w.fetcher.Fetch(ctx, w.id)
+		job, err := w.fetcher.BlockingFetch(ctx, w.id, blockTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -222,15 +227,11 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 		}
 
 		if job == nil {
-			time.Sleep(w.config.Settings.PollInterval)
+			// Timeout, loop to check context and try again
 			continue
 		}
 
-		// Submit to pool; blocks if channel is full (back-pressure)
-		if !w.pool.SubmitWait(ctx, job) {
-			// Context was cancelled, exit the loop
-			return
-		}
+		w.processJob(ctx, job)
 	}
 }
 
@@ -241,7 +242,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 		ctx = contextWithBatch(ctx, bh)
 	}
 
-	opts, err := w.pool.process(ctx, job)
+	opts, err := w.handlers.process(ctx, job)
 
 	if err == nil {
 		_ = w.fetcher.Ack(ctx, w.id, job)
