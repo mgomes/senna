@@ -146,13 +146,26 @@ func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout ti
 	return f.blockingFetchWeighted(ctx, workerID, timeout)
 }
 
-// blockingFetchWeighted tries all queues non-blocking first,
-// then blocks on a randomly selected queue if all are empty
+// blockingFetchWeighted uses weighted random selection to honor queue priorities,
+// while still checking all queues to avoid unnecessary blocking
 func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
-	// First, try ALL queues non-blocking to ensure we don't miss jobs
-	// while blocking on another queue
+	// First, try a weighted-random queue to honor priorities
+	// This ensures weighted fairness when multiple queues have jobs
+	primaryQueue := f.selectQueueWeighted()
+	if primaryQueue != "" {
+		job, err := f.fetchFromQueue(ctx, workerID, primaryQueue)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
+	}
+
+	// Primary queue empty - check remaining queues to avoid blocking
+	// when jobs are available elsewhere
 	for _, q := range f.queues {
-		if q.Paused {
+		if q.Paused || q.Name == primaryQueue {
 			continue
 		}
 		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
@@ -164,9 +177,9 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 		}
 	}
 
-	// All queues empty, block on a randomly selected one
-	queueName := f.selectQueueWeighted()
-	if queueName == "" {
+	// All queues empty, block on a weighted random queue
+	blockQueue := f.selectQueueWeighted()
+	if blockQueue == "" {
 		// All queues paused, wait and retry
 		select {
 		case <-ctx.Done():
@@ -175,7 +188,7 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 			return nil, nil
 		}
 	}
-	return f.blockingFetchFromQueue(ctx, workerID, queueName, timeout)
+	return f.blockingFetchFromQueue(ctx, workerID, blockQueue, timeout)
 }
 
 // blockingFetchStrict tries all queues non-blocking in priority order,
