@@ -1,3 +1,4 @@
+--!df flags=allow-undeclared-keys
 -- Atomically pop due jobs from a sorted set and push them to their queues
 -- KEYS[1] = sorted set key (scheduled or retry)
 -- KEYS[2] = queues set key (to track known queues)

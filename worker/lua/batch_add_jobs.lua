@@ -1,3 +1,4 @@
+--!df flags=allow-undeclared-keys
 -- batch_add_jobs.lua
 -- Atomically add jobs to an existing batch and enqueue them
 -- KEYS[1] = batch state key
