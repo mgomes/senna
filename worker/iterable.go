@@ -262,6 +262,23 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		return err
 	}
 
+	// Check for late cancellation before completing
+	if w.checkIterationCancelled(ctx, stateKey) {
+		state.Cancelled = true
+		state.TotalTime += time.Since(runStart)
+		_ = w.saveIterationState(ctx, stateKey, state)
+
+		if opts.Callbacks != nil {
+			if opts.Callbacks.OnCancel != nil {
+				_ = opts.Callbacks.OnCancel(ctx, job, state)
+			}
+			if opts.Callbacks.OnStop != nil {
+				_ = opts.Callbacks.OnStop(ctx, job, state)
+			}
+		}
+		return nil // Ack job (success), no OnComplete
+	}
+
 	// Complete - fire OnComplete and DELETE state from Redis
 	state.TotalTime += time.Since(runStart)
 
