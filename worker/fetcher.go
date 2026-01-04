@@ -12,6 +12,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const sequentialLockTTL = 30 * time.Second
+
 type fetcher struct {
 	client         *redis.Client
 	keys           *keys.Keys
@@ -52,6 +54,41 @@ func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, 
 	}
 }
 
+// canProcessQueue checks if this worker can process from the given queue.
+// For sequential queues, attempts to acquire or renew the exclusive lock.
+func (f *fetcher) canProcessQueue(ctx context.Context, workerID string, q senna.QueueConfig) bool {
+	if q.Paused {
+		return false
+	}
+	if !q.Sequential {
+		return true
+	}
+
+	lockKey := f.keys.SequentialLock(q.Name)
+
+	// Try to acquire lock
+	ok, err := f.client.SetNX(ctx, lockKey, workerID, sequentialLockTTL).Result()
+	if err != nil {
+		return false
+	}
+	if ok {
+		return true
+	}
+
+	// Check if we already hold it
+	holder, err := f.client.Get(ctx, lockKey).Result()
+	if err != nil {
+		return false
+	}
+	if holder == workerID {
+		// Renew our lock
+		f.client.Expire(ctx, lockKey, sequentialLockTTL)
+		return true
+	}
+
+	return false
+}
+
 // selectQueueWeighted uses weighted random selection
 func (f *fetcher) selectQueueWeighted() string {
 	if f.totalWeight == 0 {
@@ -83,7 +120,35 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*senna.Job, error
 
 // fetchWeighted selects a queue using weighted random and tries to fetch from it
 func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Job, error) {
-	queueName := f.selectQueueWeighted()
+	// Build list of queues we can currently process
+	processable := make([]senna.QueueConfig, 0, len(f.queues))
+	var totalWeight int
+	for _, q := range f.queues {
+		if f.canProcessQueue(ctx, workerID, q) {
+			processable = append(processable, q)
+			totalWeight += q.Priority
+		}
+	}
+
+	if len(processable) == 0 {
+		return nil, nil
+	}
+
+	// Select queue using weighted random from processable queues
+	var queueName string
+	if len(processable) == 1 {
+		queueName = processable[0].Name
+	} else {
+		r := rand.Intn(totalWeight)
+		for _, q := range processable {
+			r -= q.Priority
+			if r < 0 {
+				queueName = q.Name
+				break
+			}
+		}
+	}
+
 	if queueName == "" {
 		return nil, nil
 	}
@@ -94,7 +159,7 @@ func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Jo
 // fetchStrict tries each queue in priority order until a job is found
 func (f *fetcher) fetchStrict(ctx context.Context, workerID string) (*senna.Job, error) {
 	for _, q := range f.queues {
-		if q.Paused {
+		if !f.canProcessQueue(ctx, workerID, q) {
 			continue
 		}
 
@@ -149,9 +214,42 @@ func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout ti
 // blockingFetchWeighted uses weighted random selection to honor queue priorities,
 // while still checking all queues to avoid unnecessary blocking
 func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
-	// First, try a weighted-random queue to honor priorities
-	// This ensures weighted fairness when multiple queues have jobs
-	primaryQueue := f.selectQueueWeighted()
+	// Build list of queues we can currently process
+	// (non-paused, and for sequential queues, we hold the lock)
+	processable := make([]senna.QueueConfig, 0, len(f.queues))
+	var totalWeight int
+	for _, q := range f.queues {
+		if f.canProcessQueue(ctx, workerID, q) {
+			processable = append(processable, q)
+			totalWeight += q.Priority
+		}
+	}
+
+	if len(processable) == 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
+
+	// Select primary queue using weighted random from processable queues
+	var primaryQueue string
+	if len(processable) == 1 {
+		primaryQueue = processable[0].Name
+	} else {
+		r := rand.Intn(totalWeight)
+		for _, q := range processable {
+			r -= q.Priority
+			if r < 0 {
+				primaryQueue = q.Name
+				break
+			}
+		}
+	}
+
+	// Try primary queue first
 	if primaryQueue != "" {
 		job, err := f.fetchFromQueue(ctx, workerID, primaryQueue)
 		if err != nil {
@@ -162,10 +260,9 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 		}
 	}
 
-	// Primary queue empty - check remaining queues to avoid blocking
-	// when jobs are available elsewhere
-	for _, q := range f.queues {
-		if q.Paused || q.Name == primaryQueue {
+	// Primary queue empty - check remaining processable queues
+	for _, q := range processable {
+		if q.Name == primaryQueue {
 			continue
 		}
 		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
@@ -177,10 +274,22 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 		}
 	}
 
-	// All queues empty, block on a weighted random queue
-	blockQueue := f.selectQueueWeighted()
+	// All queues empty, block on a weighted random processable queue
+	var blockQueue string
+	if len(processable) == 1 {
+		blockQueue = processable[0].Name
+	} else {
+		r := rand.Intn(totalWeight)
+		for _, q := range processable {
+			r -= q.Priority
+			if r < 0 {
+				blockQueue = q.Name
+				break
+			}
+		}
+	}
+
 	if blockQueue == "" {
-		// All queues paused, wait and retry
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -194,14 +303,17 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 // blockingFetchStrict tries all queues non-blocking in priority order,
 // then blocks on the HIGHEST priority queue so high-priority jobs wake us immediately
 func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
-	activeQueues := make([]senna.QueueConfig, 0, len(f.queues))
+	// Build list of queues we can currently process
+	// (non-paused, and for sequential queues, we hold the lock)
+	// Note: f.queues is already sorted by priority descending for strict mode
+	processable := make([]senna.QueueConfig, 0, len(f.queues))
 	for _, q := range f.queues {
-		if !q.Paused {
-			activeQueues = append(activeQueues, q)
+		if f.canProcessQueue(ctx, workerID, q) {
+			processable = append(processable, q)
 		}
 	}
 
-	if len(activeQueues) == 0 {
+	if len(processable) == 0 {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -210,8 +322,8 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, time
 		}
 	}
 
-	// Try ALL queues non-blocking in priority order (high to low)
-	for _, q := range activeQueues {
+	// Try ALL processable queues non-blocking in priority order (high to low)
+	for _, q := range processable {
 		job, err := f.fetchFromQueue(ctx, workerID, q.Name)
 		if err != nil {
 			return nil, err
@@ -221,9 +333,9 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, time
 		}
 	}
 
-	// Block on HIGHEST priority queue - ensures high-priority jobs wake us immediately
+	// Block on HIGHEST priority processable queue - ensures high-priority jobs wake us immediately
 	// Low-priority jobs will be picked up on the next cycle after timeout
-	return f.blockingFetchFromQueue(ctx, workerID, activeQueues[0].Name, timeout)
+	return f.blockingFetchFromQueue(ctx, workerID, processable[0].Name, timeout)
 }
 
 // blockingFetchFromQueue uses BLMOVE to block until a job is available
