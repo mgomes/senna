@@ -607,3 +607,402 @@ func TestFetcher_StrictPriority_TriesNextQueueWhenEmpty(t *testing.T) {
 		t.Errorf("expected default_job, got %s", fetched.Type)
 	}
 }
+
+func TestFetcher_Sequential_AcquiresLock(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-lock:*")
+
+	k := keys.New("test-seq-lock")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Add a job to the sequential queue
+	job := senna.NewJob("transform_job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data))
+
+	// Fetch should acquire the lock and get the job
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected job, got nil")
+	}
+
+	// Verify lock was acquired
+	holder, err := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("failed to get lock: %v", err)
+	}
+	if holder != "worker-1" {
+		t.Errorf("expected lock holder 'worker-1', got '%s'", holder)
+	}
+}
+
+func TestFetcher_Sequential_OnlyOneWorkerProcesses(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-exclusive:*")
+
+	k := keys.New("test-seq-exclusive")
+
+	// Two fetchers for different workers
+	f1 := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	f2 := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Add two jobs
+	job1 := senna.NewJob("job1", nil)
+	data1, _ := job1.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data1))
+
+	job2 := senna.NewJob("job2", nil)
+	data2, _ := job2.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data2))
+
+	// Worker 1 fetches first - should get the job and lock
+	fetched1, err := f1.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("worker-1 fetch failed: %v", err)
+	}
+	if fetched1 == nil {
+		t.Fatal("worker-1 should have gotten a job")
+	}
+
+	// Worker 2 tries to fetch - should get nil (can't acquire lock)
+	fetched2, err := f2.Fetch(ctx, "worker-2")
+	if err != nil {
+		t.Fatalf("worker-2 fetch failed: %v", err)
+	}
+	if fetched2 != nil {
+		t.Error("worker-2 should not have gotten a job (lock held by worker-1)")
+	}
+
+	// Verify worker-1 still holds the lock
+	holder, _ := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if holder != "worker-1" {
+		t.Errorf("expected lock holder 'worker-1', got '%s'", holder)
+	}
+}
+
+func TestFetcher_Sequential_LockRenewal(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-renew:*")
+
+	k := keys.New("test-seq-renew")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Add jobs
+	for i := 0; i < 3; i++ {
+		job := senna.NewJob("job", nil)
+		data, _ := job.Marshal()
+		client.LPush(ctx, k.Queue("transforms"), string(data))
+	}
+
+	// Fetch and process jobs one at a time (sequential queue semantics)
+	for i := 0; i < 3; i++ {
+		fetched, err := f.Fetch(ctx, "worker-1")
+		if err != nil {
+			t.Fatalf("fetch %d failed: %v", i, err)
+		}
+		if fetched == nil {
+			t.Fatalf("fetch %d: expected job, got nil", i)
+		}
+
+		// Verify lock is held with full TTL
+		ttl, err := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+		if err != nil {
+			t.Fatalf("failed to get TTL: %v", err)
+		}
+		if ttl < 25*time.Second {
+			t.Errorf("expected TTL > 25s, got %v", ttl)
+		}
+
+		// Simulate job processing and test lock renewal
+		f.RenewSequentialLocks(ctx, "worker-1")
+
+		// TTL should still be close to 30 seconds after renewal
+		ttl, err = client.TTL(ctx, k.SequentialLock("transforms")).Result()
+		if err != nil {
+			t.Fatalf("failed to get TTL after renewal: %v", err)
+		}
+		if ttl < 25*time.Second {
+			t.Errorf("expected TTL > 25s after renewal, got %v", ttl)
+		}
+
+		// Release lock to allow next fetch (simulates ack/nack completing)
+		f.ReleaseSequentialLock(ctx, "worker-1", "transforms")
+	}
+}
+
+func TestFetcher_Sequential_LockExpires(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-expire:*")
+
+	k := keys.New("test-seq-expire")
+
+	f1 := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	f2 := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Add a job
+	job := senna.NewJob("job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data))
+
+	// Worker 1 acquires lock
+	_, _ = f1.Fetch(ctx, "worker-1")
+
+	// Simulate lock expiry by deleting it
+	client.Del(ctx, k.SequentialLock("transforms"))
+
+	// Add another job
+	job2 := senna.NewJob("job2", nil)
+	data2, _ := job2.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data2))
+
+	// Worker 2 should now be able to acquire lock and fetch
+	fetched, err := f2.Fetch(ctx, "worker-2")
+	if err != nil {
+		t.Fatalf("worker-2 fetch failed: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("worker-2 should have gotten a job after lock expired")
+	}
+
+	// Verify worker-2 now holds the lock
+	holder, _ := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if holder != "worker-2" {
+		t.Errorf("expected lock holder 'worker-2', got '%s'", holder)
+	}
+}
+
+func TestFetcher_Sequential_MixedQueues(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-mixed:*")
+
+	k := keys.New("test-seq-mixed")
+
+	// One sequential queue, one regular queue
+	f2 := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Add jobs to both queues
+	seqJob := senna.NewJob("seq_job", nil)
+	seqData, _ := seqJob.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(seqData))
+
+	defaultJob := senna.NewJob("default_job", nil)
+	defaultData, _ := defaultJob.Marshal()
+	client.LPush(ctx, k.Queue("default"), string(defaultData))
+
+	// Simulate worker-1 holding the sequential lock
+	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+
+	// Worker 2 should only be able to fetch from default queue
+	// since worker-1 holds the sequential lock
+	fetched, err := f2.Fetch(ctx, "worker-2")
+	if err != nil {
+		t.Fatalf("worker-2 fetch failed: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("worker-2 should have gotten a job from default queue")
+	}
+	if fetched.Type != "default_job" {
+		t.Errorf("expected default_job, got %s", fetched.Type)
+	}
+}
+
+func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-blocking:*")
+
+	k := keys.New("test-seq-blocking")
+
+	f2 := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Simulate worker-1 holding the lock
+	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+
+	// Worker 2's blocking fetch should timeout (can't acquire lock)
+	start := time.Now()
+	fetched, err := f2.BlockingFetch(ctx, "worker-2", 200*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("blocking fetch failed: %v", err)
+	}
+	if fetched != nil {
+		t.Error("worker-2 should not have gotten a job")
+	}
+	if elapsed < 150*time.Millisecond {
+		t.Errorf("should have waited for timeout, only waited %v", elapsed)
+	}
+}
+
+func TestFetcher_Sequential_NoLockOnEmptyQueue(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-empty:*")
+
+	k := keys.New("test-seq-empty")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Queue is empty - fetch should return nil and NOT acquire lock
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched != nil {
+		t.Fatal("expected nil from empty queue")
+	}
+
+	// Verify NO lock was acquired
+	exists, _ := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if exists != 0 {
+		t.Error("lock should NOT be acquired when queue is empty")
+	}
+
+	// Now add a job and fetch - lock SHOULD be acquired
+	job := senna.NewJob("test_job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data))
+
+	fetched, err = f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected job")
+	}
+
+	// Verify lock was acquired
+	holder, err := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("failed to get lock: %v", err)
+	}
+	if holder != "worker-1" {
+		t.Errorf("expected lock holder 'worker-1', got '%s'", holder)
+	}
+}
+
+func TestFetcher_Sequential_ReleaseSequentialLock(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-release:*")
+
+	k := keys.New("test-seq-release")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Set up a lock held by worker-1
+	client.Set(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+
+	// Verify lock exists
+	holder, _ := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if holder != "worker-1" {
+		t.Fatalf("expected lock holder 'worker-1', got '%s'", holder)
+	}
+
+	// Release should work for the holder
+	f.ReleaseSequentialLock(ctx, "worker-1", "transforms")
+
+	// Verify lock is released
+	exists, _ := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if exists != 0 {
+		t.Error("lock should be released after ReleaseSequentialLock")
+	}
+
+	// Set up lock again
+	client.Set(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+
+	// Release should NOT work for a different worker
+	f.ReleaseSequentialLock(ctx, "worker-2", "transforms")
+
+	// Verify lock still exists (not released by wrong worker)
+	holder, _ = client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if holder != "worker-1" {
+		t.Errorf("lock should not be released by wrong worker, got holder '%s'", holder)
+	}
+}
+
+func TestFetcher_Sequential_RenewSequentialLocks(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-renew-bg:*")
+
+	k := keys.New("test-seq-renew-bg")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+		{Name: "default", Priority: 1}, // Non-sequential queue
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Acquire lock for worker-1
+	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 5*time.Second)
+	f.holdSequentialLock("transforms")
+
+	// Verify initial TTL
+	ttl1, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+	if ttl1 < 4*time.Second || ttl1 > 5*time.Second {
+		t.Errorf("expected initial TTL ~5s, got %v", ttl1)
+	}
+
+	// Simulate time passing (reduce TTL manually)
+	client.Expire(ctx, k.SequentialLock("transforms"), 2*time.Second)
+
+	// Call RenewSequentialLocks - should extend TTL back to 30s
+	f.RenewSequentialLocks(ctx, "worker-1")
+
+	// Verify TTL was renewed to 30s
+	ttl2, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+	if ttl2 < 25*time.Second {
+		t.Errorf("expected renewed TTL ~30s, got %v", ttl2)
+	}
+
+	// Verify RenewSequentialLocks doesn't renew locks held by other workers
+	client.Set(ctx, k.SequentialLock("transforms"), "worker-2", 5*time.Second)
+	f.RenewSequentialLocks(ctx, "worker-1")
+
+	ttl3, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+	if ttl3 > 5*time.Second {
+		t.Errorf("should not have renewed lock held by worker-2, TTL: %v", ttl3)
+	}
+}

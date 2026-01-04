@@ -93,6 +93,10 @@ func (k *Keys) PeriodicLock(name string) string {
 	return k.prefix("periodic", name, "lock")
 }
 
+func (k *Keys) SequentialLock(queueName string) string {
+	return k.prefix("sequential", queueName, "lock")
+}
+
 func (k *Keys) Leader() string {
 	return k.prefix("leader")
 }

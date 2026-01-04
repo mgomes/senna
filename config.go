@@ -73,9 +73,10 @@ func DefaultWorkerSettings() WorkerSettings {
 }
 
 type QueueConfig struct {
-	Name     string
-	Priority int
-	Paused   bool
+	Name       string
+	Priority   int
+	Paused     bool
+	Sequential bool // Only one worker globally processes this queue at a time
 }
 
 type ClientSettings struct {
