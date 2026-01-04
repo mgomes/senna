@@ -12,15 +12,21 @@ import (
 // handlerRegistry manages job handlers and middleware.
 // It's a simplified pool that just dispatches jobs to handlers.
 type handlerRegistry struct {
-	handlers   map[string]handlerEntry
-	middleware []senna.Middleware
-	mu         sync.RWMutex
+	handlers         map[string]handlerEntry
+	iterableHandlers map[string]iterableHandlerEntry
+	middleware       []senna.Middleware
+	mu               sync.RWMutex
 }
 
 type handlerEntry struct {
 	handler senna.Handler
 	options *JobOptions
 	sema    chan struct{}
+}
+
+type iterableHandlerEntry struct {
+	handler senna.IterableHandler
+	options *IterableJobOptions
 }
 
 type JobOptions struct {
@@ -39,7 +45,8 @@ type UniqueConfig struct {
 
 func newHandlerRegistry() *handlerRegistry {
 	return &handlerRegistry{
-		handlers: make(map[string]handlerEntry),
+		handlers:         make(map[string]handlerEntry),
+		iterableHandlers: make(map[string]iterableHandlerEntry),
 	}
 }
 
@@ -59,10 +66,43 @@ func (r *handlerRegistry) Register(jobType string, handler senna.Handler, opts *
 	}
 }
 
+func (r *handlerRegistry) RegisterIterable(jobType string, handler senna.IterableHandler, opts *IterableJobOptions) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.iterableHandlers[jobType] = iterableHandlerEntry{
+		handler: handler,
+		options: opts,
+	}
+}
+
+// GetIterable returns the iterable handler for a job type, if registered.
+func (r *handlerRegistry) GetIterable(jobType string) (senna.IterableHandler, *IterableJobOptions, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, ok := r.iterableHandlers[jobType]
+	if !ok {
+		return nil, nil, false
+	}
+	return entry.handler, entry.options, true
+}
+
 func (r *handlerRegistry) Use(mw ...senna.Middleware) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.middleware = append(r.middleware, mw...)
+}
+
+func (r *handlerRegistry) middlewareChain() []senna.Middleware {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.middleware) == 0 {
+		return nil
+	}
+	chain := make([]senna.Middleware, len(r.middleware))
+	copy(chain, r.middleware)
+	return chain
 }
 
 func (r *handlerRegistry) process(ctx context.Context, job *senna.Job) (*JobOptions, error) {

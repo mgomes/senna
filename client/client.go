@@ -472,3 +472,73 @@ func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID stri
 func (c *Client) BatchStatus(bid string) *senna.BatchStatus {
 	return senna.NewBatchStatus(c.redis, c.keys.Namespace(), bid)
 }
+
+// CancelIteration marks an iterable job for cancellation.
+// The job will stop after its current item and complete without calling OnComplete.
+// If the iteration state doesn't exist yet (job hasn't started or hasn't saved),
+// a minimal cancelled state is created so the cancellation is honored when the job runs.
+func (c *Client) CancelIteration(ctx context.Context, jobID string) error {
+	key := c.keys.IterationState(jobID)
+	ttl := 30 * 24 * time.Hour // Default 30 days
+
+	// Load current state
+	data, err := c.redis.Get(ctx, key).Result()
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			// State doesn't exist yet - create minimal cancelled state
+			state := senna.IterationState{
+				JobID:     jobID,
+				Cancelled: true,
+			}
+			newData, err := json.Marshal(state)
+			if err != nil {
+				return err
+			}
+			return c.redis.Set(ctx, key, string(newData), ttl).Err()
+		}
+		return err
+	}
+
+	var state senna.IterationState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return err
+	}
+
+	// Mark as cancelled
+	state.Cancelled = true
+
+	// Save back with same TTL
+	newData, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+
+	// Get remaining TTL and use it
+	existingTTL, err := c.redis.TTL(ctx, key).Result()
+	if err == nil && existingTTL > 0 {
+		ttl = existingTTL
+	}
+
+	return c.redis.Set(ctx, key, string(newData), ttl).Err()
+}
+
+// IterationStatus returns the current state of an iterable job.
+// Returns nil if no iteration state exists for the job.
+func (c *Client) IterationStatus(ctx context.Context, jobID string) (*senna.IterationState, error) {
+	key := c.keys.IterationState(jobID)
+
+	data, err := c.redis.Get(ctx, key).Result()
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var state senna.IterationState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return nil, err
+	}
+
+	return &state, nil
+}
