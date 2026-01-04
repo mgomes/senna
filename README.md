@@ -20,6 +20,7 @@ Senna is a background job processing library for Go, backed by Redis or Valkey. 
 - Sequential queues for ordered, one-at-a-time processing
 - Distributed rate limiting (bucket, sliding window, leaky bucket, concurrent, points-based)
 - Job batching with completion callbacks
+- Iterable jobs for resumable large dataset processing
 - Job argument encryption (AES-GCM)
 - Unique jobs to prevent duplicates
 - Graceful shutdown with in-flight job completion
@@ -95,6 +96,7 @@ For detailed documentation, see the [Wiki](../../wiki):
 - **[Workers](../../wiki/Workers)** - Configuration, handlers, graceful shutdown
 - **[Queues](../../wiki/Queues)** - Priority modes, sequential queues, dedicated workers
 - **[Batches](../../wiki/Batches)** - Grouping jobs with callbacks
+- **[Iterable Jobs](../../wiki/Iterable-Jobs)** - Resumable large dataset processing
 - **[Rate Limiters](../../wiki/Rate-Limiters)** - Distributed rate limiting algorithms
 - **[Periodic Jobs](../../wiki/Periodic-Jobs)** - Cron-based scheduling
 - **[Middleware](../../wiki/Middleware)** - Built-in and custom middleware
