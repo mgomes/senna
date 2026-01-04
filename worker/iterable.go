@@ -289,6 +289,13 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	// Complete - fire OnComplete and DELETE state from Redis
 	state.TotalTime += time.Since(runStart)
 
+	// Save state before OnComplete so retries don't reprocess items
+	// Preserve cancellation flag set by external client
+	if w.checkIterationCancelled(ctx, stateKey) {
+		state.Cancelled = true
+	}
+	_ = w.saveIterationState(ctx, stateKey, state)
+
 	if opts.Callbacks != nil && opts.Callbacks.OnComplete != nil {
 		if err := opts.Callbacks.OnComplete(ctx, job, state); err != nil {
 			return err
