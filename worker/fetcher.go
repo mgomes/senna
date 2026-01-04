@@ -344,6 +344,18 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 // BlockingFetch blocks until a job is available, then atomically moves it to in-flight.
 // Uses BLMOVE (Redis 6.2+) for efficient blocking without polling.
 func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
+	if timeout < time.Second {
+		job, err := f.Fetch(ctx, workerID)
+		if err != nil || job != nil {
+			return job, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
 	if f.strictPriority {
 		return f.blockingFetchStrict(ctx, workerID, timeout)
 	}
