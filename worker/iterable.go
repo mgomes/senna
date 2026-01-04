@@ -348,10 +348,21 @@ func (w *Worker) checkIterationCancelled(ctx context.Context, key string) bool {
 
 // requeue puts the job back on its queue without creating a new job.
 // Used for interrupted iterable jobs to preserve job ID.
+// Unlike Ack, this preserves the unique key so uniqueness is maintained.
 func (w *Worker) requeue(ctx context.Context, job *senna.Job) error {
-	// Remove from in-flight first
-	if err := w.fetcher.Ack(ctx, w.id, job); err != nil {
-		slog.ErrorContext(ctx, "failed to ack job before requeue", "error", err, "job_id", job.ID)
+	// Remove from in-flight without deleting unique key
+	// (Ack would delete the unique key, breaking uniqueness for interrupted jobs)
+	inFlightKey := w.keys.InFlight(w.id)
+	payload := job.Raw()
+	if payload == "" {
+		data, err := job.Marshal()
+		if err != nil {
+			return err
+		}
+		payload = string(data)
+	}
+	if err := w.redis.LRem(ctx, inFlightKey, 1, payload).Err(); err != nil {
+		slog.ErrorContext(ctx, "failed to remove job from in-flight", "error", err, "job_id", job.ID)
 	}
 
 	// Re-serialize with same ID and push to back of queue (RPUSH)
