@@ -977,6 +977,7 @@ func TestFetcher_Sequential_RenewSequentialLocks(t *testing.T) {
 
 	// Acquire lock for worker-1
 	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 5*time.Second)
+	f.holdSequentialLock("transforms")
 
 	// Verify initial TTL
 	ttl1, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
