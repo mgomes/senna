@@ -855,6 +855,56 @@ func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
 	}
 }
 
+func TestFetcher_Sequential_NoLockOnEmptyQueue(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-empty:*")
+
+	k := keys.New("test-seq-empty")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Queue is empty - fetch should return nil and NOT acquire lock
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched != nil {
+		t.Fatal("expected nil from empty queue")
+	}
+
+	// Verify NO lock was acquired
+	exists, _ := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if exists != 0 {
+		t.Error("lock should NOT be acquired when queue is empty")
+	}
+
+	// Now add a job and fetch - lock SHOULD be acquired
+	job := senna.NewJob("test_job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.Queue("transforms"), string(data))
+
+	fetched, err = f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected job")
+	}
+
+	// Verify lock was acquired
+	holder, err := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("failed to get lock: %v", err)
+	}
+	if holder != "worker-1" {
+		t.Errorf("expected lock holder 'worker-1', got '%s'", holder)
+	}
+}
+
 func TestFetcher_Sequential_RenewSequentialLocks(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-seq-renew-bg:*")

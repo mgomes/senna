@@ -69,8 +69,19 @@ func (f *fetcher) RenewSequentialLocks(ctx context.Context, workerID string) {
 	}
 }
 
+// isSequentialQueue returns true if the named queue is configured as sequential.
+func (f *fetcher) isSequentialQueue(name string) bool {
+	for _, q := range f.queues {
+		if q.Name == name {
+			return q.Sequential
+		}
+	}
+	return false
+}
+
 // canProcessQueue checks if this worker can process from the given queue.
-// For sequential queues, attempts to acquire or renew the exclusive lock.
+// For sequential queues, checks if we hold the lock or if it's available.
+// Does NOT acquire the lock - that happens atomically during fetch.
 func (f *fetcher) canProcessQueue(ctx context.Context, workerID string, q senna.QueueConfig) bool {
 	if q.Paused {
 		return false
@@ -81,27 +92,18 @@ func (f *fetcher) canProcessQueue(ctx context.Context, workerID string, q senna.
 
 	lockKey := f.keys.SequentialLock(q.Name)
 
-	// Try to acquire lock
-	ok, err := f.client.SetNX(ctx, lockKey, workerID, sequentialLockTTL).Result()
-	if err != nil {
-		return false
-	}
-	if ok {
-		return true
-	}
-
-	// Check if we already hold it
+	// Check who holds the lock (if anyone)
 	holder, err := f.client.Get(ctx, lockKey).Result()
+	if err == redis.Nil {
+		// No one holds the lock - we can try to fetch
+		return true
+	}
 	if err != nil {
 		return false
 	}
-	if holder == workerID {
-		// Renew our lock
-		f.client.Expire(ctx, lockKey, sequentialLockTTL)
-		return true
-	}
 
-	return false
+	// We can process if we hold the lock
+	return holder == workerID
 }
 
 // selectQueueWeighted uses weighted random selection
@@ -192,6 +194,11 @@ func (f *fetcher) fetchStrict(ctx context.Context, workerID string) (*senna.Job,
 
 // fetchFromQueue attempts to fetch a job from a specific queue (non-blocking)
 func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string) (*senna.Job, error) {
+	// Use atomic fetch for sequential queues (acquires lock only if job claimed)
+	if f.isSequentialQueue(queueName) {
+		return f.fetchFromSequentialQueue(ctx, workerID, queueName)
+	}
+
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
 
@@ -214,6 +221,47 @@ func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string
 	}
 
 	job.SetRaw(result)
+	return &job, nil
+}
+
+// fetchFromSequentialQueue atomically checks lock and fetches a job.
+// Only acquires the lock if a job is actually claimed.
+func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueName string) (*senna.Job, error) {
+	queueKey := f.keys.Queue(queueName)
+	inFlightKey := f.keys.InFlight(workerID)
+	lockKey := f.keys.SequentialLock(queueName)
+
+	result, err := sequentialFetchScript.Run(
+		ctx, f.client,
+		[]string{queueKey, inFlightKey, lockKey},
+		workerID, int(sequentialLockTTL.Seconds()),
+	)
+	if err == redis.Nil {
+		// Script returned nil - queue empty or lock held by another worker
+		return nil, nil
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+
+	if result == nil {
+		return nil, nil
+	}
+
+	jobData, ok := result.(string)
+	if !ok {
+		return nil, nil
+	}
+
+	var job senna.Job
+	if err := json.Unmarshal([]byte(jobData), &job); err != nil {
+		return nil, err
+	}
+
+	job.SetRaw(jobData)
 	return &job, nil
 }
 
