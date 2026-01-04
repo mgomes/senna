@@ -192,19 +192,7 @@ func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Jo
 	}
 
 	// Select queue using weighted random from processable queues
-	var queueName string
-	if len(processable) == 1 {
-		queueName = processable[0].Name
-	} else {
-		r := rand.Intn(totalWeight)
-		for _, q := range processable {
-			r -= q.Priority
-			if r < 0 {
-				queueName = q.Name
-				break
-			}
-		}
-	}
+	queueName := selectProcessableQueue(processable, totalWeight)
 
 	if queueName == "" {
 		return nil, nil
@@ -357,19 +345,7 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 	}
 
 	// Select primary queue using weighted random from processable queues
-	var primaryQueue string
-	if len(processable) == 1 {
-		primaryQueue = processable[0].Name
-	} else {
-		r := rand.Intn(totalWeight)
-		for _, q := range processable {
-			r -= q.Priority
-			if r < 0 {
-				primaryQueue = q.Name
-				break
-			}
-		}
-	}
+	primaryQueue := selectProcessableQueue(processable, totalWeight)
 
 	// Try primary queue first
 	if primaryQueue != "" {
@@ -397,19 +373,7 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 	}
 
 	// All queues empty, block on a weighted random processable queue
-	var blockQueue string
-	if len(processable) == 1 {
-		blockQueue = processable[0].Name
-	} else {
-		r := rand.Intn(totalWeight)
-		for _, q := range processable {
-			r -= q.Priority
-			if r < 0 {
-				blockQueue = q.Name
-				break
-			}
-		}
-	}
+	blockQueue := selectProcessableQueue(processable, totalWeight)
 
 	if blockQueue == "" {
 		select {
@@ -420,6 +384,26 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, ti
 		}
 	}
 	return f.blockingFetchFromQueue(ctx, workerID, blockQueue, timeout)
+}
+
+func selectProcessableQueue(queues []senna.QueueConfig, totalWeight int) string {
+	if len(queues) == 0 {
+		return ""
+	}
+	if len(queues) == 1 {
+		return queues[0].Name
+	}
+	if totalWeight <= 0 {
+		return queues[rand.Intn(len(queues))].Name
+	}
+	r := rand.Intn(totalWeight)
+	for _, q := range queues {
+		r -= q.Priority
+		if r < 0 {
+			return q.Name
+		}
+	}
+	return ""
 }
 
 // blockingFetchStrict tries all queues non-blocking in priority order,
