@@ -252,8 +252,8 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	}
 
 	// Release sequential lock after processing to allow other workers to take over.
-	// This is deferred to ensure it runs regardless of which exit path is taken.
-	defer w.fetcher.ReleaseSequentialLock(ctx, w.id, job.Queue)
+	// Use a non-canceled context so shutdown doesn't strand the lock.
+	defer w.fetcher.ReleaseSequentialLock(context.WithoutCancel(ctx), w.id, job.Queue)
 
 	opts, err := w.handlers.process(ctx, job)
 
