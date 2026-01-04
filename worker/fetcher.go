@@ -21,6 +21,7 @@ type fetcher struct {
 	pollInterval   time.Duration
 	totalWeight    int
 	strictPriority bool
+	sequentialSema map[string]chan struct{} // per-queue semaphore for local coordination
 }
 
 func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, pollInterval time.Duration, strictPriority bool) *fetcher {
@@ -44,6 +45,15 @@ func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, 
 		queues = sorted
 	}
 
+	// Create semaphores for sequential queues to ensure only one goroutine
+	// in this process can be processing each sequential queue at a time
+	sema := make(map[string]chan struct{})
+	for _, q := range queues {
+		if q.Sequential {
+			sema[q.Name] = make(chan struct{}, 1)
+		}
+	}
+
 	return &fetcher{
 		client:         client,
 		keys:           k,
@@ -51,6 +61,7 @@ func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, 
 		pollInterval:   pollInterval,
 		totalWeight:    totalWeight,
 		strictPriority: strictPriority,
+		sequentialSema: sema,
 	}
 }
 
@@ -71,12 +82,23 @@ func (f *fetcher) RenewSequentialLocks(ctx context.Context, workerID string) {
 
 // ReleaseSequentialLock releases the lock for a sequential queue if held by this worker.
 // Called after Ack/Nack to allow other workers to process the queue.
+// Also releases the local semaphore to allow other goroutines in this process to fetch.
 func (f *fetcher) ReleaseSequentialLock(ctx context.Context, workerID, queueName string) {
 	if !f.isSequentialQueue(queueName) {
 		return
 	}
+
+	// Release local semaphore first
+	sema := f.sequentialSema[queueName]
+	select {
+	case <-sema:
+		// Released
+	default:
+		// Wasn't held (shouldn't happen in normal operation)
+	}
+
+	// Release Redis lock (only if we hold it)
 	lockKey := f.keys.SequentialLock(queueName)
-	// Only delete if we hold the lock (atomic check-and-delete)
 	f.client.Eval(ctx, `
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
 			return redis.call("DEL", KEYS[1])
@@ -242,7 +264,20 @@ func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string
 
 // fetchFromSequentialQueue atomically checks lock and fetches a job.
 // Only acquires the lock if a job is actually claimed.
+// Uses local semaphore to ensure only one goroutine in this process can
+// process from this sequential queue at a time.
 func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueName string) (*senna.Job, error) {
+	// Acquire local semaphore first (non-blocking)
+	// This ensures only one goroutine in this process can process this queue
+	sema := f.sequentialSema[queueName]
+	select {
+	case sema <- struct{}{}:
+		// Got the local lock
+	default:
+		// Another goroutine in this process is already processing this queue
+		return nil, nil
+	}
+
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
 	lockKey := f.keys.SequentialLock(queueName)
@@ -254,9 +289,11 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 	)
 	if err == redis.Nil {
 		// Script returned nil - queue empty or lock held by another worker
+		<-sema // Release local semaphore
 		return nil, nil
 	}
 	if err != nil {
+		<-sema // Release local semaphore
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -264,19 +301,23 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 	}
 
 	if result == nil {
+		<-sema // Release local semaphore
 		return nil, nil
 	}
 
 	jobData, ok := result.(string)
 	if !ok {
+		<-sema // Release local semaphore
 		return nil, nil
 	}
 
 	var job senna.Job
 	if err := json.Unmarshal([]byte(jobData), &job); err != nil {
+		<-sema // Release local semaphore
 		return nil, err
 	}
 
+	// Successfully fetched job - semaphore will be released in ReleaseSequentialLock
 	job.SetRaw(jobData)
 	return &job, nil
 }

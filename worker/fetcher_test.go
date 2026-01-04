@@ -714,7 +714,7 @@ func TestFetcher_Sequential_LockRenewal(t *testing.T) {
 		client.LPush(ctx, k.Queue("transforms"), string(data))
 	}
 
-	// Fetch multiple times - lock should be renewed each time
+	// Fetch and process jobs one at a time (sequential queue semantics)
 	for i := 0; i < 3; i++ {
 		fetched, err := f.Fetch(ctx, "worker-1")
 		if err != nil {
@@ -724,15 +724,29 @@ func TestFetcher_Sequential_LockRenewal(t *testing.T) {
 			t.Fatalf("fetch %d: expected job, got nil", i)
 		}
 
-		// Verify lock is still held and has been renewed
+		// Verify lock is held with full TTL
 		ttl, err := client.TTL(ctx, k.SequentialLock("transforms")).Result()
 		if err != nil {
 			t.Fatalf("failed to get TTL: %v", err)
 		}
-		// TTL should be close to 30 seconds (renewed)
+		if ttl < 25*time.Second {
+			t.Errorf("expected TTL > 25s, got %v", ttl)
+		}
+
+		// Simulate job processing and test lock renewal
+		f.RenewSequentialLocks(ctx, "worker-1")
+
+		// TTL should still be close to 30 seconds after renewal
+		ttl, err = client.TTL(ctx, k.SequentialLock("transforms")).Result()
+		if err != nil {
+			t.Fatalf("failed to get TTL after renewal: %v", err)
+		}
 		if ttl < 25*time.Second {
 			t.Errorf("expected TTL > 25s after renewal, got %v", ttl)
 		}
+
+		// Release lock to allow next fetch (simulates ack/nack completing)
+		f.ReleaseSequentialLock(ctx, "worker-1", "transforms")
 	}
 }
 
