@@ -227,6 +227,10 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		select {
 		case <-saveTicker.C:
 			if needsSave {
+				// Preserve cancellation flag set by external client
+				if w.checkIterationCancelled(ctx, stateKey) {
+					state.Cancelled = true
+				}
 				state.TotalTime += time.Since(runStart)
 				_ = w.saveIterationState(ctx, stateKey, state)
 				runStart = time.Now()
