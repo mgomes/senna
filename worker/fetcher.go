@@ -88,16 +88,9 @@ func (f *fetcher) ReleaseSequentialLock(ctx context.Context, workerID, queueName
 		return
 	}
 
-	// Release local semaphore first
-	sema := f.sequentialSema[queueName]
-	select {
-	case <-sema:
-		// Released
-	default:
-		// Wasn't held (shouldn't happen in normal operation)
-	}
-
-	// Release Redis lock (only if we hold it)
+	// Release Redis lock (only if we hold it) before freeing the local semaphore.
+	// This prevents a new local goroutine from acquiring the semaphore and fetching
+	// another job while the old lock is still present, which could then be deleted here.
 	lockKey := f.keys.SequentialLock(queueName)
 	f.client.Eval(ctx, `
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -105,6 +98,15 @@ func (f *fetcher) ReleaseSequentialLock(ctx context.Context, workerID, queueName
 		end
 		return 0
 	`, []string{lockKey}, workerID)
+
+	// Release local semaphore last
+	sema := f.sequentialSema[queueName]
+	select {
+	case <-sema:
+		// Released
+	default:
+		// Wasn't held (shouldn't happen in normal operation)
+	}
 }
 
 // isSequentialQueue returns true if the named queue is configured as sequential.
