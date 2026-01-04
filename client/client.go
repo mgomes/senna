@@ -475,14 +475,26 @@ func (c *Client) BatchStatus(bid string) *senna.BatchStatus {
 
 // CancelIteration marks an iterable job for cancellation.
 // The job will stop after its current item and complete without calling OnComplete.
+// If the iteration state doesn't exist yet (job hasn't started or hasn't saved),
+// a minimal cancelled state is created so the cancellation is honored when the job runs.
 func (c *Client) CancelIteration(ctx context.Context, jobID string) error {
 	key := c.keys.IterationState(jobID)
+	ttl := 30 * 24 * time.Hour // Default 30 days
 
 	// Load current state
 	data, err := c.redis.Get(ctx, key).Result()
 	if err != nil {
 		if err.Error() == "redis: nil" {
-			return fmt.Errorf("iteration state not found for job %s", jobID)
+			// State doesn't exist yet - create minimal cancelled state
+			state := senna.IterationState{
+				JobID:     jobID,
+				Cancelled: true,
+			}
+			newData, err := json.Marshal(state)
+			if err != nil {
+				return err
+			}
+			return c.redis.Set(ctx, key, string(newData), ttl).Err()
 		}
 		return err
 	}
@@ -502,9 +514,9 @@ func (c *Client) CancelIteration(ctx context.Context, jobID string) error {
 	}
 
 	// Get remaining TTL and use it
-	ttl, err := c.redis.TTL(ctx, key).Result()
-	if err != nil || ttl <= 0 {
-		ttl = 30 * 24 * time.Hour // Default 30 days
+	existingTTL, err := c.redis.TTL(ctx, key).Result()
+	if err == nil && existingTTL > 0 {
+		ttl = existingTTL
 	}
 
 	return c.redis.Set(ctx, key, string(newData), ttl).Err()

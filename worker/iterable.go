@@ -112,6 +112,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			JobID:     job.ID,
 			StartedAt: time.Now(),
 		}
+	} else if state.StartedAt.IsZero() {
+		// State was created by CancelIteration before job started
+		state.StartedAt = time.Now()
 	}
 
 	state.Executions++
