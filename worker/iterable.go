@@ -154,7 +154,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		if state.Cancelled || w.checkIterationCancelled(ctx, stateKey) {
 			state.Cancelled = true
 			state.TotalTime += time.Since(runStart)
-			state.Cursor = iter.Cursor()
+			// Don't update cursor - current item wasn't processed yet
 			_ = w.saveIterationState(ctx, stateKey, state)
 
 			if opts.Callbacks != nil {
@@ -172,7 +172,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		select {
 		case <-ctx.Done():
 			state.TotalTime += time.Since(runStart)
-			state.Cursor = iter.Cursor()
+			// Don't update cursor - current item wasn't processed yet
 			// Use non-cancelled context for saving state during shutdown
 			saveCtx := context.WithoutCancel(ctx)
 			_ = w.saveIterationState(saveCtx, stateKey, state)
@@ -200,8 +200,8 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 				break // Complete successfully
 			} else {
 				// Real error - save cursor and return for retry
+				// Don't update cursor - failed item will be retried
 				state.TotalTime += time.Since(runStart)
-				state.Cursor = iter.Cursor()
 				_ = w.saveIterationState(ctx, stateKey, state)
 				return err
 			}
@@ -237,9 +237,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 	// Check iterator error
 	if err := iter.Err(); err != nil {
+		// Don't update cursor - Next() failed, so no new item was fetched
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			state.TotalTime += time.Since(runStart)
-			state.Cursor = iter.Cursor()
 			saveCtx := context.WithoutCancel(ctx)
 			_ = w.saveIterationState(saveCtx, stateKey, state)
 
@@ -250,7 +250,6 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		}
 
 		state.TotalTime += time.Since(runStart)
-		state.Cursor = iter.Cursor()
 		_ = w.saveIterationState(ctx, stateKey, state)
 		return err
 	}
