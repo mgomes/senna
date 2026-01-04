@@ -149,10 +149,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// Channel to signal when all workers have finished processing
+	workersDone := make(chan struct{})
+
 	go w.heartbeat(ctx)
 	go w.scheduler(ctx)
 	go w.reaper(ctx)
-	go w.sequentialLockRenewer(ctx)
+	go w.sequentialLockRenewer(ctx, workersDone)
 
 	if w.periodic != nil {
 		w.periodic.Start(ctx)
@@ -184,6 +187,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
+		close(workersDone) // Signal lock renewer to stop
 		close(done)
 	}()
 
@@ -402,17 +406,23 @@ func (w *Worker) heartbeat(ctx context.Context) {
 
 // sequentialLockRenewer periodically renews locks for sequential queues
 // to prevent expiry during long-running job processing.
-func (w *Worker) sequentialLockRenewer(ctx context.Context) {
+// Keeps running until workersDone is closed to ensure locks are renewed
+// during graceful shutdown while jobs are still being processed.
+func (w *Worker) sequentialLockRenewer(ctx context.Context, workersDone <-chan struct{}) {
 	// Renew at 1/3 of TTL to ensure locks don't expire
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	// Use background context for renewals during shutdown
+	// since the main ctx may be cancelled while jobs are still running
+	renewCtx := context.Background()
+
 	for {
 		select {
-		case <-ctx.Done():
+		case <-workersDone:
 			return
 		case <-ticker.C:
-			w.fetcher.RenewSequentialLocks(ctx, w.id)
+			w.fetcher.RenewSequentialLocks(renewCtx, w.id)
 		}
 	}
 }
