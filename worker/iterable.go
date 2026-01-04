@@ -204,6 +204,10 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			} else {
 				// Real error - save cursor and return for retry
 				// Don't update cursor - failed item will be retried
+				// Preserve cancellation flag set by external client
+				if w.checkIterationCancelled(ctx, stateKey) {
+					state.Cancelled = true
+				}
 				state.TotalTime += time.Since(runStart)
 				_ = w.saveIterationState(ctx, stateKey, state)
 				return err
