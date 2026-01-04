@@ -69,6 +69,22 @@ func (f *fetcher) RenewSequentialLocks(ctx context.Context, workerID string) {
 	}
 }
 
+// ReleaseSequentialLock releases the lock for a sequential queue if held by this worker.
+// Called after Ack/Nack to allow other workers to process the queue.
+func (f *fetcher) ReleaseSequentialLock(ctx context.Context, workerID, queueName string) {
+	if !f.isSequentialQueue(queueName) {
+		return
+	}
+	lockKey := f.keys.SequentialLock(queueName)
+	// Only delete if we hold the lock (atomic check-and-delete)
+	f.client.Eval(ctx, `
+		if redis.call("GET", KEYS[1]) == ARGV[1] then
+			return redis.call("DEL", KEYS[1])
+		end
+		return 0
+	`, []string{lockKey}, workerID)
+}
+
 // isSequentialQueue returns true if the named queue is configured as sequential.
 func (f *fetcher) isSequentialQueue(name string) bool {
 	for _, q := range f.queues {

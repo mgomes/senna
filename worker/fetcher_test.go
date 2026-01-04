@@ -905,6 +905,49 @@ func TestFetcher_Sequential_NoLockOnEmptyQueue(t *testing.T) {
 	}
 }
 
+func TestFetcher_Sequential_ReleaseSequentialLock(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-release:*")
+
+	k := keys.New("test-seq-release")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Set up a lock held by worker-1
+	client.Set(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+
+	// Verify lock exists
+	holder, _ := client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if holder != "worker-1" {
+		t.Fatalf("expected lock holder 'worker-1', got '%s'", holder)
+	}
+
+	// Release should work for the holder
+	f.ReleaseSequentialLock(ctx, "worker-1", "transforms")
+
+	// Verify lock is released
+	exists, _ := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if exists != 0 {
+		t.Error("lock should be released after ReleaseSequentialLock")
+	}
+
+	// Set up lock again
+	client.Set(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+
+	// Release should NOT work for a different worker
+	f.ReleaseSequentialLock(ctx, "worker-2", "transforms")
+
+	// Verify lock still exists (not released by wrong worker)
+	holder, _ = client.Get(ctx, k.SequentialLock("transforms")).Result()
+	if holder != "worker-1" {
+		t.Errorf("lock should not be released by wrong worker, got holder '%s'", holder)
+	}
+}
+
 func TestFetcher_Sequential_RenewSequentialLocks(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-seq-renew-bg:*")
