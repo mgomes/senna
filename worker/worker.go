@@ -255,6 +255,12 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	// Use a non-canceled context so shutdown doesn't strand the lock.
 	defer w.fetcher.ReleaseSequentialLock(context.WithoutCancel(ctx), w.id, job.Queue)
 
+	// Check for iterable handler first
+	if iterHandler, iterOpts, ok := w.handlers.GetIterable(job.Type); ok {
+		w.processIterableJob(ctx, job, iterHandler, iterOpts)
+		return
+	}
+
 	opts, err := w.handlers.process(ctx, job)
 
 	if err == nil {
@@ -286,6 +292,81 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 		}
 		// Use handler's MaxRetries setting (which defaults to 25 if not set)
 		maxRetries = opts.MaxRetries
+	}
+	backoff := backoffFn(job.RetryCount)
+	if job.RetryCount < maxRetries {
+		w.updateBatchProgress(ctx, job, batchResultFailure)
+		_ = w.fetcher.Nack(ctx, w.id, job, backoff)
+	} else {
+		job.Error = err.Error()
+		_ = w.fetcher.MoveToDead(ctx, w.id, job)
+		w.updateBatchProgress(ctx, job, batchResultDeath)
+	}
+}
+
+// processIterableJob handles iterable jobs with cursor tracking and interruption support.
+func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler senna.IterableHandler, opts *IterableJobOptions) {
+	now := time.Now()
+	job.ProcessedAt = &now
+
+	iterHandler := func(ctx context.Context, job *senna.Job) error {
+		return w.processIterable(ctx, job, handler, opts)
+	}
+
+	if opts != nil && opts.Timeout > 0 {
+		iterHandler = senna.TimeoutMiddleware(opts.Timeout)(iterHandler)
+	}
+	if opts != nil && opts.RateLimiter != nil {
+		iterHandler = rateLimitMiddlewareWithReschedule(opts.RateLimiter)(iterHandler)
+	}
+	if middleware := w.handlers.middlewareChain(); len(middleware) > 0 {
+		iterHandler = senna.Chain(middleware...)(iterHandler)
+	}
+
+	err := iterHandler(ctx, job)
+
+	if err == nil {
+		_ = w.fetcher.Ack(ctx, w.id, job)
+		w.updateBatchProgress(ctx, job, batchResultSuccess)
+		return
+	}
+
+	// Handle InterruptedError - requeue same job, no retry increment, no batch failure
+	var interruptedErr *senna.InterruptedError
+	if errors.As(err, &interruptedErr) {
+		// Requeue with same job ID - don't treat as failure
+		if requeueErr := w.requeue(context.WithoutCancel(ctx), job); requeueErr != nil {
+			slog.ErrorContext(ctx, "failed to requeue interrupted job", "error", requeueErr, "job_id", job.ID)
+		}
+		// No batch progress update - this is not a failure
+		return
+	}
+
+	var retryErr *senna.RetryableError
+	if errors.As(err, &retryErr) {
+		w.updateBatchProgress(ctx, job, batchResultFailure)
+		_ = w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
+		return
+	}
+
+	var maxRetriesErr *senna.MaxRetriesExceededError
+	if errors.As(err, &maxRetriesErr) {
+		job.Error = maxRetriesErr.Error()
+		_ = w.fetcher.MoveToDead(ctx, w.id, job)
+		w.updateBatchProgress(ctx, job, batchResultDeath)
+		return
+	}
+
+	// Standard error - use backoff retry
+	backoffFn := senna.DefaultBackoff()
+	maxRetries := 25
+	if opts != nil {
+		if opts.RetryBackoff != nil {
+			backoffFn = opts.RetryBackoff
+		}
+		if opts.MaxRetries > 0 {
+			maxRetries = opts.MaxRetries
+		}
 	}
 	backoff := backoffFn(job.RetryCount)
 	if job.RetryCount < maxRetries {

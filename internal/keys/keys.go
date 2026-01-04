@@ -136,3 +136,7 @@ func (k *Keys) RateLimitLeaky(name string) string {
 func (k *Keys) RateLimitPoints(name string) string {
 	return k.prefix("ratelimit", "points", name)
 }
+
+func (k *Keys) IterationState(jobID string) string {
+	return k.prefix("iteration", jobID)
+}

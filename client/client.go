@@ -472,3 +472,61 @@ func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID stri
 func (c *Client) BatchStatus(bid string) *senna.BatchStatus {
 	return senna.NewBatchStatus(c.redis, c.keys.Namespace(), bid)
 }
+
+// CancelIteration marks an iterable job for cancellation.
+// The job will stop after its current item and complete without calling OnComplete.
+func (c *Client) CancelIteration(ctx context.Context, jobID string) error {
+	key := c.keys.IterationState(jobID)
+
+	// Load current state
+	data, err := c.redis.Get(ctx, key).Result()
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			return fmt.Errorf("iteration state not found for job %s", jobID)
+		}
+		return err
+	}
+
+	var state senna.IterationState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return err
+	}
+
+	// Mark as cancelled
+	state.Cancelled = true
+
+	// Save back with same TTL
+	newData, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+
+	// Get remaining TTL and use it
+	ttl, err := c.redis.TTL(ctx, key).Result()
+	if err != nil || ttl <= 0 {
+		ttl = 30 * 24 * time.Hour // Default 30 days
+	}
+
+	return c.redis.Set(ctx, key, string(newData), ttl).Err()
+}
+
+// IterationStatus returns the current state of an iterable job.
+// Returns nil if no iteration state exists for the job.
+func (c *Client) IterationStatus(ctx context.Context, jobID string) (*senna.IterationState, error) {
+	key := c.keys.IterationState(jobID)
+
+	data, err := c.redis.Get(ctx, key).Result()
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var state senna.IterationState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return nil, err
+	}
+
+	return &state, nil
+}
