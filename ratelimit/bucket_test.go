@@ -41,6 +41,22 @@ func flushKeys(t *testing.T, client *redis.Client, pattern string) {
 	}
 }
 
+func waitForBucketWindow(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	now := time.Now()
+	start := now.Truncate(interval)
+	elapsed := now.Sub(start)
+	if remaining := interval - elapsed; remaining < 500*time.Millisecond {
+		time.Sleep(remaining + 50*time.Millisecond)
+		return
+	}
+	if elapsed < 50*time.Millisecond {
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestBucketLimiter_Basic(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
@@ -107,10 +123,13 @@ func TestBucketLimiter_Concurrent(t *testing.T) {
 	ctx := context.Background()
 	flushKeys(t, client, "senna:ratelimit:bucket:test-concurrent*")
 
+	interval := 2 * time.Second
+	waitForBucketWindow(interval)
+
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
 		Name:        "test-concurrent",
 		Limit:       100,
-		Interval:    time.Second,
+		Interval:    interval,
 		WaitTimeout: 100 * time.Millisecond,
 		Policy:      ratelimit.PolicySkip,
 	})
@@ -222,8 +241,8 @@ func TestBucketLimiter_ContextCancellation(t *testing.T) {
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
 		Name:        "test-cancel",
 		Limit:       1,
-		Interval:    time.Minute,       // Long interval = long retryIn
-		WaitTimeout: 2 * time.Minute,   // Longer than interval so it waits
+		Interval:    time.Minute,     // Long interval = long retryIn
+		WaitTimeout: 2 * time.Minute, // Longer than interval so it waits
 		Policy:      ratelimit.PolicyRaise,
 	})
 
