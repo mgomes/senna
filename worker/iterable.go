@@ -214,6 +214,10 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 		// Check max items per run
 		if opts.MaxItemsPerRun > 0 && itemsThisRun >= opts.MaxItemsPerRun {
+			// Preserve cancellation flag set by external client
+			if w.checkIterationCancelled(ctx, stateKey) {
+				state.Cancelled = true
+			}
 			state.TotalTime += time.Since(runStart)
 			_ = w.saveIterationState(ctx, stateKey, state)
 
