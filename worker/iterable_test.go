@@ -527,7 +527,7 @@ func TestIterable_Cancellation(t *testing.T) {
 		JobID:     job.ID,
 		Cancelled: true,
 	}
-	w.saveIterationState(ctx, stateKey, cancelledState)
+	_ = w.saveIterationState(ctx, stateKey, cancelledState)
 
 	data, _ := job.Marshal()
 	client.LPush(ctx, k.Queue("default"), string(data))

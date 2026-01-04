@@ -89,7 +89,7 @@ func TestSliceIterator(t *testing.T) {
 
 	t.Run("iterate all from start", func(t *testing.T) {
 		iter := SliceIterator(items, 0)
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		var collected []string
 		for iter.Next(ctx) {
@@ -113,7 +113,7 @@ func TestSliceIterator(t *testing.T) {
 
 	t.Run("resume from offset", func(t *testing.T) {
 		iter := SliceIterator(items, 2) // Start from index 2 ("c")
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		var collected []string
 		for iter.Next(ctx) {
@@ -134,7 +134,7 @@ func TestSliceIterator(t *testing.T) {
 
 	t.Run("cursor tracks position", func(t *testing.T) {
 		iter := SliceIterator(items, 0)
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		for i := 0; iter.Next(ctx); i++ {
 			cursor := iter.Cursor()
@@ -148,7 +148,7 @@ func TestSliceIterator(t *testing.T) {
 
 	t.Run("empty slice", func(t *testing.T) {
 		iter := SliceIterator([]string{}, 0)
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		if iter.Next(ctx) {
 			t.Error("expected Next() to return false for empty slice")
@@ -161,7 +161,7 @@ func TestRangeIterator(t *testing.T) {
 
 	t.Run("ascending range", func(t *testing.T) {
 		iter := RangeIterator(0, 5, 1)
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		var collected []int64
 		for iter.Next(ctx) {
@@ -182,7 +182,7 @@ func TestRangeIterator(t *testing.T) {
 
 	t.Run("step of 2", func(t *testing.T) {
 		iter := RangeIterator(0, 10, 2)
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		var collected []int64
 		for iter.Next(ctx) {
@@ -197,7 +197,7 @@ func TestRangeIterator(t *testing.T) {
 
 	t.Run("cursor tracks position", func(t *testing.T) {
 		iter := RangeIterator(10, 15, 1)
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		expectedCursors := []int64{11, 12, 13, 14, 15}
 		i := 0
@@ -213,7 +213,7 @@ func TestRangeIterator(t *testing.T) {
 
 	t.Run("empty range", func(t *testing.T) {
 		iter := RangeIterator(5, 5, 1) // start == end
-		defer iter.Close()
+		defer func() { _ = iter.Close() }()
 
 		if iter.Next(ctx) {
 			t.Error("expected Next() to return false for empty range")
@@ -247,7 +247,7 @@ func TestIterableFunc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildIterator error = %v", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	if !buildCalled {
 		t.Error("build function not called")

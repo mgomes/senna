@@ -135,7 +135,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	if err != nil {
 		return err
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	// Cursor save ticker
 	saveInterval := opts.CursorSaveInterval
@@ -155,14 +155,14 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			state.Cancelled = true
 			state.TotalTime += time.Since(runStart)
 			state.Cursor = iter.Cursor()
-			w.saveIterationState(ctx, stateKey, state)
+			_ = w.saveIterationState(ctx, stateKey, state)
 
 			if opts.Callbacks != nil {
 				if opts.Callbacks.OnCancel != nil {
-					opts.Callbacks.OnCancel(ctx, job, state)
+					_ = opts.Callbacks.OnCancel(ctx, job, state)
 				}
 				if opts.Callbacks.OnStop != nil {
-					opts.Callbacks.OnStop(ctx, job, state)
+					_ = opts.Callbacks.OnStop(ctx, job, state)
 				}
 			}
 			return nil // Ack job (success), no on_complete
@@ -175,10 +175,10 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			state.Cursor = iter.Cursor()
 			// Use non-cancelled context for saving state during shutdown
 			saveCtx := context.WithoutCancel(ctx)
-			w.saveIterationState(saveCtx, stateKey, state)
+			_ = w.saveIterationState(saveCtx, stateKey, state)
 
 			if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-				opts.Callbacks.OnStop(saveCtx, job, state)
+				_ = opts.Callbacks.OnStop(saveCtx, job, state)
 			}
 			return &senna.InterruptedError{} // Requeue same job
 		default:
@@ -202,7 +202,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 				// Real error - save cursor and return for retry
 				state.TotalTime += time.Since(runStart)
 				state.Cursor = iter.Cursor()
-				w.saveIterationState(ctx, stateKey, state)
+				_ = w.saveIterationState(ctx, stateKey, state)
 				return err
 			}
 		}
@@ -215,10 +215,10 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		// Check max items per run
 		if opts.MaxItemsPerRun > 0 && itemsThisRun >= opts.MaxItemsPerRun {
 			state.TotalTime += time.Since(runStart)
-			w.saveIterationState(ctx, stateKey, state)
+			_ = w.saveIterationState(ctx, stateKey, state)
 
 			if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-				opts.Callbacks.OnStop(ctx, job, state)
+				_ = opts.Callbacks.OnStop(ctx, job, state)
 			}
 			return &senna.InterruptedError{} // Requeue same job
 		}
@@ -228,9 +228,8 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		case <-saveTicker.C:
 			if needsSave {
 				state.TotalTime += time.Since(runStart)
-				w.saveIterationState(ctx, stateKey, state)
+				_ = w.saveIterationState(ctx, stateKey, state)
 				runStart = time.Now()
-				needsSave = false
 			}
 		default:
 		}
@@ -242,17 +241,17 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			state.TotalTime += time.Since(runStart)
 			state.Cursor = iter.Cursor()
 			saveCtx := context.WithoutCancel(ctx)
-			w.saveIterationState(saveCtx, stateKey, state)
+			_ = w.saveIterationState(saveCtx, stateKey, state)
 
 			if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-				opts.Callbacks.OnStop(saveCtx, job, state)
+				_ = opts.Callbacks.OnStop(saveCtx, job, state)
 			}
 			return &senna.InterruptedError{}
 		}
 
 		state.TotalTime += time.Since(runStart)
 		state.Cursor = iter.Cursor()
-		w.saveIterationState(ctx, stateKey, state)
+		_ = w.saveIterationState(ctx, stateKey, state)
 		return err
 	}
 
