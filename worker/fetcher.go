@@ -401,8 +401,26 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, time
 	return f.blockingFetchFromQueue(ctx, workerID, processable[0].Name, timeout)
 }
 
-// blockingFetchFromQueue uses BLMOVE to block until a job is available
+// blockingFetchFromQueue uses BLMOVE to block until a job is available.
+// For sequential queues, uses non-blocking atomic fetch to maintain exclusivity.
 func (f *fetcher) blockingFetchFromQueue(ctx context.Context, workerID, queueName string, timeout time.Duration) (*senna.Job, error) {
+	// Sequential queues can't use BLMOVE - multiple workers blocking would
+	// break the exclusivity guarantee. Use non-blocking fetch with the atomic
+	// lock script, then sleep for the timeout if no job.
+	if f.isSequentialQueue(queueName) {
+		job, err := f.fetchFromSequentialQueue(ctx, workerID, queueName)
+		if err != nil || job != nil {
+			return job, err
+		}
+		// No job available, wait for timeout before returning
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(timeout):
+			return nil, nil
+		}
+	}
+
 	queueKey := f.keys.Queue(queueName)
 	inFlightKey := f.keys.InFlight(workerID)
 
