@@ -54,6 +54,21 @@ func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, 
 	}
 }
 
+// RenewSequentialLocks renews all sequential queue locks held by this worker.
+// Should be called periodically to prevent lock expiry during long-running jobs.
+func (f *fetcher) RenewSequentialLocks(ctx context.Context, workerID string) {
+	for _, q := range f.queues {
+		if !q.Sequential {
+			continue
+		}
+		lockKey := f.keys.SequentialLock(q.Name)
+		holder, err := f.client.Get(ctx, lockKey).Result()
+		if err == nil && holder == workerID {
+			f.client.Expire(ctx, lockKey, sequentialLockTTL)
+		}
+	}
+}
+
 // canProcessQueue checks if this worker can process from the given queue.
 // For sequential queues, attempts to acquire or renew the exclusive lock.
 func (f *fetcher) canProcessQueue(ctx context.Context, workerID string, q senna.QueueConfig) bool {

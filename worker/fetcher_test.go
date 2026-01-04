@@ -854,3 +854,47 @@ func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
 		t.Errorf("should have waited for timeout, only waited %v", elapsed)
 	}
 }
+
+func TestFetcher_Sequential_RenewSequentialLocks(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-renew-bg:*")
+
+	k := keys.New("test-seq-renew-bg")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+		{Name: "default", Priority: 1}, // Non-sequential queue
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	// Acquire lock for worker-1
+	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 5*time.Second)
+
+	// Verify initial TTL
+	ttl1, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+	if ttl1 < 4*time.Second || ttl1 > 5*time.Second {
+		t.Errorf("expected initial TTL ~5s, got %v", ttl1)
+	}
+
+	// Simulate time passing (reduce TTL manually)
+	client.Expire(ctx, k.SequentialLock("transforms"), 2*time.Second)
+
+	// Call RenewSequentialLocks - should extend TTL back to 30s
+	f.RenewSequentialLocks(ctx, "worker-1")
+
+	// Verify TTL was renewed to 30s
+	ttl2, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+	if ttl2 < 25*time.Second {
+		t.Errorf("expected renewed TTL ~30s, got %v", ttl2)
+	}
+
+	// Verify RenewSequentialLocks doesn't renew locks held by other workers
+	client.Set(ctx, k.SequentialLock("transforms"), "worker-2", 5*time.Second)
+	f.RenewSequentialLocks(ctx, "worker-1")
+
+	ttl3, _ := client.TTL(ctx, k.SequentialLock("transforms")).Result()
+	if ttl3 > 5*time.Second {
+		t.Errorf("should not have renewed lock held by worker-2, TTL: %v", ttl3)
+	}
+}

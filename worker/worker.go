@@ -152,6 +152,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	go w.heartbeat(ctx)
 	go w.scheduler(ctx)
 	go w.reaper(ctx)
+	go w.sequentialLockRenewer(ctx)
 
 	if w.periodic != nil {
 		w.periodic.Start(ctx)
@@ -391,6 +392,23 @@ func (w *Worker) heartbeat(ctx context.Context) {
 			}
 			data, _ := json.Marshal(info)
 			w.redis.HSet(ctx, w.keys.Workers(), w.id, string(data))
+		}
+	}
+}
+
+// sequentialLockRenewer periodically renews locks for sequential queues
+// to prevent expiry during long-running job processing.
+func (w *Worker) sequentialLockRenewer(ctx context.Context) {
+	// Renew at 1/3 of TTL to ensure locks don't expire
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.fetcher.RenewSequentialLocks(ctx, w.id)
 		}
 	}
 }
