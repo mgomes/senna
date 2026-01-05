@@ -379,21 +379,33 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		callbackQueue = c.settings.DefaultQueue
 	}
 
+	// Count callbacks for empty batches so callbacks_pending is tracked correctly
+	callbackCount := 0
+	if emptyBatch {
+		if batch.OnComplete != nil {
+			callbackCount++
+		}
+		if batch.OnSuccess != nil {
+			callbackCount++
+		}
+	}
+
 	// Build batch state for tracking
 	state := &senna.BatchState{
-		ID:            batch.ID,
-		Description:   batch.Description,
-		ParentID:      batch.ParentID,
-		Total:         len(batch.Jobs),
-		Pending:       len(batch.Jobs),
-		Failures:      0,
-		Successes:     0,
-		Dead:          false,
-		DeathFired:    false,
-		CompleteFired: emptyBatch,
-		SuccessFired:  emptyBatch,
-		CreatedAt:     batch.CreatedAt,
-		CallbackQueue: callbackQueue,
+		ID:               batch.ID,
+		Description:      batch.Description,
+		ParentID:         batch.ParentID,
+		Total:            len(batch.Jobs),
+		Pending:          len(batch.Jobs),
+		Failures:         0,
+		Successes:        0,
+		CallbacksPending: callbackCount,
+		Dead:             false,
+		DeathFired:       false,
+		CompleteFired:    emptyBatch,
+		SuccessFired:     emptyBatch,
+		CreatedAt:        batch.CreatedAt,
+		CallbackQueue:    callbackQueue,
 	}
 
 	if batch.OnComplete != nil {
@@ -514,6 +526,7 @@ func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 
 	job := senna.NewJob(jobType, args)
 	job.Queue = queue
+	job.CallbackBatchID = batchID
 	data, _ := job.Marshal()
 	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
 }
