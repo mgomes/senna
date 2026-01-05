@@ -492,9 +492,16 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		}
 	}
 
-	// For empty batches, immediately enqueue callbacks
+	// For empty batches, immediately enqueue callbacks or propagate to parent
 	if emptyBatch {
 		c.enqueueEmptyBatchCallbacks(ctx, batch, callbackQueue)
+
+		// If this empty batch has a parent but no callbacks, we need to immediately
+		// propagate completion to the parent. Otherwise the parent's pending count
+		// (incremented by batch_add_child) would never be decremented.
+		if batch.ParentID != "" && batch.OnComplete == nil && batch.OnSuccess == nil {
+			c.propagateEmptyChildBatch(ctx, batch.ID, batch.ParentID, callbackQueue)
+		}
 	}
 
 	return nil
@@ -529,6 +536,63 @@ func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 	job.CallbackBatchID = batchID
 	data, _ := job.Marshal()
 	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
+}
+
+// batchCompleteResult is the response from the batch_complete Lua script.
+type batchCompleteResult struct {
+	Callbacks        []batchCallback `json:"callbacks"`
+	Pending          int             `json:"pending"`
+	Dead             bool            `json:"dead"`
+	CallbackQueue    string          `json:"callback_queue"`
+	ParentID         string          `json:"parent_id,omitempty"`
+	CompletedNow     bool            `json:"completed_now,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	AlreadyProcessed bool            `json:"already_processed,omitempty"`
+}
+
+type batchCallback struct {
+	CallbackType string         `json:"callback_type"`
+	JobType      string         `json:"job_type"`
+	Options      map[string]any `json:"options,omitempty"`
+}
+
+// propagateEmptyChildBatch notifies the parent batch that an empty child batch
+// with no callbacks has completed. This is necessary because empty batches with
+// no callbacks have no jobs to process and no callbacks to trigger completion.
+func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, parentID, queue string) {
+	keys := []string{
+		c.keys.Batch(parentID),
+		c.keys.BatchJobs(parentID),
+		c.keys.BatchFailed(parentID),
+		c.keys.DeadBatches(),
+	}
+
+	resultJSON, err := batchCompleteScript.Run(ctx, c.redis, keys, childBatchID, "success")
+	if err != nil {
+		return
+	}
+
+	var result batchCompleteResult
+	if err := json.Unmarshal([]byte(resultJSON.(string)), &result); err != nil {
+		return
+	}
+
+	if result.Error != "" || result.AlreadyProcessed {
+		return
+	}
+
+	callbackQueue := result.CallbackQueue
+	if callbackQueue == "" {
+		callbackQueue = queue
+	}
+
+	for _, cb := range result.Callbacks {
+		c.enqueueBatchCallback(ctx, cb.JobType, parentID, result.ParentID, cb.Options, callbackQueue)
+	}
+
+	if result.CompletedNow && result.ParentID != "" {
+		c.propagateEmptyChildBatch(ctx, parentID, result.ParentID, callbackQueue)
+	}
 }
 
 // BatchStatus returns the status of a batch.
