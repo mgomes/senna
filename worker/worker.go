@@ -266,6 +266,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	if err == nil {
 		_ = w.fetcher.Ack(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, batchResultSuccess)
+		w.handleBatchCallbackComplete(ctx, job)
 		return
 	}
 
@@ -281,6 +282,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 		job.Error = maxRetriesErr.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, batchResultDeath)
+		w.handleBatchCallbackComplete(ctx, job)
 		return
 	}
 
@@ -290,8 +292,11 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 		if opts.RetryBackoff != nil {
 			backoffFn = opts.RetryBackoff
 		}
-		// Use handler's MaxRetries setting (which defaults to 25 if not set)
-		maxRetries = opts.MaxRetries
+		// Use the lower of job.Retry and handler's MaxRetries setting.
+		// This allows either the client or the handler to limit retries.
+		if opts.MaxRetries < maxRetries {
+			maxRetries = opts.MaxRetries
+		}
 	}
 	backoff := backoffFn(job.RetryCount)
 	if job.RetryCount < maxRetries {
@@ -301,6 +306,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 		job.Error = err.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, batchResultDeath)
+		w.handleBatchCallbackComplete(ctx, job)
 	}
 }
 
@@ -328,6 +334,7 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 	if err == nil {
 		_ = w.fetcher.Ack(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, batchResultSuccess)
+		w.handleBatchCallbackComplete(ctx, job)
 		return
 	}
 
@@ -354,17 +361,19 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 		job.Error = maxRetriesErr.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, batchResultDeath)
+		w.handleBatchCallbackComplete(ctx, job)
 		return
 	}
 
 	// Standard error - use backoff retry
 	backoffFn := senna.DefaultBackoff()
-	maxRetries := 25
+	maxRetries := job.Retry
 	if opts != nil {
 		if opts.RetryBackoff != nil {
 			backoffFn = opts.RetryBackoff
 		}
-		if opts.MaxRetries > 0 {
+		// Use the lower of job.Retry and handler's MaxRetries setting.
+		if opts.MaxRetries < maxRetries {
 			maxRetries = opts.MaxRetries
 		}
 	}
@@ -376,6 +385,7 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 		job.Error = err.Error()
 		_ = w.fetcher.MoveToDead(ctx, w.id, job)
 		w.updateBatchProgress(ctx, job, batchResultDeath)
+		w.handleBatchCallbackComplete(ctx, job)
 	}
 }
 
@@ -474,8 +484,59 @@ func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 
 	job := senna.NewJob(jobType, args)
 	job.Queue = queue
+	job.CallbackBatchID = batchID // Mark as callback job for this batch
 	data, _ := job.Marshal()
 	w.redis.LPush(ctx, w.keys.Queue(queue), string(data))
+}
+
+// batchCallbackCompleteResult is the response from the batch_callback_complete Lua script.
+type batchCallbackCompleteResult struct {
+	CallbacksPending int    `json:"callbacks_pending"`
+	Pending          int    `json:"pending"`
+	ShouldPropagate  bool   `json:"should_propagate"`
+	ParentID         string `json:"parent_id,omitempty"`
+	Dead             bool   `json:"dead"`
+	Error            string `json:"error,omitempty"`
+}
+
+// handleBatchCallbackComplete is called after a callback job finishes.
+// It decrements the callbacks_pending counter and propagates to parent if ready.
+func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job) {
+	if job.CallbackBatchID == "" {
+		return
+	}
+
+	keys := []string{w.keys.Batch(job.CallbackBatchID)}
+
+	resultJSON, err := batchCallbackCompleteScript.Run(ctx, w.redis, keys)
+	if err != nil {
+		slog.ErrorContext(ctx, "batch callback complete script failed", "error", err, "batch_id", job.CallbackBatchID)
+		return
+	}
+
+	var result batchCallbackCompleteResult
+	if err := json.Unmarshal([]byte(resultJSON.(string)), &result); err != nil {
+		slog.ErrorContext(ctx, "failed to parse batch callback complete result", "error", err)
+		return
+	}
+
+	if result.Error != "" {
+		slog.ErrorContext(ctx, "batch callback complete error", "error", result.Error, "batch_id", job.CallbackBatchID)
+		return
+	}
+
+	// If all jobs AND all callbacks are done, propagate to parent
+	if result.ShouldPropagate && result.ParentID != "" {
+		parentResult := batchResultSuccess
+		if result.Dead {
+			parentResult = batchResultDeath
+		}
+		parentJob := &senna.Job{
+			ID:      job.CallbackBatchID,
+			BatchID: result.ParentID,
+		}
+		w.updateBatchProgress(ctx, parentJob, parentResult)
+	}
 }
 
 func (w *Worker) heartbeat(ctx context.Context) {

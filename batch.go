@@ -11,24 +11,25 @@ import (
 
 // BatchState represents the current state of a batch stored in Redis.
 type BatchState struct {
-	ID            string        `json:"id"`
-	Description   string        `json:"description,omitempty"`
-	ParentID      string        `json:"parent_id,omitempty"`
-	Total         int           `json:"total"`
-	Pending       int           `json:"pending"`
-	Failures      int           `json:"failures"`
-	Successes     int           `json:"successes"`
-	Dead          bool          `json:"dead"`
-	DeathFired    bool          `json:"death_fired"`
-	CompleteFired bool          `json:"complete_fired"`
-	SuccessFired  bool          `json:"success_fired"`
-	CreatedAt     time.Time     `json:"created_at"`
-	OnComplete    *CallbackInfo `json:"on_complete,omitempty"`
-	OnSuccess     *CallbackInfo `json:"on_success,omitempty"`
-	OnDeath       *CallbackInfo `json:"on_death,omitempty"`
-	CallbackQueue string        `json:"callback_queue,omitempty"`
-	FailedJIDs    []string      `json:"failed_jids,omitempty"`
-	Invalidated   bool          `json:"invalidated,omitempty"`
+	ID               string        `json:"id"`
+	Description      string        `json:"description,omitempty"`
+	ParentID         string        `json:"parent_id,omitempty"`
+	Total            int           `json:"total"`
+	Pending          int           `json:"pending"`
+	Failures         int           `json:"failures"`
+	Successes        int           `json:"successes"`
+	CallbacksPending int           `json:"callbacks_pending,omitempty"`
+	Dead             bool          `json:"dead"`
+	DeathFired       bool          `json:"death_fired"`
+	CompleteFired    bool          `json:"complete_fired"`
+	SuccessFired     bool          `json:"success_fired"`
+	CreatedAt        time.Time     `json:"created_at"`
+	OnComplete       *CallbackInfo `json:"on_complete,omitempty"`
+	OnSuccess        *CallbackInfo `json:"on_success,omitempty"`
+	OnDeath          *CallbackInfo `json:"on_death,omitempty"`
+	CallbackQueue    string        `json:"callback_queue,omitempty"`
+	FailedJIDs       []string      `json:"failed_jids,omitempty"`
+	Invalidated      bool          `json:"invalidated,omitempty"`
 }
 
 // CallbackInfo holds callback configuration.

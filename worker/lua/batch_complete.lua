@@ -97,7 +97,6 @@ end
 -- Check if all jobs are complete (pending == 0)
 if batch.pending == 0 and not batch.complete_fired then
     batch.complete_fired = true
-    completed_now = true
 
     -- Fire complete callback
     if batch.on_complete then
@@ -109,6 +108,21 @@ if batch.pending == 0 and not batch.complete_fired then
         batch.success_fired = true
         table.insert(callback_list, make_callback("success", batch.on_success))
     end
+end
+
+-- Track how many callbacks are pending
+-- We only set completed_now (propagate to parent) when both jobs AND callbacks are done
+local num_callbacks = #callback_list
+if num_callbacks > 0 then
+    batch.callbacks_pending = (batch.callbacks_pending or 0) + num_callbacks
+end
+
+-- Only propagate to parent when:
+-- 1. All jobs are complete (pending == 0)
+-- 2. All callbacks are done (callbacks_pending == 0 or no callbacks were added)
+-- 3. complete_fired is true (batch just completed)
+if batch.pending == 0 and (batch.callbacks_pending or 0) == 0 and batch.complete_fired then
+    completed_now = true
 end
 
 -- Save updated batch state
@@ -125,7 +139,8 @@ local result = {
     invalidated = batch.invalidated or false,
     callback_queue = batch.callback_queue or 'default',
     parent_id = batch.parent_id,
-    completed_now = completed_now
+    completed_now = completed_now,
+    callbacks_pending = batch.callbacks_pending or 0
 }
 -- Encode result, then inject the callbacks array to ensure it stays an array
 local result_json = cjson.encode(result)

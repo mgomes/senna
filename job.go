@@ -9,22 +9,23 @@ import (
 )
 
 type Job struct {
-	ID          string         `json:"jid"`
-	Type        string         `json:"class"`
-	Queue       string         `json:"queue"`
-	Args        map[string]any `json:"args"`
-	Retry       int            `json:"retry"`
-	RetryCount  int            `json:"retry_count"`
-	CreatedAt   time.Time      `json:"created_at"`
-	EnqueuedAt  time.Time      `json:"enqueued_at"`
-	ProcessedAt *time.Time     `json:"processed_at,omitempty"`
-	FailedAt    *time.Time     `json:"failed_at,omitempty"`
-	Error       string         `json:"error,omitempty"`
-	BatchID     string         `json:"bid,omitempty"`
-	UniqueKey   string         `json:"unique_key,omitempty"`
-	UniqueTTL   time.Duration  `json:"unique_ttl,omitempty"`
-	Encrypted   bool           `json:"encrypted,omitempty"`
-	raw         string         `json:"-"`
+	ID              string         `json:"jid"`
+	Type            string         `json:"class"`
+	Queue           string         `json:"queue"`
+	Args            map[string]any `json:"args"`
+	Retry           int            `json:"retry"`
+	RetryCount      int            `json:"retry_count"`
+	CreatedAt       time.Time      `json:"created_at"`
+	EnqueuedAt      time.Time      `json:"enqueued_at"`
+	ProcessedAt     *time.Time     `json:"processed_at,omitempty"`
+	FailedAt        *time.Time     `json:"failed_at,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	BatchID         string         `json:"bid,omitempty"`
+	CallbackBatchID string         `json:"callback_bid,omitempty"` // If set, this job is a callback for the specified batch
+	UniqueKey       string         `json:"unique_key,omitempty"`
+	UniqueTTL       time.Duration  `json:"unique_ttl,omitempty"`
+	Encrypted       bool           `json:"encrypted,omitempty"`
+	raw             string         `json:"-"`
 }
 
 func NewJob(jobType string, args map[string]any) *Job {

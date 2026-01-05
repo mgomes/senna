@@ -20,13 +20,19 @@ if batch.invalidated then
     return cjson.encode({error = "batch_invalidated"})
 end
 
-if batch.complete_fired then
-    return cjson.encode({error = "batch_complete"})
-end
+-- Note: We allow adding children even after complete_fired.
+-- This enables the Sidekiq-style workflow pattern where callbacks
+-- "reopen" the parent batch to add the next step.
+-- Adding a child increments pending, so we reset complete_fired.
 
 redis.call('SADD', jobs_key, child_id)
 batch.total = (batch.total or 0) + 1
 batch.pending = (batch.pending or 0) + 1
+
+-- Reset complete_fired since we have new pending work
+if batch.complete_fired then
+    batch.complete_fired = false
+end
 
 redis.call('SET', batch_key, cjson.encode(batch), 'KEEPTTL')
 
