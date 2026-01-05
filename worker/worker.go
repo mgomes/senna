@@ -396,6 +396,8 @@ type batchCallbackResult struct {
 	Failures         int             `json:"failures"`
 	Dead             bool            `json:"dead"`
 	CallbackQueue    string          `json:"callback_queue"`
+	ParentID         string          `json:"parent_id,omitempty"`
+	CompletedNow     bool            `json:"completed_now,omitempty"`
 	Error            string          `json:"error,omitempty"`
 	Invalidated      bool            `json:"invalidated,omitempty"`
 	AlreadyProcessed bool            `json:"already_processed,omitempty"`
@@ -442,13 +444,28 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 	}
 
 	for _, cb := range callbackResult.Callbacks {
-		w.enqueueBatchCallback(ctx, cb.JobType, job.BatchID, cb.Options, queue)
+		w.enqueueBatchCallback(ctx, cb.JobType, job.BatchID, callbackResult.ParentID, cb.Options, queue)
+	}
+
+	if callbackResult.CompletedNow && callbackResult.ParentID != "" {
+		parentResult := batchResultSuccess
+		if callbackResult.Dead {
+			parentResult = batchResultDeath
+		}
+		parentJob := &senna.Job{
+			ID:      job.BatchID,
+			BatchID: callbackResult.ParentID,
+		}
+		w.updateBatchProgress(ctx, parentJob, parentResult)
 	}
 }
 
-func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID string, options map[string]any, queue string) {
+func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID, parentID string, options map[string]any, queue string) {
 	args := map[string]any{
 		"batch_id": batchID,
+	}
+	if parentID != "" {
+		args["parent_id"] = parentID
 	}
 	// Merge user-provided options into args
 	for k, v := range options {

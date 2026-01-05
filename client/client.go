@@ -353,7 +353,20 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		return batch.err
 	}
 
+	if batch.ParentID != "" && batch.ParentID == batch.ID {
+		return fmt.Errorf("batch cannot be its own parent")
+	}
+
 	const batchTTL = 30 * 24 * time.Hour
+
+	if batch.ParentID != "" {
+		if _, err := c.redis.Get(ctx, c.keys.Batch(batch.ParentID)).Result(); err != nil {
+			if err == redis.Nil {
+				return &senna.BatchNotFoundError{BatchID: batch.ParentID}
+			}
+			return err
+		}
+	}
 
 	pipe := c.redis.Pipeline()
 
@@ -370,6 +383,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	state := &senna.BatchState{
 		ID:            batch.ID,
 		Description:   batch.Description,
+		ParentID:      batch.ParentID,
 		Total:         len(batch.Jobs),
 		Pending:       len(batch.Jobs),
 		Failures:      0,
@@ -433,6 +447,39 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		return err
 	}
 
+	if batch.ParentID != "" {
+		keys := []string{
+			c.keys.Batch(batch.ParentID),
+			c.keys.BatchJobs(batch.ParentID),
+		}
+
+		result, err := batchAddChildScript.Run(ctx, c.redis, keys, batch.ID)
+		if err != nil {
+			return fmt.Errorf("failed to add child batch to parent: %w", err)
+		}
+
+		var addResult struct {
+			Error   string `json:"error,omitempty"`
+			Success bool   `json:"success"`
+		}
+		if err := json.Unmarshal([]byte(result.(string)), &addResult); err != nil {
+			return fmt.Errorf("failed to parse batch add child result: %w", err)
+		}
+
+		if addResult.Error != "" {
+			switch addResult.Error {
+			case "batch_not_found":
+				return &senna.BatchNotFoundError{BatchID: batch.ParentID}
+			case "batch_invalidated":
+				return fmt.Errorf("parent batch %s has been invalidated", batch.ParentID)
+			case "batch_complete":
+				return fmt.Errorf("parent batch %s has already completed", batch.ParentID)
+			default:
+				return fmt.Errorf("parent batch error: %s", addResult.Error)
+			}
+		}
+	}
+
 	// For empty batches, immediately enqueue callbacks
 	if emptyBatch {
 		c.enqueueEmptyBatchCallbacks(ctx, batch, callbackQueue)
@@ -445,18 +492,21 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, batch *Batch, queue string) {
 	// OnComplete always fires for empty batches
 	if batch.OnComplete != nil {
-		c.enqueueBatchCallback(ctx, batch.OnComplete.JobType, batch.ID, batch.OnComplete.Options, queue)
+		c.enqueueBatchCallback(ctx, batch.OnComplete.JobType, batch.ID, batch.ParentID, batch.OnComplete.Options, queue)
 	}
 
 	// OnSuccess fires for empty batches (no jobs = no failures)
 	if batch.OnSuccess != nil {
-		c.enqueueBatchCallback(ctx, batch.OnSuccess.JobType, batch.ID, batch.OnSuccess.Options, queue)
+		c.enqueueBatchCallback(ctx, batch.OnSuccess.JobType, batch.ID, batch.ParentID, batch.OnSuccess.Options, queue)
 	}
 }
 
-func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID string, options map[string]any, queue string) {
+func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID, parentID string, options map[string]any, queue string) {
 	args := map[string]any{
 		"batch_id": batchID,
+	}
+	if parentID != "" {
+		args["parent_id"] = parentID
 	}
 	for k, v := range options {
 		args[k] = v

@@ -46,6 +46,7 @@ end
 
 -- Track callbacks as encoded JSON strings (each is a complete JSON object)
 local callback_list = {}
+local completed_now = false
 
 -- Helper to build a callback object with proper escaping
 local function make_callback(callback_type, callback_config)
@@ -96,6 +97,7 @@ end
 -- Check if all jobs are complete (pending == 0)
 if batch.pending == 0 and not batch.complete_fired then
     batch.complete_fired = true
+    completed_now = true
 
     -- Fire complete callback
     if batch.on_complete then
@@ -121,7 +123,9 @@ local result = {
     failures = batch.failures or 0,
     dead = batch.dead or false,
     invalidated = batch.invalidated or false,
-    callback_queue = batch.callback_queue or 'default'
+    callback_queue = batch.callback_queue or 'default',
+    parent_id = batch.parent_id,
+    completed_now = completed_now
 }
 -- Encode result, then inject the callbacks array to ensure it stays an array
 local result_json = cjson.encode(result)
