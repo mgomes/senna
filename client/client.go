@@ -467,6 +467,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 
 		result, err := batchAddChildScript.Run(ctx, c.redis, keys, batch.ID)
 		if err != nil {
+			c.cleanupOrphanedBatch(ctx, batch.ID)
 			return fmt.Errorf("failed to add child batch to parent: %w", err)
 		}
 
@@ -475,10 +476,14 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 			Success bool   `json:"success"`
 		}
 		if err := json.Unmarshal([]byte(result.(string)), &addResult); err != nil {
+			c.cleanupOrphanedBatch(ctx, batch.ID)
 			return fmt.Errorf("failed to parse batch add child result: %w", err)
 		}
 
 		if addResult.Error != "" {
+			// Parent link failed - clean up the orphaned child batch
+			c.cleanupOrphanedBatch(ctx, batch.ID)
+
 			switch addResult.Error {
 			case "batch_not_found":
 				return &senna.BatchNotFoundError{BatchID: batch.ParentID}
@@ -593,6 +598,19 @@ func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, par
 	if result.CompletedNow && result.ParentID != "" {
 		c.propagateEmptyChildBatch(ctx, parentID, result.ParentID, callbackQueue)
 	}
+}
+
+// cleanupOrphanedBatch removes a batch that failed to link to its parent.
+// This prevents orphaned batches from accumulating when parent-linking fails.
+// Jobs already enqueued will still run but their batch updates will be no-ops
+// since the batch state is deleted.
+func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
+	pipe := c.redis.Pipeline()
+	pipe.Del(ctx, c.keys.Batch(batchID))
+	pipe.SRem(ctx, c.keys.Batches(), batchID)
+	pipe.Del(ctx, c.keys.BatchJobs(batchID))
+	pipe.Del(ctx, c.keys.BatchFailed(batchID))
+	pipe.Exec(ctx)
 }
 
 // BatchStatus returns the status of a batch.
