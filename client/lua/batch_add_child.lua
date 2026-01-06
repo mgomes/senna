@@ -29,9 +29,11 @@ redis.call('SADD', jobs_key, child_id)
 batch.total = (batch.total or 0) + 1
 batch.pending = (batch.pending or 0) + 1
 
--- Reset complete_fired since we have new pending work
+-- Reset completion flags since we have new pending work
+-- This allows callbacks to fire again after the new children complete
 if batch.complete_fired then
     batch.complete_fired = false
+    batch.success_fired = false
 end
 
 redis.call('SET', batch_key, cjson.encode(batch), 'KEEPTTL')
