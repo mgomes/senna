@@ -489,6 +489,9 @@ func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 	job.Queue = queue
 	job.CallbackBatchID = batchID // Mark as callback job for this batch
 	data, _ := job.Marshal()
+
+	// Track callback job ID for idempotent completion handling
+	w.redis.SAdd(ctx, w.keys.BatchCallbacks(batchID), job.ID)
 	w.redis.LPush(ctx, w.keys.Queue(queue), string(data))
 }
 
@@ -500,6 +503,7 @@ type batchCallbackCompleteResult struct {
 	ParentID         string `json:"parent_id,omitempty"`
 	Dead             bool   `json:"dead"`
 	Invalidated      bool   `json:"invalidated"`
+	AlreadyProcessed bool   `json:"already_processed,omitempty"`
 	Error            string `json:"error,omitempty"`
 }
 
@@ -510,9 +514,12 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 		return
 	}
 
-	keys := []string{w.keys.Batch(job.CallbackBatchID)}
+	keys := []string{
+		w.keys.Batch(job.CallbackBatchID),
+		w.keys.BatchCallbacks(job.CallbackBatchID),
+	}
 
-	resultJSON, err := batchCallbackCompleteScript.Run(ctx, w.redis, keys)
+	resultJSON, err := batchCallbackCompleteScript.Run(ctx, w.redis, keys, job.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "batch callback complete script failed", "error", err, "batch_id", job.CallbackBatchID)
 		return
@@ -526,6 +533,10 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 
 	if result.Error != "" {
 		slog.ErrorContext(ctx, "batch callback complete error", "error", result.Error, "batch_id", job.CallbackBatchID)
+		return
+	}
+
+	if result.AlreadyProcessed {
 		return
 	}
 

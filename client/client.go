@@ -540,6 +540,9 @@ func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 	job.Queue = queue
 	job.CallbackBatchID = batchID
 	data, _ := job.Marshal()
+
+	// Track callback job ID for idempotent completion handling
+	c.redis.SAdd(ctx, c.keys.BatchCallbacks(batchID), job.ID)
 	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
 }
 
