@@ -35,7 +35,8 @@ local result = {
     pending = batch.pending or 0,
     should_propagate = should_propagate,
     parent_id = batch.parent_id,
-    dead = batch.dead or false
+    dead = batch.dead or false,
+    invalidated = batch.invalidated or false
 }
 
 return cjson.encode(result)

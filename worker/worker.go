@@ -499,6 +499,7 @@ type batchCallbackCompleteResult struct {
 	ShouldPropagate  bool   `json:"should_propagate"`
 	ParentID         string `json:"parent_id,omitempty"`
 	Dead             bool   `json:"dead"`
+	Invalidated      bool   `json:"invalidated"`
 	Error            string `json:"error,omitempty"`
 }
 
@@ -533,6 +534,8 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 		parentResult := batchResultSuccess
 		if result.Dead {
 			parentResult = batchResultDeath
+		} else if result.Invalidated {
+			parentResult = batchResultInvalidated
 		}
 		parentJob := &senna.Job{
 			ID:      job.CallbackBatchID,
