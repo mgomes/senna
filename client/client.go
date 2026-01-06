@@ -450,9 +450,10 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		pipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
 	}
 
-	// Ensure batch job/failed sets expire alongside the batch state
+	// Ensure batch-related sets expire alongside the batch state
 	pipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
 	pipe.Expire(ctx, c.keys.BatchFailed(batch.ID), batchTTL)
+	pipe.Expire(ctx, c.keys.BatchCallbacks(batch.ID), batchTTL)
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
@@ -627,6 +628,7 @@ func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 	pipe.SRem(ctx, c.keys.Batches(), batchID)
 	pipe.Del(ctx, c.keys.BatchJobs(batchID))
 	pipe.Del(ctx, c.keys.BatchFailed(batchID))
+	pipe.Del(ctx, c.keys.BatchCallbacks(batchID))
 	_, _ = pipe.Exec(ctx) // Best-effort cleanup, ignore errors
 }
 
