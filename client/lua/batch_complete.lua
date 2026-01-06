@@ -92,6 +92,11 @@ elseif result_type == "death" then
             table.insert(callback_list, make_callback("death", batch.on_death))
         end
     end
+elseif result_type == "invalidated" then
+    -- Child batch was invalidated - mark parent as invalidated too
+    -- This prevents on_success from firing but doesn't trigger on_death
+    batch.pending = (batch.pending or 1) - 1
+    batch.invalidated = true
 end
 
 -- Check if all jobs are complete (pending == 0)

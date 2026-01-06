@@ -548,6 +548,7 @@ type batchCompleteResult struct {
 	Callbacks        []batchCallback `json:"callbacks"`
 	Pending          int             `json:"pending"`
 	Dead             bool            `json:"dead"`
+	Invalidated      bool            `json:"invalidated,omitempty"`
 	CallbackQueue    string          `json:"callback_queue"`
 	ParentID         string          `json:"parent_id,omitempty"`
 	CompletedNow     bool            `json:"completed_now,omitempty"`
@@ -565,6 +566,12 @@ type batchCallback struct {
 // with no callbacks has completed. This is necessary because empty batches with
 // no callbacks have no jobs to process and no callbacks to trigger completion.
 func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, parentID, queue string) {
+	c.propagateBatchCompletion(ctx, childBatchID, parentID, "success", queue)
+}
+
+// propagateBatchCompletion notifies a parent batch that a child has completed.
+// The resultType should be "success", "death", or "invalidated".
+func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, parentID, resultType, queue string) {
 	keys := []string{
 		c.keys.Batch(parentID),
 		c.keys.BatchJobs(parentID),
@@ -572,7 +579,7 @@ func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, par
 		c.keys.DeadBatches(),
 	}
 
-	resultJSON, err := batchCompleteScript.Run(ctx, c.redis, keys, childBatchID, "success")
+	resultJSON, err := batchCompleteScript.Run(ctx, c.redis, keys, childBatchID, resultType)
 	if err != nil {
 		return
 	}
@@ -596,7 +603,14 @@ func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, par
 	}
 
 	if result.CompletedNow && result.ParentID != "" {
-		c.propagateEmptyChildBatch(ctx, parentID, result.ParentID, callbackQueue)
+		// Determine the result to propagate to grandparent
+		grandparentResult := "success"
+		if result.Dead {
+			grandparentResult = "death"
+		} else if result.Invalidated {
+			grandparentResult = "invalidated"
+		}
+		c.propagateBatchCompletion(ctx, parentID, result.ParentID, grandparentResult, callbackQueue)
 	}
 }
 

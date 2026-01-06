@@ -393,9 +393,10 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 type batchResult string
 
 const (
-	batchResultSuccess batchResult = "success"
-	batchResultFailure batchResult = "failure"
-	batchResultDeath   batchResult = "death"
+	batchResultSuccess     batchResult = "success"
+	batchResultFailure     batchResult = "failure"
+	batchResultDeath       batchResult = "death"
+	batchResultInvalidated batchResult = "invalidated"
 )
 
 // batchCallbackResult is the response from the batch_complete Lua script.
@@ -461,6 +462,8 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		parentResult := batchResultSuccess
 		if callbackResult.Dead {
 			parentResult = batchResultDeath
+		} else if callbackResult.Invalidated {
+			parentResult = batchResultInvalidated
 		}
 		parentJob := &senna.Job{
 			ID:      job.BatchID,
