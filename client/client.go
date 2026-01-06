@@ -624,7 +624,7 @@ func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 	pipe.SRem(ctx, c.keys.Batches(), batchID)
 	pipe.Del(ctx, c.keys.BatchJobs(batchID))
 	pipe.Del(ctx, c.keys.BatchFailed(batchID))
-	pipe.Exec(ctx)
+	_, _ = pipe.Exec(ctx) // Best-effort cleanup, ignore errors
 }
 
 // BatchStatus returns the status of a batch.
