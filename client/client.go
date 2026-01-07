@@ -12,6 +12,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const batchTTL = 30 * 24 * time.Hour
+
 type Client struct {
 	redis     *redis.Client
 	keys      *keys.Keys
@@ -357,8 +359,6 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		return fmt.Errorf("batch cannot be its own parent")
 	}
 
-	const batchTTL = 30 * 24 * time.Hour
-
 	if batch.ParentID != "" {
 		if _, err := c.redis.Get(ctx, c.keys.Batch(batch.ParentID)).Result(); err != nil {
 			if err == redis.Nil {
@@ -544,6 +544,7 @@ func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 
 	// Track callback job ID for idempotent completion handling
 	c.redis.SAdd(ctx, c.keys.BatchCallbacks(batchID), job.ID)
+	c.redis.Expire(ctx, c.keys.BatchCallbacks(batchID), batchTTL)
 	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
 }
 

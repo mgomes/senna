@@ -20,6 +20,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const batchTTL = 30 * 24 * time.Hour
+
 type Worker struct {
 	id         string
 	redis      *redis.Client
@@ -492,6 +494,7 @@ func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID, par
 
 	// Track callback job ID for idempotent completion handling
 	w.redis.SAdd(ctx, w.keys.BatchCallbacks(batchID), job.ID)
+	w.redis.Expire(ctx, w.keys.BatchCallbacks(batchID), batchTTL)
 	w.redis.LPush(ctx, w.keys.Queue(queue), string(data))
 }
 
