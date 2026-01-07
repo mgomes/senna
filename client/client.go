@@ -368,8 +368,6 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		}
 	}
 
-	pipe := c.redis.Pipeline()
-
 	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
 	emptyBatch := len(batch.Jobs) == 0
 
@@ -432,34 +430,22 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		return err
 	}
 
-	// Store batch state with 30 day expiration (like Sidekiq)
-	pipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), batchTTL)
+	// Step 1: Store batch state first (before enqueueing jobs)
+	// This allows parent linking to fail cleanly without orphaned jobs
+	statePipe := c.redis.Pipeline()
+	statePipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), batchTTL)
+	statePipe.SAdd(ctx, c.keys.Batches(), batch.ID)
+	// Set TTLs for related sets (they may be created later)
+	statePipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
+	statePipe.Expire(ctx, c.keys.BatchFailed(batch.ID), batchTTL)
+	statePipe.Expire(ctx, c.keys.BatchCallbacks(batch.ID), batchTTL)
 
-	// Add to batches set for iteration
-	pipe.SAdd(ctx, c.keys.Batches(), batch.ID)
-
-	for _, job := range batch.Jobs {
-		job.BatchID = batch.ID
-
-		data, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-
-		pipe.LPush(ctx, c.keys.Queue(job.Queue), string(data))
-		pipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
-	}
-
-	// Ensure batch-related sets expire alongside the batch state
-	pipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
-	pipe.Expire(ctx, c.keys.BatchFailed(batch.ID), batchTTL)
-	pipe.Expire(ctx, c.keys.BatchCallbacks(batch.ID), batchTTL)
-
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	if _, err = statePipe.Exec(ctx); err != nil {
 		return err
 	}
 
+	// Step 2: Link to parent (if applicable) BEFORE enqueueing jobs
+	// If this fails, we only need to clean up batch state - no jobs were enqueued
 	if batch.ParentID != "" {
 		keys := []string{
 			c.keys.Batch(batch.ParentID),
@@ -482,7 +468,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		}
 
 		if addResult.Error != "" {
-			// Parent link failed - clean up the orphaned child batch
+			// Parent link failed - clean up batch state (no jobs were enqueued)
 			c.cleanupOrphanedBatch(ctx, batch.ID)
 
 			switch addResult.Error {
@@ -495,6 +481,26 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 			default:
 				return fmt.Errorf("parent batch error: %s", addResult.Error)
 			}
+		}
+	}
+
+	// Step 3: Enqueue jobs (only after parent linking succeeded or no parent)
+	if len(batch.Jobs) > 0 {
+		jobsPipe := c.redis.Pipeline()
+		for _, job := range batch.Jobs {
+			job.BatchID = batch.ID
+
+			data, err := job.Marshal()
+			if err != nil {
+				return err
+			}
+
+			jobsPipe.LPush(ctx, c.keys.Queue(job.Queue), string(data))
+			jobsPipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
+		}
+
+		if _, err = jobsPipe.Exec(ctx); err != nil {
+			return err
 		}
 	}
 
