@@ -25,9 +25,14 @@ end
 -- "reopen" the parent batch to add the next step.
 -- Adding a child increments pending, so we reset complete_fired.
 
+-- For legacy batches that lack a pending count, initialize it from the jobs set.
+if batch.pending == nil then
+    batch.pending = redis.call('SCARD', jobs_key)
+end
+
 redis.call('SADD', jobs_key, child_id)
 batch.total = (batch.total or 0) + 1
-batch.pending = (batch.pending or 0) + 1
+batch.pending = batch.pending + 1
 
 -- Reset completion flags since we have new pending work
 -- This allows callbacks to fire again after the new children complete
