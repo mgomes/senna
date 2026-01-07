@@ -377,6 +377,22 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		callbackQueue = c.settings.DefaultQueue
 	}
 
+	// Pre-marshal all jobs before creating any state
+	// This ensures we fail fast before any Redis changes if serialization fails
+	type marshaledJob struct {
+		job  *senna.Job
+		data []byte
+	}
+	marshaledJobs := make([]marshaledJob, 0, len(batch.Jobs))
+	for _, job := range batch.Jobs {
+		job.BatchID = batch.ID
+		data, err := job.Marshal()
+		if err != nil {
+			return fmt.Errorf("failed to marshal job %s: %w", job.ID, err)
+		}
+		marshaledJobs = append(marshaledJobs, marshaledJob{job: job, data: data})
+	}
+
 	// Count callbacks for empty batches so callbacks_pending is tracked correctly
 	callbackCount := 0
 	if emptyBatch {
@@ -481,18 +497,11 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	}
 
 	// Step 3: Enqueue jobs (only after parent linking succeeded or no parent)
-	if len(batch.Jobs) > 0 {
+	if len(marshaledJobs) > 0 {
 		jobsPipe := c.redis.Pipeline()
-		for _, job := range batch.Jobs {
-			job.BatchID = batch.ID
-
-			data, err := job.Marshal()
-			if err != nil {
-				return err
-			}
-
-			jobsPipe.LPush(ctx, c.keys.Queue(job.Queue), string(data))
-			jobsPipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
+		for _, mj := range marshaledJobs {
+			jobsPipe.LPush(ctx, c.keys.Queue(mj.job.Queue), string(mj.data))
+			jobsPipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), mj.job.ID)
 		}
 		// Set TTL after creating the set
 		jobsPipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
