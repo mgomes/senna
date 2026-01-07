@@ -435,10 +435,6 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 	statePipe := c.redis.Pipeline()
 	statePipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), batchTTL)
 	statePipe.SAdd(ctx, c.keys.Batches(), batch.ID)
-	// Set TTLs for related sets (they may be created later)
-	statePipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
-	statePipe.Expire(ctx, c.keys.BatchFailed(batch.ID), batchTTL)
-	statePipe.Expire(ctx, c.keys.BatchCallbacks(batch.ID), batchTTL)
 
 	if _, err = statePipe.Exec(ctx); err != nil {
 		return err
@@ -498,6 +494,8 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 			jobsPipe.LPush(ctx, c.keys.Queue(job.Queue), string(data))
 			jobsPipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), job.ID)
 		}
+		// Set TTL after creating the set
+		jobsPipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
 
 		if _, err = jobsPipe.Exec(ctx); err != nil {
 			return err
