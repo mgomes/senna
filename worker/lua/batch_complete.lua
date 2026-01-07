@@ -68,11 +68,15 @@ elseif result_type == "failure" then
     local newly_failed = redis.call('SADD', failed_key, job_id)
     if newly_failed == 1 then
         batch.failures = (batch.failures or 0) + 1
+        -- Set TTL on failed set (30 days = 2592000 seconds)
+        redis.call('EXPIRE', failed_key, 2592000)
     end
 elseif result_type == "death" then
     local newly_failed = redis.call('SADD', failed_key, job_id)
     if newly_failed == 1 then
         batch.failures = (batch.failures or 0) + 1
+        -- Set TTL on failed set (30 days = 2592000 seconds)
+        redis.call('EXPIRE', failed_key, 2592000)
     end
     batch.pending = (batch.pending or 1) - 1
 
