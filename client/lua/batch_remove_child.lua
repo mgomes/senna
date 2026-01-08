@@ -35,11 +35,16 @@ if batch.pending < 0 then
     batch.pending = 0
 end
 
--- If pending is now 0 and callbacks_pending is 0, restore completion flags.
+-- If pending is now 0, restore completion flags regardless of callbacks_pending.
 -- This undoes the flag clearing that batch_add_child performs when reopening
 -- a completed parent. Without this, a rollback could leave the parent with
--- pending=0 but complete_fired=false, causing it to never complete.
-if batch.pending == 0 and (batch.callbacks_pending or 0) == 0 then
+-- pending=0 but complete_fired=false.
+--
+-- We must restore complete_fired even when callbacks are still pending because
+-- batch_callback_complete.lua requires complete_fired=true to propagate to the
+-- parent. If we wait for callbacks_pending==0, those callbacks would finish
+-- but never propagate since complete_fired would still be false.
+if batch.pending == 0 then
     batch.complete_fired = true
     -- Restore success_fired only if the batch wasn't dead or invalidated
     if not batch.dead and not batch.invalidated then
