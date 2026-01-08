@@ -507,6 +507,11 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 		jobsPipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
 
 		if _, err = jobsPipe.Exec(ctx); err != nil {
+			// Rollback: undo parent link and clean up batch state
+			if batch.ParentID != "" {
+				c.rollbackParentLink(ctx, batch.ParentID, batch.ID)
+			}
+			c.cleanupOrphanedBatch(ctx, batch.ID)
 			return err
 		}
 	}
@@ -644,6 +649,16 @@ func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 	pipe.Del(ctx, c.keys.BatchFailed(batchID))
 	pipe.Del(ctx, c.keys.BatchCallbacks(batchID))
 	_, _ = pipe.Exec(ctx) // Best-effort cleanup, ignore errors
+}
+
+// rollbackParentLink undoes the effect of batch_add_child, decrementing
+// the parent's pending count and removing the child from its jobs set.
+func (c *Client) rollbackParentLink(ctx context.Context, parentID, childID string) {
+	keys := []string{
+		c.keys.Batch(parentID),
+		c.keys.BatchJobs(parentID),
+	}
+	_, _ = batchRemoveChildScript.Run(ctx, c.redis, keys, childID) // Best-effort rollback
 }
 
 // BatchStatus returns the status of a batch.
