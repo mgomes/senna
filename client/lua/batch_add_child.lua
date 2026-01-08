@@ -30,7 +30,13 @@ if batch.pending == nil then
     batch.pending = redis.call('SCARD', jobs_key)
 end
 
-redis.call('SADD', jobs_key, child_id)
+-- Only increment counters if child was newly added (idempotency)
+local added = redis.call('SADD', jobs_key, child_id)
+if added == 0 then
+    -- Child already exists, nothing to do
+    return cjson.encode({success = true, already_exists = true})
+end
+
 batch.total = (batch.total or 0) + 1
 batch.pending = batch.pending + 1
 
