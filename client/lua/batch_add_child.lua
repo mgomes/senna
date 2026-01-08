@@ -37,6 +37,14 @@ if added == 0 then
     return cjson.encode({success = true, already_exists = true})
 end
 
+-- Ensure the jobs set has a TTL matching the batch.
+-- For empty parent batches, SADD creates this set without expiration.
+-- Copy the batch's TTL to prevent unbounded memory growth.
+local batch_ttl = redis.call('PTTL', batch_key)
+if batch_ttl > 0 then
+    redis.call('PEXPIRE', jobs_key, batch_ttl)
+end
+
 batch.total = (batch.total or 0) + 1
 batch.pending = batch.pending + 1
 
