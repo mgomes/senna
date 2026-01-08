@@ -9,6 +9,9 @@ import (
 //go:embed lua/batch_complete.lua
 var batchCompleteLua string
 
+//go:embed lua/batch_callback_complete.lua
+var batchCallbackCompleteLua string
+
 //go:embed lua/batch_add_jobs.lua
 var batchAddJobsLua string
 
@@ -22,6 +25,7 @@ var enqueueScheduledLua string
 var sequentialFetchLua string
 
 var batchCompleteScript = script.New("batch_complete", batchCompleteLua)
+var batchCallbackCompleteScript = script.New("batch_callback_complete", batchCallbackCompleteLua)
 var batchAddJobsScript = script.New("batch_add_jobs", batchAddJobsLua)
 var batchInvalidateScript = script.New("batch_invalidate", batchInvalidateLua)
 var enqueueScheduledScript = script.New("enqueue_scheduled", enqueueScheduledLua)

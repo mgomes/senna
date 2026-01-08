@@ -73,6 +73,10 @@ func (k *Keys) BatchFailed(id string) string {
 	return k.prefix("batch", id, "failed")
 }
 
+func (k *Keys) BatchCallbacks(id string) string {
+	return k.prefix("batch", id, "callbacks")
+}
+
 func (k *Keys) Batches() string {
 	return k.prefix("batches")
 }

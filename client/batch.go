@@ -18,6 +18,7 @@ type CallbackConfig struct {
 type Batch struct {
 	ID            string          `json:"id"`
 	Description   string          `json:"description,omitempty"`
+	ParentID      string          `json:"parent_id,omitempty"`
 	Jobs          []*senna.Job    `json:"jobs"`
 	OnComplete    *CallbackConfig `json:"on_complete,omitempty"`
 	OnSuccess     *CallbackConfig `json:"on_success,omitempty"`
@@ -39,6 +40,13 @@ func NewBatch() *Batch {
 // WithDescription sets an optional description for the batch.
 func (b *Batch) WithDescription(desc string) *Batch {
 	b.Description = desc
+	return b
+}
+
+// WithParent sets the parent batch ID for this batch.
+// This allows parent batches to wait for child batches to complete.
+func (b *Batch) WithParent(parentID string) *Batch {
+	b.ParentID = parentID
 	return b
 }
 
