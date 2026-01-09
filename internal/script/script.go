@@ -2,6 +2,8 @@ package script
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -61,6 +63,26 @@ func (s *Script) Run(ctx context.Context, client redis.Scripter, keys []string, 
 	}
 
 	return result, nil
+}
+
+// RunJSON runs the script and unmarshals the JSON result into the target.
+// The target must be a pointer to the struct to unmarshal into.
+func (s *Script) RunJSON(ctx context.Context, client redis.Scripter, target any, keys []string, args ...any) error {
+	result, err := s.Run(ctx, client, keys, args...)
+	if err != nil {
+		return err
+	}
+
+	resultStr, ok := result.(string)
+	if !ok {
+		return fmt.Errorf("script %s: expected string result, got %T", s.Name, result)
+	}
+
+	if err := json.Unmarshal([]byte(resultStr), target); err != nil {
+		return fmt.Errorf("script %s: failed to unmarshal result: %w", s.Name, err)
+	}
+
+	return nil
 }
 
 func (s *Script) Load(ctx context.Context, client redis.Scripter) error {

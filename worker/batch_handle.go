@@ -82,17 +82,12 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 		args = append(args, p.job.ID, p.queueKey, p.data)
 	}
 
-	result, err := batchAddJobsScript.Run(ctx, bh.redis, keys, args...)
-	if err != nil {
-		return fmt.Errorf("failed to add jobs to batch: %w", err)
-	}
-
 	var addResult struct {
 		Error   string `json:"error,omitempty"`
 		Success bool   `json:"success"`
 	}
-	if err := json.Unmarshal([]byte(result.(string)), &addResult); err != nil {
-		return fmt.Errorf("failed to parse batch add result: %w", err)
+	if err := batchAddJobsScript.RunJSON(ctx, bh.redis, &addResult, keys, args...); err != nil {
+		return fmt.Errorf("failed to add jobs to batch: %w", err)
 	}
 
 	if addResult.Error != "" {
@@ -125,17 +120,12 @@ func (bh *BatchHandle) Add(ctx context.Context, jobType string, args map[string]
 func (bh *BatchHandle) Invalidate(ctx context.Context) error {
 	keys := []string{bh.keys.Batch(bh.bid)}
 
-	result, err := batchInvalidateScript.Run(ctx, bh.redis, keys)
-	if err != nil {
-		return fmt.Errorf("failed to invalidate batch: %w", err)
-	}
-
 	var invalidateResult struct {
 		Error   string `json:"error,omitempty"`
 		Success bool   `json:"success"`
 	}
-	if err := json.Unmarshal([]byte(result.(string)), &invalidateResult); err != nil {
-		return fmt.Errorf("failed to parse invalidate result: %w", err)
+	if err := batchInvalidateScript.RunJSON(ctx, bh.redis, &invalidateResult, keys); err != nil {
+		return fmt.Errorf("failed to invalidate batch: %w", err)
 	}
 
 	if invalidateResult.Error != "" {

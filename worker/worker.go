@@ -419,15 +419,9 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		w.keys.DeadBatches(),
 	}
 
-	resultJSON, err := batchCompleteScript.Run(ctx, w.redis, scriptKeys, job.ID, string(result))
-	if err != nil {
-		slog.ErrorContext(ctx, "batch script failed", "error", err, "batch_id", job.BatchID)
-		return
-	}
-
 	var callbackResult batch.CompleteResult
-	if err := json.Unmarshal([]byte(resultJSON.(string)), &callbackResult); err != nil {
-		slog.ErrorContext(ctx, "failed to parse batch result", "error", err)
+	if err := batchCompleteScript.RunJSON(ctx, w.redis, &callbackResult, scriptKeys, job.ID, string(result)); err != nil {
+		slog.ErrorContext(ctx, "batch script failed", "error", err, "batch_id", job.BatchID)
 		return
 	}
 
@@ -484,15 +478,9 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 		w.keys.BatchCallbacks(job.CallbackBatchID),
 	}
 
-	resultJSON, err := batchCallbackCompleteScript.Run(ctx, w.redis, keys, job.ID)
-	if err != nil {
-		slog.ErrorContext(ctx, "batch callback complete script failed", "error", err, "batch_id", job.CallbackBatchID)
-		return
-	}
-
 	var result batchCallbackCompleteResult
-	if err := json.Unmarshal([]byte(resultJSON.(string)), &result); err != nil {
-		slog.ErrorContext(ctx, "failed to parse batch callback complete result", "error", err)
+	if err := batchCallbackCompleteScript.RunJSON(ctx, w.redis, &result, keys, job.ID); err != nil {
+		slog.ErrorContext(ctx, "batch callback complete script failed", "error", err, "batch_id", job.CallbackBatchID)
 		return
 	}
 
