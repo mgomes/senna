@@ -267,50 +267,60 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	opts, err := w.handlers.process(ctx, job)
 
 	if err == nil {
-		_ = w.fetcher.Ack(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, batchResultSuccess)
-		w.handleBatchCallbackComplete(ctx, job)
+		w.completeJob(ctx, job)
 		return
 	}
 
 	var retryErr *senna.RetryableError
 	if errors.As(err, &retryErr) {
-		w.updateBatchProgress(ctx, job, batchResultFailure)
-		_ = w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
+		w.retryJob(ctx, job, retryErr.RetryIn)
 		return
 	}
 
 	var maxRetriesErr *senna.MaxRetriesExceededError
 	if errors.As(err, &maxRetriesErr) {
-		job.Error = maxRetriesErr.Error()
-		_ = w.fetcher.MoveToDead(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, batchResultDeath)
-		w.handleBatchCallbackComplete(ctx, job)
+		w.killJob(ctx, job, maxRetriesErr)
 		return
 	}
 
+	backoff, shouldRetry := w.calculateRetryBackoff(job, opts)
+	if shouldRetry {
+		w.retryJob(ctx, job, backoff)
+	} else {
+		w.killJob(ctx, job, err)
+	}
+}
+
+func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
+	_ = w.fetcher.Ack(ctx, w.id, job)
+	w.updateBatchProgress(ctx, job, batchResultSuccess)
+	w.handleBatchCallbackComplete(ctx, job)
+}
+
+func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
+	w.updateBatchProgress(ctx, job, batchResultFailure)
+	_ = w.fetcher.Nack(ctx, w.id, job, retryIn)
+}
+
+func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
+	job.Error = err.Error()
+	_ = w.fetcher.MoveToDead(ctx, w.id, job)
+	w.updateBatchProgress(ctx, job, batchResultDeath)
+	w.handleBatchCallbackComplete(ctx, job)
+}
+
+func (w *Worker) calculateRetryBackoff(job *senna.Job, opts *JobOptions) (time.Duration, bool) {
 	backoffFn := senna.DefaultBackoff()
 	maxRetries := job.Retry
 	if opts != nil {
 		if opts.RetryBackoff != nil {
 			backoffFn = opts.RetryBackoff
 		}
-		// Use the lower of job.Retry and handler's MaxRetries setting.
-		// This allows either the client or the handler to limit retries.
 		if opts.MaxRetries < maxRetries {
 			maxRetries = opts.MaxRetries
 		}
 	}
-	backoff := backoffFn(job.RetryCount)
-	if job.RetryCount < maxRetries {
-		w.updateBatchProgress(ctx, job, batchResultFailure)
-		_ = w.fetcher.Nack(ctx, w.id, job, backoff)
-	} else {
-		job.Error = err.Error()
-		_ = w.fetcher.MoveToDead(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, batchResultDeath)
-		w.handleBatchCallbackComplete(ctx, job)
-	}
+	return backoffFn(job.RetryCount), job.RetryCount < maxRetries
 }
 
 // processIterableJob handles iterable jobs with cursor tracking and interruption support.

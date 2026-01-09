@@ -351,182 +351,58 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 	return job, nil
 }
 
-func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
-	if batch.err != nil {
-		return batch.err
+func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
+	// Validation
+	if b.err != nil {
+		return b.err
 	}
-
-	if batch.ParentID != "" && batch.ParentID == batch.ID {
+	if b.ParentID != "" && b.ParentID == b.ID {
 		return fmt.Errorf("batch cannot be its own parent")
 	}
-
-	if batch.ParentID != "" {
-		if _, err := c.redis.Get(ctx, c.keys.Batch(batch.ParentID)).Result(); err != nil {
+	if b.ParentID != "" {
+		if _, err := c.redis.Get(ctx, c.keys.Batch(b.ParentID)).Result(); err != nil {
 			if err == redis.Nil {
-				return &senna.BatchNotFoundError{BatchID: batch.ParentID}
+				return &senna.BatchNotFoundError{BatchID: b.ParentID}
 			}
 			return err
 		}
 	}
 
-	// For empty batches, mark callbacks as already fired since we'll enqueue them immediately
-	emptyBatch := len(batch.Jobs) == 0
-
-	// Use client's default queue if batch doesn't specify a callback queue
-	callbackQueue := batch.CallbackQueue
+	emptyBatch := len(b.Jobs) == 0
+	callbackQueue := b.CallbackQueue
 	if callbackQueue == "" {
 		callbackQueue = c.settings.DefaultQueue
 	}
 
-	// Pre-marshal all jobs before creating any state
-	// This ensures we fail fast before any Redis changes if serialization fails
-	type marshaledJob struct {
-		job  *senna.Job
-		data []byte
-	}
-	marshaledJobs := make([]marshaledJob, 0, len(batch.Jobs))
-	for _, job := range batch.Jobs {
-		job.BatchID = batch.ID
-		data, err := job.Marshal()
-		if err != nil {
-			return fmt.Errorf("failed to marshal job %s: %w", job.ID, err)
-		}
-		marshaledJobs = append(marshaledJobs, marshaledJob{job: job, data: data})
-	}
-
-	// Count callbacks for empty batches so callbacks_pending is tracked correctly
-	callbackCount := 0
-	if emptyBatch {
-		if batch.OnComplete != nil {
-			callbackCount++
-		}
-		if batch.OnSuccess != nil {
-			callbackCount++
-		}
-	}
-
-	// Build batch state for tracking
-	state := &senna.BatchState{
-		ID:               batch.ID,
-		Description:      batch.Description,
-		ParentID:         batch.ParentID,
-		Total:            len(batch.Jobs),
-		Pending:          len(batch.Jobs),
-		Failures:         0,
-		Successes:        0,
-		CallbacksPending: callbackCount,
-		Dead:             false,
-		DeathFired:       false,
-		CompleteFired:    emptyBatch,
-		SuccessFired:     emptyBatch,
-		CreatedAt:        batch.CreatedAt,
-		CallbackQueue:    callbackQueue,
-	}
-
-	if batch.OnComplete != nil {
-		state.OnComplete = &senna.CallbackInfo{
-			JobType: batch.OnComplete.JobType,
-			Options: batch.OnComplete.Options,
-		}
-	}
-	if batch.OnSuccess != nil {
-		state.OnSuccess = &senna.CallbackInfo{
-			JobType: batch.OnSuccess.JobType,
-			Options: batch.OnSuccess.Options,
-		}
-	}
-	if batch.OnDeath != nil {
-		state.OnDeath = &senna.CallbackInfo{
-			JobType: batch.OnDeath.JobType,
-			Options: batch.OnDeath.Options,
-		}
-	}
-
-	batchData, err := json.Marshal(state)
+	// Pre-marshal jobs to fail fast before any Redis changes
+	marshaledJobs, err := c.marshalBatchJobs(b)
 	if err != nil {
 		return err
 	}
 
-	// Step 1: Store batch state first (before enqueueing jobs)
-	// This allows parent linking to fail cleanly without orphaned jobs
-	statePipe := c.redis.Pipeline()
-	statePipe.Set(ctx, c.keys.Batch(batch.ID), string(batchData), batchTTL)
-	statePipe.SAdd(ctx, c.keys.Batches(), batch.ID)
+	// Build and store batch state
+	state := c.buildBatchState(b, callbackQueue, emptyBatch)
 
-	if _, err = statePipe.Exec(ctx); err != nil {
+	// Step 1: Store batch state
+	if err := c.storeBatchState(ctx, b.ID, state); err != nil {
 		return err
 	}
 
-	// Step 2: Link to parent (if applicable) BEFORE enqueueing jobs
-	// If this fails, we only need to clean up batch state - no jobs were enqueued
-	if batch.ParentID != "" {
-		keys := []string{
-			c.keys.Batch(batch.ParentID),
-			c.keys.BatchJobs(batch.ParentID),
-		}
-
-		result, err := batchAddChildScript.Run(ctx, c.redis, keys, batch.ID)
-		if err != nil {
-			c.cleanupOrphanedBatch(ctx, batch.ID)
-			return fmt.Errorf("failed to add child batch to parent: %w", err)
-		}
-
-		var addResult struct {
-			Error   string `json:"error,omitempty"`
-			Success bool   `json:"success"`
-		}
-		if err := json.Unmarshal([]byte(result.(string)), &addResult); err != nil {
-			c.cleanupOrphanedBatch(ctx, batch.ID)
-			return fmt.Errorf("failed to parse batch add child result: %w", err)
-		}
-
-		if addResult.Error != "" {
-			// Parent link failed - clean up batch state (no jobs were enqueued)
-			c.cleanupOrphanedBatch(ctx, batch.ID)
-
-			switch addResult.Error {
-			case "batch_not_found":
-				return &senna.BatchNotFoundError{BatchID: batch.ParentID}
-			case "batch_invalidated":
-				return fmt.Errorf("parent batch %s has been invalidated", batch.ParentID)
-			case "batch_complete":
-				return fmt.Errorf("parent batch %s has already completed", batch.ParentID)
-			default:
-				return fmt.Errorf("parent batch error: %s", addResult.Error)
-			}
-		}
-	}
-
-	// Step 3: Enqueue jobs (only after parent linking succeeded or no parent)
-	if len(marshaledJobs) > 0 {
-		jobsPipe := c.redis.Pipeline()
-		for _, mj := range marshaledJobs {
-			jobsPipe.LPush(ctx, c.keys.Queue(mj.job.Queue), string(mj.data))
-			jobsPipe.SAdd(ctx, c.keys.BatchJobs(batch.ID), mj.job.ID)
-		}
-		// Set TTL after creating the set
-		jobsPipe.Expire(ctx, c.keys.BatchJobs(batch.ID), batchTTL)
-
-		if _, err = jobsPipe.Exec(ctx); err != nil {
-			// Rollback: undo parent link and clean up batch state
-			if batch.ParentID != "" {
-				c.rollbackParentLink(ctx, batch.ParentID, batch.ID)
-			}
-			c.cleanupOrphanedBatch(ctx, batch.ID)
+	// Step 2: Link to parent (if applicable)
+	if b.ParentID != "" {
+		if err := c.linkBatchToParent(ctx, b); err != nil {
 			return err
 		}
 	}
 
-	// For empty batches, immediately enqueue callbacks or propagate to parent
-	if emptyBatch {
-		c.enqueueEmptyBatchCallbacks(ctx, batch, callbackQueue)
+	// Step 3: Enqueue jobs
+	if err := c.enqueueBatchJobs(ctx, b, marshaledJobs); err != nil {
+		return err
+	}
 
-		// If this empty batch has a parent but no callbacks, we need to immediately
-		// propagate completion to the parent. Otherwise the parent's pending count
-		// (incremented by batch_add_child) would never be decremented.
-		if batch.ParentID != "" && batch.OnComplete == nil && batch.OnSuccess == nil {
-			c.propagateEmptyChildBatch(ctx, batch.ID, batch.ParentID, callbackQueue)
-		}
+	// Handle empty batches
+	if emptyBatch {
+		c.handleEmptyBatch(ctx, b, callbackQueue)
 	}
 
 	return nil
@@ -619,6 +495,166 @@ func (c *Client) rollbackParentLink(ctx context.Context, parentID, childID strin
 		c.keys.BatchJobs(parentID),
 	}
 	_, _ = batchRemoveChildScript.Run(ctx, c.redis, keys, childID) // Best-effort rollback
+}
+
+// marshaledJob holds a job and its serialized form.
+type marshaledJob struct {
+	job  *senna.Job
+	data []byte
+}
+
+// marshalBatchJobs pre-marshals all jobs to fail fast before any Redis changes.
+func (c *Client) marshalBatchJobs(b *Batch) ([]marshaledJob, error) {
+	jobs := make([]marshaledJob, 0, len(b.Jobs))
+	for _, job := range b.Jobs {
+		job.BatchID = b.ID
+		data, err := job.Marshal()
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal job %s: %w", job.ID, err)
+		}
+		jobs = append(jobs, marshaledJob{job: job, data: data})
+	}
+	return jobs, nil
+}
+
+// buildBatchState constructs the BatchState from a Batch.
+func (c *Client) buildBatchState(b *Batch, callbackQueue string, emptyBatch bool) *senna.BatchState {
+	callbackCount := 0
+	if emptyBatch {
+		if b.OnComplete != nil {
+			callbackCount++
+		}
+		if b.OnSuccess != nil {
+			callbackCount++
+		}
+	}
+
+	state := &senna.BatchState{
+		ID:               b.ID,
+		Description:      b.Description,
+		ParentID:         b.ParentID,
+		Total:            len(b.Jobs),
+		Pending:          len(b.Jobs),
+		Failures:         0,
+		Successes:        0,
+		CallbacksPending: callbackCount,
+		Dead:             false,
+		DeathFired:       false,
+		CompleteFired:    emptyBatch,
+		SuccessFired:     emptyBatch,
+		CreatedAt:        b.CreatedAt,
+		CallbackQueue:    callbackQueue,
+	}
+
+	if b.OnComplete != nil {
+		state.OnComplete = &senna.CallbackInfo{
+			JobType: b.OnComplete.JobType,
+			Options: b.OnComplete.Options,
+		}
+	}
+	if b.OnSuccess != nil {
+		state.OnSuccess = &senna.CallbackInfo{
+			JobType: b.OnSuccess.JobType,
+			Options: b.OnSuccess.Options,
+		}
+	}
+	if b.OnDeath != nil {
+		state.OnDeath = &senna.CallbackInfo{
+			JobType: b.OnDeath.JobType,
+			Options: b.OnDeath.Options,
+		}
+	}
+
+	return state
+}
+
+// storeBatchState saves the batch state to Redis (Step 1).
+func (c *Client) storeBatchState(ctx context.Context, batchID string, state *senna.BatchState) error {
+	batchData, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+
+	pipe := c.redis.Pipeline()
+	pipe.Set(ctx, c.keys.Batch(batchID), string(batchData), batchTTL)
+	pipe.SAdd(ctx, c.keys.Batches(), batchID)
+
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+// linkBatchToParent links a child batch to its parent (Step 2).
+func (c *Client) linkBatchToParent(ctx context.Context, b *Batch) error {
+	scriptKeys := []string{
+		c.keys.Batch(b.ParentID),
+		c.keys.BatchJobs(b.ParentID),
+	}
+
+	result, err := batchAddChildScript.Run(ctx, c.redis, scriptKeys, b.ID)
+	if err != nil {
+		c.cleanupOrphanedBatch(ctx, b.ID)
+		return fmt.Errorf("failed to add child batch to parent: %w", err)
+	}
+
+	var addResult struct {
+		Error   string `json:"error,omitempty"`
+		Success bool   `json:"success"`
+	}
+	if err := json.Unmarshal([]byte(result.(string)), &addResult); err != nil {
+		c.cleanupOrphanedBatch(ctx, b.ID)
+		return fmt.Errorf("failed to parse batch add child result: %w", err)
+	}
+
+	if addResult.Error != "" {
+		c.cleanupOrphanedBatch(ctx, b.ID)
+
+		switch addResult.Error {
+		case "batch_not_found":
+			return &senna.BatchNotFoundError{BatchID: b.ParentID}
+		case "batch_invalidated":
+			return fmt.Errorf("parent batch %s has been invalidated", b.ParentID)
+		case "batch_complete":
+			return fmt.Errorf("parent batch %s has already completed", b.ParentID)
+		default:
+			return fmt.Errorf("parent batch error: %s", addResult.Error)
+		}
+	}
+
+	return nil
+}
+
+// enqueueBatchJobs enqueues all jobs for a batch (Step 3).
+func (c *Client) enqueueBatchJobs(ctx context.Context, b *Batch, jobs []marshaledJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	pipe := c.redis.Pipeline()
+	for _, mj := range jobs {
+		pipe.LPush(ctx, c.keys.Queue(mj.job.Queue), string(mj.data))
+		pipe.SAdd(ctx, c.keys.BatchJobs(b.ID), mj.job.ID)
+	}
+	pipe.Expire(ctx, c.keys.BatchJobs(b.ID), batchTTL)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		// Rollback: undo parent link and clean up batch state
+		if b.ParentID != "" {
+			c.rollbackParentLink(ctx, b.ParentID, b.ID)
+		}
+		c.cleanupOrphanedBatch(ctx, b.ID)
+		return err
+	}
+	return nil
+}
+
+// handleEmptyBatch handles callbacks and propagation for empty batches.
+func (c *Client) handleEmptyBatch(ctx context.Context, b *Batch, callbackQueue string) {
+	c.enqueueEmptyBatchCallbacks(ctx, b, callbackQueue)
+
+	// If this empty batch has a parent but no callbacks, propagate completion immediately
+	if b.ParentID != "" && b.OnComplete == nil && b.OnSuccess == nil {
+		c.propagateEmptyChildBatch(ctx, b.ID, b.ParentID, callbackQueue)
+	}
 }
 
 // BatchStatus returns the status of a batch.

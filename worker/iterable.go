@@ -155,35 +155,15 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	for iter.Next(ctx) {
 		// Check for cancellation (marked in Redis)
 		if state.Cancelled || w.checkIterationCancelled(ctx, stateKey) {
-			state.Cancelled = true
-			state.TotalTime += time.Since(runStart)
-			// Don't update cursor - current item wasn't processed yet
-			_ = w.saveIterationState(ctx, stateKey, state)
-
-			if opts.Callbacks != nil {
-				if opts.Callbacks.OnCancel != nil {
-					_ = opts.Callbacks.OnCancel(ctx, job, state)
-				}
-				if opts.Callbacks.OnStop != nil {
-					_ = opts.Callbacks.OnStop(ctx, job, state)
-				}
-			}
+			w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
 			return nil // Ack job (success), no on_complete
 		}
 
 		// Check for shutdown
 		select {
 		case <-ctx.Done():
-			state.TotalTime += time.Since(runStart)
-			// Don't update cursor - current item wasn't processed yet
-			// Use non-cancelled context for saving state during shutdown
 			saveCtx := context.WithoutCancel(ctx)
-			_ = w.saveIterationState(saveCtx, stateKey, state)
-
-			if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-				_ = opts.Callbacks.OnStop(saveCtx, job, state)
-			}
-			return &senna.InterruptedError{} // Requeue same job
+			return w.handleIterationInterrupt(saveCtx, state, stateKey, runStart, opts, job)
 		default:
 		}
 
@@ -202,13 +182,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 				slog.InfoContext(ctx, "stopping iteration early", "reason", stopErr.Reason, "job_id", job.ID)
 				break // Complete successfully
 			} else {
-				// Real error - save cursor and return for retry
-				// Don't update cursor - failed item will be retried
-				// Preserve cancellation flag set by external client
-				if w.checkIterationCancelled(ctx, stateKey) {
-					state.Cancelled = true
-				}
-				state.TotalTime += time.Since(runStart)
+				// Real error - save state and return for retry
+				w.preserveCancellation(ctx, state, stateKey)
+				w.updateIterationTiming(state, runStart)
 				_ = w.saveIterationState(ctx, stateKey, state)
 				return err
 			}
@@ -221,30 +197,17 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 		// Check max items per run
 		if opts.MaxItemsPerRun > 0 && itemsThisRun >= opts.MaxItemsPerRun {
-			// Preserve cancellation flag set by external client
-			if w.checkIterationCancelled(ctx, stateKey) {
-				state.Cancelled = true
-			}
-			state.TotalTime += time.Since(runStart)
-			_ = w.saveIterationState(ctx, stateKey, state)
-
-			if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-				_ = opts.Callbacks.OnStop(ctx, job, state)
-			}
-			return &senna.InterruptedError{} // Requeue same job
+			w.preserveCancellation(ctx, state, stateKey)
+			return w.handleIterationInterrupt(ctx, state, stateKey, runStart, opts, job)
 		}
 
 		// Periodic cursor save
 		select {
 		case <-saveTicker.C:
 			if needsSave {
-				// Preserve cancellation flag set by external client
-				if w.checkIterationCancelled(ctx, stateKey) {
-					state.Cancelled = true
-				}
-				state.TotalTime += time.Since(runStart)
+				w.preserveCancellation(ctx, state, stateKey)
+				runStart = w.updateIterationTiming(state, runStart)
 				_ = w.saveIterationState(ctx, stateKey, state)
-				runStart = time.Now()
 			}
 		default:
 		}
@@ -254,46 +217,24 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	if err := iter.Err(); err != nil {
 		// Don't update cursor - Next() failed, so no new item was fetched
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			state.TotalTime += time.Since(runStart)
 			saveCtx := context.WithoutCancel(ctx)
-			_ = w.saveIterationState(saveCtx, stateKey, state)
-
-			if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-				_ = opts.Callbacks.OnStop(saveCtx, job, state)
-			}
-			return &senna.InterruptedError{}
+			return w.handleIterationInterrupt(saveCtx, state, stateKey, runStart, opts, job)
 		}
 
-		state.TotalTime += time.Since(runStart)
+		w.updateIterationTiming(state, runStart)
 		_ = w.saveIterationState(ctx, stateKey, state)
 		return err
 	}
 
 	// Check for late cancellation before completing
 	if w.checkIterationCancelled(ctx, stateKey) {
-		state.Cancelled = true
-		state.TotalTime += time.Since(runStart)
-		_ = w.saveIterationState(ctx, stateKey, state)
-
-		if opts.Callbacks != nil {
-			if opts.Callbacks.OnCancel != nil {
-				_ = opts.Callbacks.OnCancel(ctx, job, state)
-			}
-			if opts.Callbacks.OnStop != nil {
-				_ = opts.Callbacks.OnStop(ctx, job, state)
-			}
-		}
+		w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
 		return nil // Ack job (success), no OnComplete
 	}
 
 	// Complete - fire OnComplete and DELETE state from Redis
-	state.TotalTime += time.Since(runStart)
-
-	// Save state before OnComplete so retries don't reprocess items
-	// Preserve cancellation flag set by external client
-	if w.checkIterationCancelled(ctx, stateKey) {
-		state.Cancelled = true
-	}
+	w.preserveCancellation(ctx, state, stateKey)
+	w.updateIterationTiming(state, runStart)
 	_ = w.saveIterationState(ctx, stateKey, state)
 
 	if opts.Callbacks != nil && opts.Callbacks.OnComplete != nil {
@@ -344,6 +285,46 @@ func (w *Worker) checkIterationCancelled(ctx context.Context, key string) bool {
 		return false
 	}
 	return state.Cancelled
+}
+
+// updateIterationTiming updates the state's TotalTime from runStart and returns the new runStart.
+func (w *Worker) updateIterationTiming(state *senna.IterationState, runStart time.Time) time.Time {
+	state.TotalTime += time.Since(runStart)
+	return time.Now()
+}
+
+// preserveCancellation checks if iteration was cancelled and sets the flag.
+func (w *Worker) preserveCancellation(ctx context.Context, state *senna.IterationState, stateKey string) {
+	if w.checkIterationCancelled(ctx, stateKey) {
+		state.Cancelled = true
+	}
+}
+
+// handleIterationCancelled handles cancellation - saves state, fires callbacks.
+func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) {
+	state.Cancelled = true
+	w.updateIterationTiming(state, runStart)
+	_ = w.saveIterationState(ctx, stateKey, state)
+
+	if opts.Callbacks != nil {
+		if opts.Callbacks.OnCancel != nil {
+			_ = opts.Callbacks.OnCancel(ctx, job, state)
+		}
+		if opts.Callbacks.OnStop != nil {
+			_ = opts.Callbacks.OnStop(ctx, job, state)
+		}
+	}
+}
+
+// handleIterationInterrupt handles interrupt/requeue - saves state, fires OnStop, returns InterruptedError.
+func (w *Worker) handleIterationInterrupt(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) error {
+	w.updateIterationTiming(state, runStart)
+	_ = w.saveIterationState(ctx, stateKey, state)
+
+	if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
+		_ = opts.Callbacks.OnStop(ctx, job, state)
+	}
+	return &senna.InterruptedError{}
 }
 
 // requeue puts the job back on its queue without creating a new job.
