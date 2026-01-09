@@ -439,13 +439,8 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 		c.keys.DeadBatches(),
 	}
 
-	resultJSON, err := batchCompleteScript.Run(ctx, c.redis, scriptKeys, childBatchID, resultType)
-	if err != nil {
-		return
-	}
-
 	var result batch.CompleteResult
-	if err := json.Unmarshal([]byte(resultJSON.(string)), &result); err != nil {
+	if err := batchCompleteScript.RunJSON(ctx, c.redis, &result, scriptKeys, childBatchID, resultType); err != nil {
 		return
 	}
 
@@ -595,19 +590,13 @@ func (c *Client) linkBatchToParent(ctx context.Context, b *Batch) error {
 		c.keys.BatchJobs(b.ParentID),
 	}
 
-	result, err := batchAddChildScript.Run(ctx, c.redis, scriptKeys, b.ID)
-	if err != nil {
-		c.cleanupOrphanedBatch(ctx, b.ID)
-		return fmt.Errorf("failed to add child batch to parent: %w", err)
-	}
-
 	var addResult struct {
 		Error   string `json:"error,omitempty"`
 		Success bool   `json:"success"`
 	}
-	if err := json.Unmarshal([]byte(result.(string)), &addResult); err != nil {
+	if err := batchAddChildScript.RunJSON(ctx, c.redis, &addResult, scriptKeys, b.ID); err != nil {
 		c.cleanupOrphanedBatch(ctx, b.ID)
-		return fmt.Errorf("failed to parse batch add child result: %w", err)
+		return fmt.Errorf("failed to add child batch to parent: %w", err)
 	}
 
 	if addResult.Error != "" {
