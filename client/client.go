@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/mgomes/senna"
@@ -484,7 +485,9 @@ func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 	pipe.Del(ctx, c.keys.BatchJobs(batchID))
 	pipe.Del(ctx, c.keys.BatchFailed(batchID))
 	pipe.Del(ctx, c.keys.BatchCallbacks(batchID))
-	_, _ = pipe.Exec(ctx) // Best-effort cleanup, ignore errors
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.WarnContext(ctx, "failed to cleanup orphaned batch", "batch_id", batchID, "error", err)
+	}
 }
 
 // rollbackParentLink undoes the effect of batch_add_child, decrementing
@@ -494,7 +497,9 @@ func (c *Client) rollbackParentLink(ctx context.Context, parentID, childID strin
 		c.keys.Batch(parentID),
 		c.keys.BatchJobs(parentID),
 	}
-	_, _ = batchRemoveChildScript.Run(ctx, c.redis, keys, childID) // Best-effort rollback
+	if _, err := batchRemoveChildScript.Run(ctx, c.redis, keys, childID); err != nil {
+		slog.WarnContext(ctx, "failed to rollback parent link", "parent_id", parentID, "child_id", childID, "error", err)
+	}
 }
 
 // marshaledJob holds a job and its serialized form.

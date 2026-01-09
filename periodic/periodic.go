@@ -240,7 +240,9 @@ func (s *Scheduler) recordHistory(ctx context.Context, job *Job) {
 	pipe.LPush(ctx, historyKey, string(data))
 	pipe.LTrim(ctx, historyKey, 0, 99) // Keep last 100 entries
 	pipe.Expire(ctx, historyKey, 7*24*time.Hour)
-	_, _ = pipe.Exec(ctx)
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.WarnContext(ctx, "failed to record periodic job history", "job", job.Name, "error", err)
+	}
 }
 
 // Jobs returns all registered periodic jobs.
