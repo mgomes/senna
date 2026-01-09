@@ -292,19 +292,25 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 }
 
 func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
-	_ = w.fetcher.Ack(ctx, w.id, job)
+	if err := w.fetcher.Ack(ctx, w.id, job); err != nil {
+		slog.ErrorContext(ctx, "failed to ack job", "job_id", job.ID, "error", err)
+	}
 	w.updateBatchProgress(ctx, job, batchResultSuccess)
 	w.handleBatchCallbackComplete(ctx, job)
 }
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
 	w.updateBatchProgress(ctx, job, batchResultFailure)
-	_ = w.fetcher.Nack(ctx, w.id, job, retryIn)
+	if err := w.fetcher.Nack(ctx, w.id, job, retryIn); err != nil {
+		slog.ErrorContext(ctx, "failed to nack job for retry", "job_id", job.ID, "retry_in", retryIn, "error", err)
+	}
 }
 
 func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
 	job.Error = err.Error()
-	_ = w.fetcher.MoveToDead(ctx, w.id, job)
+	if moveErr := w.fetcher.MoveToDead(ctx, w.id, job); moveErr != nil {
+		slog.ErrorContext(ctx, "failed to move job to dead queue", "job_id", job.ID, "error", moveErr)
+	}
 	w.updateBatchProgress(ctx, job, batchResultDeath)
 	w.handleBatchCallbackComplete(ctx, job)
 }
@@ -345,60 +351,49 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 	err := iterHandler(ctx, job)
 
 	if err == nil {
-		_ = w.fetcher.Ack(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, batchResultSuccess)
-		w.handleBatchCallbackComplete(ctx, job)
+		w.completeJob(ctx, job)
 		return
 	}
 
 	// Handle InterruptedError - requeue same job, no retry increment, no batch failure
 	var interruptedErr *senna.InterruptedError
 	if errors.As(err, &interruptedErr) {
-		// Requeue with same job ID - don't treat as failure
 		if requeueErr := w.requeue(context.WithoutCancel(ctx), job); requeueErr != nil {
 			slog.ErrorContext(ctx, "failed to requeue interrupted job", "error", requeueErr, "job_id", job.ID)
 		}
-		// No batch progress update - this is not a failure
 		return
 	}
 
 	var retryErr *senna.RetryableError
 	if errors.As(err, &retryErr) {
-		w.updateBatchProgress(ctx, job, batchResultFailure)
-		_ = w.fetcher.Nack(ctx, w.id, job, retryErr.RetryIn)
+		w.retryJob(ctx, job, retryErr.RetryIn)
 		return
 	}
 
 	var maxRetriesErr *senna.MaxRetriesExceededError
 	if errors.As(err, &maxRetriesErr) {
-		job.Error = maxRetriesErr.Error()
-		_ = w.fetcher.MoveToDead(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, batchResultDeath)
-		w.handleBatchCallbackComplete(ctx, job)
+		w.killJob(ctx, job, maxRetriesErr)
 		return
 	}
 
 	// Standard error - use backoff retry
-	backoffFn := senna.DefaultBackoff()
-	maxRetries := job.Retry
+	iterOpts := &JobOptions{
+		MaxRetries:   job.Retry,
+		RetryBackoff: senna.DefaultBackoff(),
+	}
 	if opts != nil {
 		if opts.RetryBackoff != nil {
-			backoffFn = opts.RetryBackoff
+			iterOpts.RetryBackoff = opts.RetryBackoff
 		}
-		// Use the lower of job.Retry and handler's MaxRetries setting.
-		if opts.MaxRetries < maxRetries {
-			maxRetries = opts.MaxRetries
+		if opts.MaxRetries < iterOpts.MaxRetries {
+			iterOpts.MaxRetries = opts.MaxRetries
 		}
 	}
-	backoff := backoffFn(job.RetryCount)
-	if job.RetryCount < maxRetries {
-		w.updateBatchProgress(ctx, job, batchResultFailure)
-		_ = w.fetcher.Nack(ctx, w.id, job, backoff)
+	backoff, shouldRetry := w.calculateRetryBackoff(job, iterOpts)
+	if shouldRetry {
+		w.retryJob(ctx, job, backoff)
 	} else {
-		job.Error = err.Error()
-		_ = w.fetcher.MoveToDead(ctx, w.id, job)
-		w.updateBatchProgress(ctx, job, batchResultDeath)
-		w.handleBatchCallbackComplete(ctx, job)
+		w.killJob(ctx, job, err)
 	}
 }
 

@@ -185,7 +185,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 				// Real error - save state and return for retry
 				w.preserveCancellation(ctx, state, stateKey)
 				w.updateIterationTiming(state, runStart)
-				_ = w.saveIterationState(ctx, stateKey, state)
+				if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
+					slog.WarnContext(ctx, "failed to save iteration state on error", "job_id", job.ID, "error", saveErr)
+				}
 				return err
 			}
 		}
@@ -207,7 +209,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			if needsSave {
 				w.preserveCancellation(ctx, state, stateKey)
 				runStart = w.updateIterationTiming(state, runStart)
-				_ = w.saveIterationState(ctx, stateKey, state)
+				if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
+					slog.WarnContext(ctx, "failed to save iteration cursor", "job_id", job.ID, "error", saveErr)
+				}
 			}
 		default:
 		}
@@ -222,7 +226,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		}
 
 		w.updateIterationTiming(state, runStart)
-		_ = w.saveIterationState(ctx, stateKey, state)
+		if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
+			slog.WarnContext(ctx, "failed to save iteration state on iterator error", "job_id", job.ID, "error", saveErr)
+		}
 		return err
 	}
 
@@ -235,7 +241,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	// Complete - fire OnComplete and DELETE state from Redis
 	w.preserveCancellation(ctx, state, stateKey)
 	w.updateIterationTiming(state, runStart)
-	_ = w.saveIterationState(ctx, stateKey, state)
+	if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
+		slog.WarnContext(ctx, "failed to save iteration state before completion", "job_id", job.ID, "error", saveErr)
+	}
 
 	if opts.Callbacks != nil && opts.Callbacks.OnComplete != nil {
 		if err := opts.Callbacks.OnComplete(ctx, job, state); err != nil {
@@ -304,14 +312,20 @@ func (w *Worker) preserveCancellation(ctx context.Context, state *senna.Iteratio
 func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) {
 	state.Cancelled = true
 	w.updateIterationTiming(state, runStart)
-	_ = w.saveIterationState(ctx, stateKey, state)
+	if err := w.saveIterationState(ctx, stateKey, state); err != nil {
+		slog.WarnContext(ctx, "failed to save iteration state on cancel", "job_id", job.ID, "error", err)
+	}
 
 	if opts.Callbacks != nil {
 		if opts.Callbacks.OnCancel != nil {
-			_ = opts.Callbacks.OnCancel(ctx, job, state)
+			if err := opts.Callbacks.OnCancel(ctx, job, state); err != nil {
+				slog.WarnContext(ctx, "OnCancel callback failed", "job_id", job.ID, "error", err)
+			}
 		}
 		if opts.Callbacks.OnStop != nil {
-			_ = opts.Callbacks.OnStop(ctx, job, state)
+			if err := opts.Callbacks.OnStop(ctx, job, state); err != nil {
+				slog.WarnContext(ctx, "OnStop callback failed", "job_id", job.ID, "error", err)
+			}
 		}
 	}
 }
@@ -319,10 +333,14 @@ func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.Iter
 // handleIterationInterrupt handles interrupt/requeue - saves state, fires OnStop, returns InterruptedError.
 func (w *Worker) handleIterationInterrupt(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) error {
 	w.updateIterationTiming(state, runStart)
-	_ = w.saveIterationState(ctx, stateKey, state)
+	if err := w.saveIterationState(ctx, stateKey, state); err != nil {
+		slog.WarnContext(ctx, "failed to save iteration state on interrupt", "job_id", job.ID, "error", err)
+	}
 
 	if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
-		_ = opts.Callbacks.OnStop(ctx, job, state)
+		if err := opts.Callbacks.OnStop(ctx, job, state); err != nil {
+			slog.WarnContext(ctx, "OnStop callback failed", "job_id", job.ID, "error", err)
+		}
 	}
 	return &senna.InterruptedError{}
 }
