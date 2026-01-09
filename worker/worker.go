@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/batch"
 	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/mgomes/senna/periodic"
@@ -401,46 +402,25 @@ const (
 	batchResultInvalidated batchResult = "invalidated"
 )
 
-// batchCallbackResult is the response from the batch_complete Lua script.
-type batchCallbackResult struct {
-	Callbacks        []batchCallback `json:"callbacks"`
-	Pending          int             `json:"pending"`
-	Successes        int             `json:"successes"`
-	Failures         int             `json:"failures"`
-	Dead             bool            `json:"dead"`
-	CallbackQueue    string          `json:"callback_queue"`
-	ParentID         string          `json:"parent_id,omitempty"`
-	CompletedNow     bool            `json:"completed_now,omitempty"`
-	Error            string          `json:"error,omitempty"`
-	Invalidated      bool            `json:"invalidated,omitempty"`
-	AlreadyProcessed bool            `json:"already_processed,omitempty"`
-}
-
-type batchCallback struct {
-	CallbackType string         `json:"callback_type"`
-	JobType      string         `json:"job_type"`
-	Options      map[string]any `json:"options,omitempty"`
-}
-
 func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batchResult) {
 	if job.BatchID == "" {
 		return
 	}
 
-	keys := []string{
+	scriptKeys := []string{
 		w.keys.Batch(job.BatchID),
 		w.keys.BatchJobs(job.BatchID),
 		w.keys.BatchFailed(job.BatchID),
 		w.keys.DeadBatches(),
 	}
 
-	resultJSON, err := batchCompleteScript.Run(ctx, w.redis, keys, job.ID, string(result))
+	resultJSON, err := batchCompleteScript.Run(ctx, w.redis, scriptKeys, job.ID, string(result))
 	if err != nil {
 		slog.ErrorContext(ctx, "batch script failed", "error", err, "batch_id", job.BatchID)
 		return
 	}
 
-	var callbackResult batchCallbackResult
+	var callbackResult batch.CompleteResult
 	if err := json.Unmarshal([]byte(resultJSON.(string)), &callbackResult); err != nil {
 		slog.ErrorContext(ctx, "failed to parse batch result", "error", err)
 		return
@@ -457,7 +437,7 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 	}
 
 	for _, cb := range callbackResult.Callbacks {
-		w.enqueueBatchCallback(ctx, cb.JobType, job.BatchID, callbackResult.ParentID, cb.Options, queue)
+		batch.EnqueueCallback(ctx, w.redis, w.keys, cb.JobType, job.BatchID, callbackResult.ParentID, cb.Options, queue, batchTTL)
 	}
 
 	if callbackResult.CompletedNow && callbackResult.ParentID != "" {
@@ -473,29 +453,6 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		}
 		w.updateBatchProgress(ctx, parentJob, parentResult)
 	}
-}
-
-func (w *Worker) enqueueBatchCallback(ctx context.Context, jobType, batchID, parentID string, options map[string]any, queue string) {
-	args := map[string]any{
-		"batch_id": batchID,
-	}
-	if parentID != "" {
-		args["parent_id"] = parentID
-	}
-	// Merge user-provided options into args
-	for k, v := range options {
-		args[k] = v
-	}
-
-	job := senna.NewJob(jobType, args)
-	job.Queue = queue
-	job.CallbackBatchID = batchID // Mark as callback job for this batch
-	data, _ := job.Marshal()
-
-	// Track callback job ID for idempotent completion handling
-	w.redis.SAdd(ctx, w.keys.BatchCallbacks(batchID), job.ID)
-	w.redis.Expire(ctx, w.keys.BatchCallbacks(batchID), batchTTL)
-	w.redis.LPush(ctx, w.keys.Queue(queue), string(data))
 }
 
 // batchCallbackCompleteResult is the response from the batch_callback_complete Lua script.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/batch"
 	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
@@ -532,57 +533,16 @@ func (c *Client) EnqueueBatch(ctx context.Context, batch *Batch) error {
 }
 
 // enqueueEmptyBatchCallbacks enqueues callbacks for empty batches immediately.
-func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, batch *Batch, queue string) {
+func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, b *Batch, queue string) {
 	// OnComplete always fires for empty batches
-	if batch.OnComplete != nil {
-		c.enqueueBatchCallback(ctx, batch.OnComplete.JobType, batch.ID, batch.ParentID, batch.OnComplete.Options, queue)
+	if b.OnComplete != nil {
+		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnComplete.JobType, b.ID, b.ParentID, b.OnComplete.Options, queue, batchTTL)
 	}
 
 	// OnSuccess fires for empty batches (no jobs = no failures)
-	if batch.OnSuccess != nil {
-		c.enqueueBatchCallback(ctx, batch.OnSuccess.JobType, batch.ID, batch.ParentID, batch.OnSuccess.Options, queue)
+	if b.OnSuccess != nil {
+		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnSuccess.JobType, b.ID, b.ParentID, b.OnSuccess.Options, queue, batchTTL)
 	}
-}
-
-func (c *Client) enqueueBatchCallback(ctx context.Context, jobType, batchID, parentID string, options map[string]any, queue string) {
-	args := map[string]any{
-		"batch_id": batchID,
-	}
-	if parentID != "" {
-		args["parent_id"] = parentID
-	}
-	for k, v := range options {
-		args[k] = v
-	}
-
-	job := senna.NewJob(jobType, args)
-	job.Queue = queue
-	job.CallbackBatchID = batchID
-	data, _ := job.Marshal()
-
-	// Track callback job ID for idempotent completion handling
-	c.redis.SAdd(ctx, c.keys.BatchCallbacks(batchID), job.ID)
-	c.redis.Expire(ctx, c.keys.BatchCallbacks(batchID), batchTTL)
-	c.redis.LPush(ctx, c.keys.Queue(queue), string(data))
-}
-
-// batchCompleteResult is the response from the batch_complete Lua script.
-type batchCompleteResult struct {
-	Callbacks        []batchCallback `json:"callbacks"`
-	Pending          int             `json:"pending"`
-	Dead             bool            `json:"dead"`
-	Invalidated      bool            `json:"invalidated,omitempty"`
-	CallbackQueue    string          `json:"callback_queue"`
-	ParentID         string          `json:"parent_id,omitempty"`
-	CompletedNow     bool            `json:"completed_now,omitempty"`
-	Error            string          `json:"error,omitempty"`
-	AlreadyProcessed bool            `json:"already_processed,omitempty"`
-}
-
-type batchCallback struct {
-	CallbackType string         `json:"callback_type"`
-	JobType      string         `json:"job_type"`
-	Options      map[string]any `json:"options,omitempty"`
 }
 
 // propagateEmptyChildBatch notifies the parent batch that an empty child batch
@@ -595,19 +555,19 @@ func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, par
 // propagateBatchCompletion notifies a parent batch that a child has completed.
 // The resultType should be "success", "death", or "invalidated".
 func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, parentID, resultType, queue string) {
-	keys := []string{
+	scriptKeys := []string{
 		c.keys.Batch(parentID),
 		c.keys.BatchJobs(parentID),
 		c.keys.BatchFailed(parentID),
 		c.keys.DeadBatches(),
 	}
 
-	resultJSON, err := batchCompleteScript.Run(ctx, c.redis, keys, childBatchID, resultType)
+	resultJSON, err := batchCompleteScript.Run(ctx, c.redis, scriptKeys, childBatchID, resultType)
 	if err != nil {
 		return
 	}
 
-	var result batchCompleteResult
+	var result batch.CompleteResult
 	if err := json.Unmarshal([]byte(resultJSON.(string)), &result); err != nil {
 		return
 	}
@@ -622,7 +582,7 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 	}
 
 	for _, cb := range result.Callbacks {
-		c.enqueueBatchCallback(ctx, cb.JobType, parentID, result.ParentID, cb.Options, callbackQueue)
+		batch.EnqueueCallback(ctx, c.redis, c.keys, cb.JobType, parentID, result.ParentID, cb.Options, callbackQueue, batchTTL)
 	}
 
 	if result.CompletedNow && result.ParentID != "" {
