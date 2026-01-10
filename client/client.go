@@ -37,7 +37,7 @@ type Settings struct {
 func DefaultSettings() Settings {
 	return Settings{
 		DefaultQueue: "default",
-		DefaultRetry: 25,
+		DefaultRetry: senna.DefaultRetryCount,
 	}
 }
 

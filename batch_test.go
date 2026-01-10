@@ -682,7 +682,7 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 		Namespace: "batch-defqueue",
 		Settings: client.Settings{
 			DefaultQueue: "custom",
-			DefaultRetry: 25,
+			DefaultRetry: senna.DefaultRetryCount,
 		},
 	})
 	if err != nil {
