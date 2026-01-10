@@ -10,6 +10,28 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func waitForRateLimitWindow(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+
+	guard := 200 * time.Millisecond
+	if interval < guard*2 {
+		guard = interval / 2
+	}
+	if guard <= 0 || guard >= interval {
+		return
+	}
+
+	for {
+		offset := time.Duration(time.Now().UnixNano()) % interval
+		if interval-offset >= guard {
+			return
+		}
+		time.Sleep(interval - offset)
+	}
+}
+
 func redisAddr() string {
 	if url := os.Getenv("REDIS_URL"); url != "" {
 		return url
@@ -69,6 +91,7 @@ func TestWindowLimiterHonorsLimit(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	waitForRateLimitWindow(time.Second)
 	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
@@ -95,6 +118,7 @@ func TestBucketLimiterOverLimitReturnsRetry(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	waitForRateLimitWindow(time.Second)
 	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
@@ -118,6 +142,7 @@ func TestPointsLimiterRefills(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	waitForRateLimitWindow(200 * time.Millisecond)
 	if wait, err := l.AcquirePoints(ctx, 2); err != nil || wait != 0 {
 		t.Fatalf("acquire cost2 unexpected: wait=%v err=%v", wait, err)
 	}
@@ -146,6 +171,7 @@ func TestLeakyLimiterDrains(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	waitForRateLimitWindow(200 * time.Millisecond)
 	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}

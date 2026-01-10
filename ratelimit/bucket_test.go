@@ -41,19 +41,25 @@ func flushKeys(t *testing.T, client *redis.Client, pattern string) {
 	}
 }
 
-func waitForBucketWindow(interval time.Duration) {
+func waitForRateLimitWindow(interval time.Duration) {
 	if interval <= 0 {
 		return
 	}
-	now := time.Now()
-	start := now.Truncate(interval)
-	elapsed := now.Sub(start)
-	if remaining := interval - elapsed; remaining < 500*time.Millisecond {
-		time.Sleep(remaining + 50*time.Millisecond)
+
+	guard := 200 * time.Millisecond
+	if interval < guard*2 {
+		guard = interval / 2
+	}
+	if guard <= 0 || guard >= interval {
 		return
 	}
-	if elapsed < 50*time.Millisecond {
-		time.Sleep(50 * time.Millisecond)
+
+	for {
+		offset := time.Duration(time.Now().UnixNano()) % interval
+		if interval-offset >= guard {
+			return
+		}
+		time.Sleep(interval - offset)
 	}
 }
 
@@ -70,6 +76,7 @@ func TestBucketLimiter_Basic(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
@@ -103,6 +110,7 @@ func TestBucketLimiter_WithinLimit(t *testing.T) {
 	})
 
 	executed := 0
+	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
@@ -124,7 +132,7 @@ func TestBucketLimiter_Concurrent(t *testing.T) {
 	flushKeys(t, client, "senna:ratelimit:bucket:test-concurrent*")
 
 	interval := 2 * time.Second
-	waitForBucketWindow(interval)
+	waitForRateLimitWindow(interval)
 
 	limiter := ratelimit.Bucket(client, ratelimit.BucketConfig{
 		Name:        "test-concurrent",
@@ -175,6 +183,7 @@ func TestBucketLimiter_WindowReset(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(500 * time.Millisecond)
 	for i := range 3 {
 		_, err := limiter.Acquire(ctx)
 		if err != nil {
@@ -287,6 +296,7 @@ func TestBucketLimiter_DifferentIntervals(t *testing.T) {
 				Policy:      ratelimit.PolicySkip,
 			})
 
+			waitForRateLimitWindow(tt.interval)
 			for i := range 5 {
 				waitTime, err := limiter.Acquire(ctx)
 				if err != nil {
