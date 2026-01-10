@@ -10,6 +10,7 @@ import (
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/batch"
 	"github.com/mgomes/senna/internal/encryption"
+	"github.com/mgomes/senna/internal/iteration"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -647,66 +648,12 @@ func (c *Client) BatchStatus(bid string) *senna.BatchStatus {
 // a minimal cancelled state is created so the cancellation is honored when the job runs.
 func (c *Client) CancelIteration(ctx context.Context, jobID string) error {
 	key := c.keys.IterationState(jobID)
-	ttl := 30 * 24 * time.Hour // Default 30 days
-
-	// Load current state
-	data, err := c.redis.Get(ctx, key).Result()
-	if err != nil {
-		if err.Error() == "redis: nil" {
-			// State doesn't exist yet - create minimal cancelled state
-			state := senna.IterationState{
-				JobID:     jobID,
-				Cancelled: true,
-			}
-			newData, err := json.Marshal(state)
-			if err != nil {
-				return err
-			}
-			return c.redis.Set(ctx, key, string(newData), ttl).Err()
-		}
-		return err
-	}
-
-	var state senna.IterationState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		return err
-	}
-
-	// Mark as cancelled
-	state.Cancelled = true
-
-	// Save back with same TTL
-	newData, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-
-	// Get remaining TTL and use it
-	existingTTL, err := c.redis.TTL(ctx, key).Result()
-	if err == nil && existingTTL > 0 {
-		ttl = existingTTL
-	}
-
-	return c.redis.Set(ctx, key, string(newData), ttl).Err()
+	return iteration.Cancel(ctx, c.redis, key, jobID, iteration.StateTTL)
 }
 
 // IterationStatus returns the current state of an iterable job.
 // Returns nil if no iteration state exists for the job.
 func (c *Client) IterationStatus(ctx context.Context, jobID string) (*senna.IterationState, error) {
 	key := c.keys.IterationState(jobID)
-
-	data, err := c.redis.Get(ctx, key).Result()
-	if err != nil {
-		if err.Error() == "redis: nil" {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var state senna.IterationState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		return nil, err
-	}
-
-	return &state, nil
+	return iteration.Load(ctx, c.redis, key)
 }
