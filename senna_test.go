@@ -10,6 +10,20 @@ import (
 	"github.com/mgomes/senna/ratelimit"
 )
 
+func waitForRateLimitWindow(interval, guard time.Duration) {
+	if interval <= 0 || guard <= 0 || guard >= interval {
+		return
+	}
+
+	for {
+		offset := time.Duration(time.Now().UnixNano()) % interval
+		if interval-offset >= guard {
+			return
+		}
+		time.Sleep(interval - offset)
+	}
+}
+
 func TestWithinLimit_Success(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-within-limit*")
@@ -66,6 +80,7 @@ func TestWithinLimit_OverLimit(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second, 200*time.Millisecond)
 	for range 2 {
 		_ = WithinLimit(limiter, func() error { return nil })
 	}
@@ -167,6 +182,7 @@ func TestRateLimitMiddleware_BlocksOverLimit(t *testing.T) {
 	})
 
 	job := NewJob("test_job", nil)
+	waitForRateLimitWindow(time.Second, 200*time.Millisecond)
 	_ = handler(context.Background(), job)
 
 	err := handler(context.Background(), job)
@@ -229,6 +245,7 @@ func TestRateLimitMiddlewareWithReschedule_ReturnsRetryableError(t *testing.T) {
 	})
 
 	job := NewJob("test_job", nil)
+	waitForRateLimitWindow(time.Second, 200*time.Millisecond)
 	_ = handler(context.Background(), job)
 
 	err := handler(context.Background(), job)
@@ -263,6 +280,7 @@ func TestRateLimitMiddleware_ConcurrentAccess(t *testing.T) {
 	})
 
 	done := make(chan struct{})
+	waitForRateLimitWindow(time.Second, 200*time.Millisecond)
 	for range 20 {
 		go func() {
 			job := NewJob("test_job", nil)
