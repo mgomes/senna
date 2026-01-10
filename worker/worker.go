@@ -101,7 +101,7 @@ func (w *Worker) Redis() *redis.Client {
 
 func (w *Worker) Register(jobType string, handler senna.Handler, opts ...JobOption) {
 	jobOpts := &JobOptions{
-		MaxRetries:   25,
+		MaxRetries:   senna.DefaultRetryCount,
 		RetryBackoff: senna.DefaultBackoff(),
 	}
 	for _, opt := range opts {

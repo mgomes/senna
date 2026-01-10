@@ -83,7 +83,7 @@ func WithIterableRateLimiter(limiter ratelimit.Limiter) IterableJobOption {
 func (w *Worker) RegisterIterable(jobType string, handler senna.IterableHandler, opts ...IterableJobOption) {
 	options := &IterableJobOptions{
 		CursorSaveInterval: defaultCursorSaveInterval,
-		MaxRetries:         25,
+		MaxRetries:         senna.DefaultRetryCount,
 		RetryBackoff:       senna.DefaultBackoff(),
 	}
 	for _, opt := range opts {
