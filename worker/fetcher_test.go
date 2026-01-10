@@ -40,6 +40,11 @@ func flushTestKeys(t *testing.T, client *redis.Client, pattern string) {
 	}
 }
 
+func selectTestQueue(ctx context.Context, f *fetcher, workerID string) string {
+	processable, totalWeight := f.processableQueues(ctx, workerID)
+	return selectProcessableQueue(processable, totalWeight)
+}
+
 func TestFetcher_SelectQueue_SingleQueue(t *testing.T) {
 	client := newTestRedisClient(t)
 	k := keys.New("test-fetcher")
@@ -48,8 +53,9 @@ func TestFetcher_SelectQueue_SingleQueue(t *testing.T) {
 		{Name: "default", Priority: 1},
 	}, 100*time.Millisecond, false)
 
+	ctx := context.Background()
 	for range 10 {
-		queue := f.selectQueueWeighted()
+		queue := selectTestQueue(ctx, f, "worker-1")
 		if queue != "default" {
 			t.Errorf("expected 'default', got '%s'", queue)
 		}
@@ -68,9 +74,10 @@ func TestFetcher_SelectQueue_MultipleQueues(t *testing.T) {
 
 	counts := make(map[string]int)
 	iterations := 10000
+	ctx := context.Background()
 
 	for i := 0; i < iterations; i++ {
-		queue := f.selectQueueWeighted()
+		queue := selectTestQueue(ctx, f, "worker-1")
 		counts[queue]++
 	}
 
@@ -98,8 +105,9 @@ func TestFetcher_SelectQueue_PausedQueues(t *testing.T) {
 		{Name: "default", Priority: 5},
 	}, 100*time.Millisecond, false)
 
+	ctx := context.Background()
 	for range 100 {
-		queue := f.selectQueueWeighted()
+		queue := selectTestQueue(ctx, f, "worker-1")
 		if queue != "default" {
 			t.Errorf("expected 'default' (critical is paused), got '%s'", queue)
 		}
@@ -115,7 +123,7 @@ func TestFetcher_SelectQueue_AllPaused(t *testing.T) {
 		{Name: "default", Priority: 5, Paused: true},
 	}, 100*time.Millisecond, false)
 
-	queue := f.selectQueueWeighted()
+	queue := selectTestQueue(context.Background(), f, "worker-1")
 	if queue != "" {
 		t.Errorf("expected empty string when all paused, got '%s'", queue)
 	}
@@ -129,7 +137,7 @@ func TestFetcher_SelectQueue_ZeroPriority(t *testing.T) {
 		{Name: "default", Priority: 0},
 	}, 100*time.Millisecond, false)
 
-	queue := f.selectQueueWeighted()
+	queue := selectTestQueue(context.Background(), f, "worker-1")
 	if queue != "default" {
 		t.Errorf("expected 'default' (priority normalized to 1), got '%s'", queue)
 	}
