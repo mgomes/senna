@@ -21,8 +21,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const batchTTL = 30 * 24 * time.Hour
-
 type Worker struct {
 	id         string
 	redis      *redis.Client
@@ -425,7 +423,7 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		return
 	}
 
-	batch.EnqueueCallbacks(ctx, w.redis, w.keys, job.BatchID, &callbackResult, "default", batchTTL)
+	batch.EnqueueCallbacks(ctx, w.redis, w.keys, job.BatchID, &callbackResult, "default", batch.BatchTTL)
 
 	parentResultType, ok := batch.ParentResultType(&callbackResult)
 	if ok {

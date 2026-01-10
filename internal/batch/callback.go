@@ -11,6 +11,8 @@ import (
 	"github.com/mgomes/senna/internal/keys"
 )
 
+const BatchTTL = 30 * 24 * time.Hour
+
 // EnqueueCallback creates and enqueues a batch callback job.
 func EnqueueCallback(ctx context.Context, redisClient *redis.Client, k *keys.Keys,
 	jobType, batchID, parentID string, options map[string]any, queue string, ttl time.Duration) {

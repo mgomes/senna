@@ -14,8 +14,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const batchTTL = 30 * 24 * time.Hour
-
 type Client struct {
 	redis     *redis.Client
 	keys      *keys.Keys
@@ -413,12 +411,12 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, b *Batch, queue string) {
 	// OnComplete always fires for empty batches
 	if b.OnComplete != nil {
-		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnComplete.JobType, b.ID, b.ParentID, b.OnComplete.Options, queue, batchTTL)
+		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnComplete.JobType, b.ID, b.ParentID, b.OnComplete.Options, queue, batch.BatchTTL)
 	}
 
 	// OnSuccess fires for empty batches (no jobs = no failures)
 	if b.OnSuccess != nil {
-		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnSuccess.JobType, b.ID, b.ParentID, b.OnSuccess.Options, queue, batchTTL)
+		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnSuccess.JobType, b.ID, b.ParentID, b.OnSuccess.Options, queue, batch.BatchTTL)
 	}
 }
 
@@ -448,7 +446,7 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 		return
 	}
 
-	callbackQueue := batch.EnqueueCallbacks(ctx, c.redis, c.keys, parentID, &result, queue, batchTTL)
+	callbackQueue := batch.EnqueueCallbacks(ctx, c.redis, c.keys, parentID, &result, queue, batch.BatchTTL)
 
 	grandparentResult, ok := batch.ParentResultType(&result)
 	if ok {
@@ -563,7 +561,7 @@ func (c *Client) storeBatchState(ctx context.Context, batchID string, state *sen
 	}
 
 	pipe := c.redis.Pipeline()
-	pipe.Set(ctx, c.keys.Batch(batchID), string(batchData), batchTTL)
+	pipe.Set(ctx, c.keys.Batch(batchID), string(batchData), batch.BatchTTL)
 	pipe.SAdd(ctx, c.keys.Batches(), batchID)
 
 	_, err = pipe.Exec(ctx)
@@ -615,7 +613,7 @@ func (c *Client) enqueueBatchJobs(ctx context.Context, b *Batch, jobs []marshale
 		pipe.LPush(ctx, c.keys.Queue(mj.job.Queue), string(mj.data))
 		pipe.SAdd(ctx, c.keys.BatchJobs(b.ID), mj.job.ID)
 	}
-	pipe.Expire(ctx, c.keys.BatchJobs(b.ID), batchTTL)
+	pipe.Expire(ctx, c.keys.BatchJobs(b.ID), batch.BatchTTL)
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		// Rollback: undo parent link and clean up batch state
