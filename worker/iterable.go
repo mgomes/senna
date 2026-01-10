@@ -2,19 +2,16 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/iteration"
 	"github.com/mgomes/senna/ratelimit"
 )
 
-const (
-	defaultCursorSaveInterval = 5 * time.Second
-	iterationStateTTL         = 30 * 24 * time.Hour // 30 days
-)
+const defaultCursorSaveInterval = 5 * time.Second
 
 // IterableJobOptions configures iterable job behavior.
 type IterableJobOptions struct {
@@ -154,7 +151,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 	for iter.Next(ctx) {
 		// Check for cancellation (marked in Redis)
-		if state.Cancelled || w.checkIterationCancelled(ctx, stateKey) {
+		if state.Cancelled || w.iterationCancelled(ctx, stateKey) {
 			w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
 			return nil // Ack job (success), no on_complete
 		}
@@ -233,7 +230,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	}
 
 	// Check for late cancellation before completing
-	if w.checkIterationCancelled(ctx, stateKey) {
+	if w.iterationCancelled(ctx, stateKey) {
 		w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
 		return nil // Ack job (success), no OnComplete
 	}
@@ -260,39 +257,19 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 // loadIterationState loads the iteration state from Redis.
 // Returns nil if no state exists.
 func (w *Worker) loadIterationState(ctx context.Context, key string) (*senna.IterationState, error) {
-	data, err := w.redis.Get(ctx, key).Result()
-	if err != nil {
-		if err.Error() == "redis: nil" {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var state senna.IterationState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		return nil, err
-	}
-
-	return &state, nil
+	return iteration.Load(ctx, w.redis, key)
 }
 
-// saveIterationState saves the iteration state to Redis with TTL.
 func (w *Worker) saveIterationState(ctx context.Context, key string, state *senna.IterationState) error {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-
-	return w.redis.Set(ctx, key, string(data), iterationStateTTL).Err()
+	return iteration.Save(ctx, w.redis, key, state, iteration.StateTTL)
 }
 
-// checkIterationCancelled checks if the iteration has been cancelled.
-func (w *Worker) checkIterationCancelled(ctx context.Context, key string) bool {
-	state, err := w.loadIterationState(ctx, key)
-	if err != nil || state == nil {
+func (w *Worker) iterationCancelled(ctx context.Context, key string) bool {
+	cancelled, err := iteration.IsCancelled(ctx, w.redis, key)
+	if err != nil {
 		return false
 	}
-	return state.Cancelled
+	return cancelled
 }
 
 // updateIterationTiming updates the state's TotalTime from runStart and returns the new runStart.
@@ -303,7 +280,7 @@ func (w *Worker) updateIterationTiming(state *senna.IterationState, runStart tim
 
 // preserveCancellation checks if iteration was cancelled and sets the flag.
 func (w *Worker) preserveCancellation(ctx context.Context, state *senna.IterationState, stateKey string) {
-	if w.checkIterationCancelled(ctx, stateKey) {
+	if w.iterationCancelled(ctx, stateKey) {
 		state.Cancelled = true
 	}
 }
