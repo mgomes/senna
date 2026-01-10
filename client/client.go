@@ -448,23 +448,10 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 		return
 	}
 
-	callbackQueue := result.CallbackQueue
-	if callbackQueue == "" {
-		callbackQueue = queue
-	}
+	callbackQueue := batch.EnqueueCallbacks(ctx, c.redis, c.keys, parentID, &result, queue, batchTTL)
 
-	for _, cb := range result.Callbacks {
-		batch.EnqueueCallback(ctx, c.redis, c.keys, cb.JobType, parentID, result.ParentID, cb.Options, callbackQueue, batchTTL)
-	}
-
-	if result.CompletedNow && result.ParentID != "" {
-		// Determine the result to propagate to grandparent
-		grandparentResult := "success"
-		if result.Dead {
-			grandparentResult = "death"
-		} else if result.Invalidated {
-			grandparentResult = "invalidated"
-		}
+	grandparentResult, ok := batch.ParentResultType(&result)
+	if ok {
 		c.propagateBatchCompletion(ctx, parentID, result.ParentID, grandparentResult, callbackQueue)
 	}
 }

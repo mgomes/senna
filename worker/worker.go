@@ -392,6 +392,17 @@ const (
 	batchResultInvalidated batchResult = "invalidated"
 )
 
+func batchResultFromString(resultType string) batchResult {
+	switch resultType {
+	case string(batchResultDeath):
+		return batchResultDeath
+	case string(batchResultInvalidated):
+		return batchResultInvalidated
+	default:
+		return batchResultSuccess
+	}
+}
+
 func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batchResult) {
 	if job.BatchID == "" {
 		return
@@ -414,28 +425,15 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		return
 	}
 
-	// Enqueue any callbacks that need to fire
-	queue := callbackResult.CallbackQueue
-	if queue == "" {
-		queue = "default"
-	}
+	batch.EnqueueCallbacks(ctx, w.redis, w.keys, job.BatchID, &callbackResult, "default", batchTTL)
 
-	for _, cb := range callbackResult.Callbacks {
-		batch.EnqueueCallback(ctx, w.redis, w.keys, cb.JobType, job.BatchID, callbackResult.ParentID, cb.Options, queue, batchTTL)
-	}
-
-	if callbackResult.CompletedNow && callbackResult.ParentID != "" {
-		parentResult := batchResultSuccess
-		if callbackResult.Dead {
-			parentResult = batchResultDeath
-		} else if callbackResult.Invalidated {
-			parentResult = batchResultInvalidated
-		}
+	parentResultType, ok := batch.ParentResultType(&callbackResult)
+	if ok {
 		parentJob := &senna.Job{
 			ID:      job.BatchID,
 			BatchID: callbackResult.ParentID,
 		}
-		w.updateBatchProgress(ctx, parentJob, parentResult)
+		w.updateBatchProgress(ctx, parentJob, batchResultFromString(parentResultType))
 	}
 }
 

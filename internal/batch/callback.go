@@ -33,3 +33,32 @@ func EnqueueCallback(ctx context.Context, redisClient *redis.Client, k *keys.Key
 	redisClient.Expire(ctx, k.BatchCallbacks(batchID), ttl)
 	redisClient.LPush(ctx, k.Queue(queue), string(data))
 }
+
+func CallbackQueue(result *CompleteResult, fallback string) string {
+	if result.CallbackQueue != "" {
+		return result.CallbackQueue
+	}
+	return fallback
+}
+
+func EnqueueCallbacks(ctx context.Context, redisClient *redis.Client, k *keys.Keys,
+	batchID string, result *CompleteResult, fallbackQueue string, ttl time.Duration) string {
+	queue := CallbackQueue(result, fallbackQueue)
+	for _, cb := range result.Callbacks {
+		EnqueueCallback(ctx, redisClient, k, cb.JobType, batchID, result.ParentID, cb.Options, queue, ttl)
+	}
+	return queue
+}
+
+func ParentResultType(result *CompleteResult) (string, bool) {
+	if !result.CompletedNow || result.ParentID == "" {
+		return "", false
+	}
+	if result.Dead {
+		return "death", true
+	}
+	if result.Invalidated {
+		return "invalidated", true
+	}
+	return "success", true
+}
