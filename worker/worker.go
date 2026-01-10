@@ -265,30 +265,7 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	}
 
 	opts, err := w.handlers.process(ctx, job)
-
-	if err == nil {
-		w.completeJob(ctx, job)
-		return
-	}
-
-	var retryErr *senna.RetryableError
-	if errors.As(err, &retryErr) {
-		w.retryJob(ctx, job, retryErr.RetryIn)
-		return
-	}
-
-	var maxRetriesErr *senna.MaxRetriesExceededError
-	if errors.As(err, &maxRetriesErr) {
-		w.killJob(ctx, job, maxRetriesErr)
-		return
-	}
-
-	backoff, shouldRetry := w.calculateRetryBackoff(job, opts)
-	if shouldRetry {
-		w.retryJob(ctx, job, backoff)
-	} else {
-		w.killJob(ctx, job, err)
-	}
+	w.handleJobResult(ctx, job, err, opts, nil)
 }
 
 func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
@@ -329,6 +306,54 @@ func (w *Worker) calculateRetryBackoff(job *senna.Job, opts *JobOptions) (time.D
 	return backoffFn(job.RetryCount), job.RetryCount < maxRetries
 }
 
+func iterableRetryOptions(job *senna.Job, opts *IterableJobOptions) *JobOptions {
+	iterOpts := &JobOptions{
+		MaxRetries:   job.Retry,
+		RetryBackoff: senna.DefaultBackoff(),
+	}
+	if opts != nil {
+		if opts.RetryBackoff != nil {
+			iterOpts.RetryBackoff = opts.RetryBackoff
+		}
+		if opts.MaxRetries < iterOpts.MaxRetries {
+			iterOpts.MaxRetries = opts.MaxRetries
+		}
+	}
+	return iterOpts
+}
+
+func (w *Worker) handleJobResult(ctx context.Context, job *senna.Job, err error, opts *JobOptions, onInterrupted func(context.Context)) {
+	if err == nil {
+		w.completeJob(ctx, job)
+		return
+	}
+
+	var interruptedErr *senna.InterruptedError
+	if onInterrupted != nil && errors.As(err, &interruptedErr) {
+		onInterrupted(context.WithoutCancel(ctx))
+		return
+	}
+
+	var retryErr *senna.RetryableError
+	if errors.As(err, &retryErr) {
+		w.retryJob(ctx, job, retryErr.RetryIn)
+		return
+	}
+
+	var maxRetriesErr *senna.MaxRetriesExceededError
+	if errors.As(err, &maxRetriesErr) {
+		w.killJob(ctx, job, maxRetriesErr)
+		return
+	}
+
+	backoff, shouldRetry := w.calculateRetryBackoff(job, opts)
+	if shouldRetry {
+		w.retryJob(ctx, job, backoff)
+	} else {
+		w.killJob(ctx, job, err)
+	}
+}
+
 // processIterableJob handles iterable jobs with cursor tracking and interruption support.
 func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler senna.IterableHandler, opts *IterableJobOptions) {
 	now := time.Now()
@@ -349,52 +374,12 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 	}
 
 	err := iterHandler(ctx, job)
-
-	if err == nil {
-		w.completeJob(ctx, job)
-		return
-	}
-
-	// Handle InterruptedError - requeue same job, no retry increment, no batch failure
-	var interruptedErr *senna.InterruptedError
-	if errors.As(err, &interruptedErr) {
-		if requeueErr := w.requeue(context.WithoutCancel(ctx), job); requeueErr != nil {
-			slog.ErrorContext(ctx, "failed to requeue interrupted job", "error", requeueErr, "job_id", job.ID)
+	retryOpts := iterableRetryOptions(job, opts)
+	w.handleJobResult(ctx, job, err, retryOpts, func(interruptCtx context.Context) {
+		if requeueErr := w.requeue(interruptCtx, job); requeueErr != nil {
+			slog.ErrorContext(interruptCtx, "failed to requeue interrupted job", "error", requeueErr, "job_id", job.ID)
 		}
-		return
-	}
-
-	var retryErr *senna.RetryableError
-	if errors.As(err, &retryErr) {
-		w.retryJob(ctx, job, retryErr.RetryIn)
-		return
-	}
-
-	var maxRetriesErr *senna.MaxRetriesExceededError
-	if errors.As(err, &maxRetriesErr) {
-		w.killJob(ctx, job, maxRetriesErr)
-		return
-	}
-
-	// Standard error - use backoff retry
-	iterOpts := &JobOptions{
-		MaxRetries:   job.Retry,
-		RetryBackoff: senna.DefaultBackoff(),
-	}
-	if opts != nil {
-		if opts.RetryBackoff != nil {
-			iterOpts.RetryBackoff = opts.RetryBackoff
-		}
-		if opts.MaxRetries < iterOpts.MaxRetries {
-			iterOpts.MaxRetries = opts.MaxRetries
-		}
-	}
-	backoff, shouldRetry := w.calculateRetryBackoff(job, iterOpts)
-	if shouldRetry {
-		w.retryJob(ctx, job, backoff)
-	} else {
-		w.killJob(ctx, job, err)
-	}
+	})
 }
 
 // batchResult represents the result of a job completion.
