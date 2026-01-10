@@ -561,15 +561,14 @@ func (w *Worker) scheduler(ctx context.Context) {
 	}
 }
 
-func (w *Worker) enqueueScheduled(ctx context.Context) {
+func (w *Worker) enqueueFromZSet(ctx context.Context, sourceKey string) {
 	now := fmt.Sprintf("%d", time.Now().Unix())
 	queuePrefix := w.keys.Queue("")
 
 	for {
-		// Atomically pop due jobs and push to their queues
 		result, err := enqueueScheduledScript.Run(
 			ctx, w.redis,
-			[]string{w.keys.Scheduled(), w.keys.Queues()},
+			[]string{sourceKey, w.keys.Queues()},
 			now, 100, queuePrefix,
 		)
 		if err != nil {
@@ -583,26 +582,12 @@ func (w *Worker) enqueueScheduled(ctx context.Context) {
 	}
 }
 
+func (w *Worker) enqueueScheduled(ctx context.Context) {
+	w.enqueueFromZSet(ctx, w.keys.Scheduled())
+}
+
 func (w *Worker) enqueueRetries(ctx context.Context) {
-	now := fmt.Sprintf("%d", time.Now().Unix())
-	queuePrefix := w.keys.Queue("")
-
-	for {
-		// Atomically pop due retries and push to their queues
-		result, err := enqueueScheduledScript.Run(
-			ctx, w.redis,
-			[]string{w.keys.Retry(), w.keys.Queues()},
-			now, 100, queuePrefix,
-		)
-		if err != nil {
-			return
-		}
-
-		count, ok := result.(int64)
-		if !ok || count == 0 {
-			return
-		}
-	}
+	w.enqueueFromZSet(ctx, w.keys.Retry())
 }
 
 func (w *Worker) reaper(ctx context.Context) {
