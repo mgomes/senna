@@ -24,6 +24,7 @@ func TestPointsLimiter_Basic(t *testing.T) {
 	})
 
 	// Exhaust all points (with extra to account for refilling during acquires)
+	waitForRateLimitWindow(time.Second)
 	for i := range 12 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
@@ -81,6 +82,7 @@ func TestPointsLimiter_VariableCost(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	waitTime, err := limiter.AcquirePoints(ctx, 50)
 	if err != nil {
 		t.Fatalf("acquire 50 failed: %v", err)
@@ -117,6 +119,7 @@ func TestPointsLimiter_WithinLimitCost(t *testing.T) {
 	})
 
 	executed := 0
+	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
 		err := limiter.WithinLimitCost(ctx, 30, func() error {
 			executed++
@@ -145,6 +148,7 @@ func TestPointsLimiter_EstimateAndAdjust(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	err := limiter.WithinLimitEstimate(ctx, 50, func(h *ratelimit.PointsHandle) error {
 		return h.PointsUsed(20)
 	})
@@ -175,6 +179,7 @@ func TestPointsLimiter_Refill(t *testing.T) {
 	})
 
 	// Exhaust all points (with a few extra to account for refilling during acquires)
+	waitForRateLimitWindow(200 * time.Millisecond)
 	for range 12 {
 		_, _ = limiter.Acquire(ctx)
 	}
@@ -209,6 +214,7 @@ func TestPointsLimiter_AvailablePoints(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	available, err := limiter.AvailablePoints(ctx)
 	if err != nil {
 		t.Fatalf("available check failed: %v", err)
@@ -241,6 +247,7 @@ func TestPointsLimiter_Concurrent(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	var wg sync.WaitGroup
 	var totalPoints atomic.Int32
 

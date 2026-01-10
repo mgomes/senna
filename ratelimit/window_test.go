@@ -23,6 +23,7 @@ func TestWindowLimiter_Basic(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
@@ -55,6 +56,7 @@ func TestWindowLimiter_SlidingBehavior(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(500 * time.Millisecond)
 	for i := range 3 {
 		_, err := limiter.Acquire(ctx)
 		if err != nil {
@@ -87,6 +89,7 @@ func TestWindowLimiter_Concurrent(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
 
@@ -124,6 +127,7 @@ func TestWindowLimiter_WithinLimit(t *testing.T) {
 	})
 
 	executed := 0
+	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
 		err := limiter.WithinLimit(ctx, func() error {
 			executed++
@@ -152,6 +156,7 @@ func TestWindowLimiter_UniqueMembers(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	waitForRateLimitWindow(time.Second)
 	for i := range 100 {
 		waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
@@ -181,6 +186,7 @@ func TestWindowLimiter_ContextCancellation(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	waitForRateLimitWindow(time.Second)
 	_, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("first acquire failed: %v", err)
