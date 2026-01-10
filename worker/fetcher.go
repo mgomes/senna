@@ -530,18 +530,7 @@ func (f *fetcher) blockingFetchFromQueue(ctx context.Context, workerID, queueNam
 }
 
 func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) error {
-	inFlightKey := f.keys.InFlight(workerID)
-
-	payload := job.Raw()
-	if payload == "" {
-		data, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-		payload = string(data)
-	}
-
-	if err := f.client.LRem(ctx, inFlightKey, 1, payload).Err(); err != nil {
+	if err := f.removeFromInFlight(ctx, workerID, job); err != nil {
 		return err
 	}
 
@@ -553,18 +542,7 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) erro
 }
 
 func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, retryIn time.Duration) error {
-	inFlightKey := f.keys.InFlight(workerID)
-
-	payload := job.Raw()
-	if payload == "" {
-		data, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-		payload = string(data)
-	}
-
-	if err := f.client.LRem(ctx, inFlightKey, 1, payload).Err(); err != nil {
+	if err := f.removeFromInFlight(ctx, workerID, job); err != nil {
 		return err
 	}
 
@@ -585,18 +563,7 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, ret
 }
 
 func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Job) error {
-	inFlightKey := f.keys.InFlight(workerID)
-
-	payload := job.Raw()
-	if payload == "" {
-		data, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-		payload = string(data)
-	}
-
-	if err := f.client.LRem(ctx, inFlightKey, 1, payload).Err(); err != nil {
+	if err := f.removeFromInFlight(ctx, workerID, job); err != nil {
 		return err
 	}
 
@@ -615,4 +582,25 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 		Score:  float64(now.Unix()),
 		Member: string(newData),
 	}).Err()
+}
+
+func (f *fetcher) removeFromInFlight(ctx context.Context, workerID string, job *senna.Job) error {
+	payload, err := jobPayload(job)
+	if err != nil {
+		return err
+	}
+	return f.client.LRem(ctx, f.keys.InFlight(workerID), 1, payload).Err()
+}
+
+func jobPayload(job *senna.Job) (string, error) {
+	payload := job.Raw()
+	if payload != "" {
+		return payload, nil
+	}
+
+	data, err := job.Marshal()
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }

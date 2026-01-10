@@ -351,16 +351,7 @@ func (w *Worker) handleIterationInterrupt(ctx context.Context, state *senna.Iter
 func (w *Worker) requeue(ctx context.Context, job *senna.Job) error {
 	// Remove from in-flight without deleting unique key
 	// (Ack would delete the unique key, breaking uniqueness for interrupted jobs)
-	inFlightKey := w.keys.InFlight(w.id)
-	payload := job.Raw()
-	if payload == "" {
-		data, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-		payload = string(data)
-	}
-	if err := w.redis.LRem(ctx, inFlightKey, 1, payload).Err(); err != nil {
+	if err := w.fetcher.removeFromInFlight(ctx, w.id, job); err != nil {
 		slog.ErrorContext(ctx, "failed to remove job from in-flight", "error", err, "job_id", job.ID)
 	}
 
