@@ -20,7 +20,6 @@ type fetcher struct {
 	keys           *keys.Keys
 	queues         []senna.QueueConfig
 	pollInterval   time.Duration
-	totalWeight    int
 	strictPriority bool
 	sequentialSema map[string]chan struct{} // per-queue semaphore for local coordination
 	sequentialMu   sync.RWMutex
@@ -28,13 +27,9 @@ type fetcher struct {
 }
 
 func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, pollInterval time.Duration, strictPriority bool) *fetcher {
-	var totalWeight int
 	for i := range queues {
 		if queues[i].Priority < 1 {
 			queues[i].Priority = 1
-		}
-		if !queues[i].Paused {
-			totalWeight += queues[i].Priority
 		}
 	}
 
@@ -62,7 +57,6 @@ func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, 
 		keys:           k,
 		queues:         queues,
 		pollInterval:   pollInterval,
-		totalWeight:    totalWeight,
 		strictPriority: strictPriority,
 		sequentialSema: sema,
 		sequentialHeld: make(map[string]struct{}),
@@ -155,28 +149,6 @@ func (f *fetcher) canProcessQueue(ctx context.Context, workerID string, q senna.
 	return holder == workerID
 }
 
-// selectQueueWeighted uses weighted random selection
-func (f *fetcher) selectQueueWeighted() string {
-	if f.totalWeight == 0 {
-		return ""
-	}
-	if len(f.queues) == 1 && !f.queues[0].Paused {
-		return f.queues[0].Name
-	}
-
-	r := rand.Intn(f.totalWeight)
-	for _, q := range f.queues {
-		if q.Paused {
-			continue
-		}
-		r -= q.Priority
-		if r < 0 {
-			return q.Name
-		}
-	}
-	return ""
-}
-
 func (f *fetcher) Fetch(ctx context.Context, workerID string) (*senna.Job, error) {
 	if f.strictPriority {
 		return f.fetchStrict(ctx, workerID)
@@ -184,9 +156,7 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*senna.Job, error
 	return f.fetchWeighted(ctx, workerID)
 }
 
-// fetchWeighted selects a queue using weighted random and tries to fetch from it
-func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Job, error) {
-	// Build list of queues we can currently process
+func (f *fetcher) processableQueues(ctx context.Context, workerID string) ([]senna.QueueConfig, int) {
 	processable := make([]senna.QueueConfig, 0, len(f.queues))
 	var totalWeight int
 	for _, q := range f.queues {
@@ -195,6 +165,13 @@ func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Jo
 			totalWeight += q.Priority
 		}
 	}
+	return processable, totalWeight
+}
+
+// fetchWeighted selects a queue using weighted random and tries to fetch from it
+func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Job, error) {
+	// Build list of queues we can currently process
+	processable, totalWeight := f.processableQueues(ctx, workerID)
 
 	if len(processable) == 0 {
 		return nil, nil
@@ -367,14 +344,7 @@ func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, timeout ti
 func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, timeout time.Duration) (*senna.Job, error) {
 	// Build list of queues we can currently process
 	// (non-paused, and for sequential queues, we hold the lock)
-	processable := make([]senna.QueueConfig, 0, len(f.queues))
-	var totalWeight int
-	for _, q := range f.queues {
-		if f.canProcessQueue(ctx, workerID, q) {
-			processable = append(processable, q)
-			totalWeight += q.Priority
-		}
-	}
+	processable, totalWeight := f.processableQueues(ctx, workerID)
 
 	if len(processable) == 0 {
 		select {
@@ -453,12 +423,7 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, time
 	// Build list of queues we can currently process
 	// (non-paused, and for sequential queues, we hold the lock)
 	// Note: f.queues is already sorted by priority descending for strict mode
-	processable := make([]senna.QueueConfig, 0, len(f.queues))
-	for _, q := range f.queues {
-		if f.canProcessQueue(ctx, workerID, q) {
-			processable = append(processable, q)
-		}
-	}
+	processable, _ := f.processableQueues(ctx, workerID)
 
 	if len(processable) == 0 {
 		select {
