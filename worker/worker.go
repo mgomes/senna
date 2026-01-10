@@ -367,7 +367,7 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 		iterHandler = senna.TimeoutMiddleware(opts.Timeout)(iterHandler)
 	}
 	if opts != nil && opts.RateLimiter != nil {
-		iterHandler = rateLimitMiddlewareWithReschedule(opts.RateLimiter)(iterHandler)
+		iterHandler = senna.RateLimitMiddlewareWithReschedule(opts.RateLimiter)(iterHandler)
 	}
 	if middleware := w.handlers.middlewareChain(); len(middleware) > 0 {
 		iterHandler = senna.Chain(middleware...)(iterHandler)

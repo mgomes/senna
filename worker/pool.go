@@ -120,7 +120,7 @@ func (r *handlerRegistry) process(ctx context.Context, job *senna.Job) (*JobOpti
 		handler = senna.TimeoutMiddleware(entry.options.Timeout)(handler)
 	}
 	if entry.options != nil && entry.options.RateLimiter != nil {
-		handler = rateLimitMiddlewareWithReschedule(entry.options.RateLimiter)(handler)
+		handler = senna.RateLimitMiddlewareWithReschedule(entry.options.RateLimiter)(handler)
 	}
 
 	if len(middleware) > 0 {
@@ -140,24 +140,4 @@ func (r *handlerRegistry) process(ctx context.Context, job *senna.Job) (*JobOpti
 	job.ProcessedAt = &now
 
 	return entry.options, handler(ctx, job)
-}
-
-func rateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) senna.Middleware {
-	return func(next senna.Handler) senna.Handler {
-		return func(ctx context.Context, job *senna.Job) error {
-			waitTime, err := limiter.Acquire(ctx)
-			if err != nil {
-				return err
-			}
-			if waitTime > 0 {
-				return &senna.RetryableError{
-					Job:     job,
-					Cause:   &ratelimit.OverLimitError{LimiterName: limiter.Name(), LimiterType: "unknown", RetryIn: waitTime},
-					RetryIn: waitTime,
-				}
-			}
-			defer func() { _ = limiter.Release(ctx) }()
-			return next(ctx, job)
-		}
-	}
 }
