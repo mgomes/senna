@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -40,34 +41,32 @@ type CallbackInfo struct {
 
 // BatchStatus provides methods to query batch state.
 type BatchStatus struct {
-	redis     redis.Cmdable
-	namespace string
-	bid       string
-	state     *BatchState
+	redis redis.Cmdable
+	keys  *keys.Keys
+	bid   string
+	state *BatchState
 }
 
 // NewBatchStatus creates a BatchStatus for querying a batch's state.
 func NewBatchStatus(redis redis.Cmdable, namespace, bid string) *BatchStatus {
-	if namespace == "" {
-		namespace = "senna"
-	}
+	k := keys.New(namespace)
 	return &BatchStatus{
-		redis:     redis,
-		namespace: namespace,
-		bid:       bid,
+		redis: redis,
+		keys:  k,
+		bid:   bid,
 	}
 }
 
 func (bs *BatchStatus) batchKey() string {
-	return bs.namespace + ":batch:" + bs.bid
+	return bs.keys.Batch(bs.bid)
 }
 
 func (bs *BatchStatus) batchJobsKey() string {
-	return bs.namespace + ":batch:" + bs.bid + ":jobs"
+	return bs.keys.BatchJobs(bs.bid)
 }
 
 func (bs *BatchStatus) batchFailedKey() string {
-	return bs.namespace + ":batch:" + bs.bid + ":failed"
+	return bs.keys.BatchFailed(bs.bid)
 }
 
 // Refresh reloads the batch state from Redis.
@@ -209,47 +208,54 @@ func (bs *BatchStatus) Delete(ctx context.Context) error {
 		bs.batchFailedKey(),
 	}
 	// Also remove from the batches set
-	bs.redis.SRem(ctx, bs.namespace+":batches", bs.bid)
-	bs.redis.SRem(ctx, bs.namespace+":batches:dead", bs.bid)
+	bs.redis.SRem(ctx, bs.keys.Batches(), bs.bid)
+	bs.redis.SRem(ctx, bs.keys.DeadBatches(), bs.bid)
 	return bs.redis.Del(ctx, keys...).Err()
+}
+
+func loadBatchStatus(ctx context.Context, client redis.Cmdable, k *keys.Keys, setKey, bid string) (*BatchStatus, error) {
+	status := NewBatchStatus(client, k.Namespace(), bid)
+	if err := status.Refresh(ctx); err != nil {
+		var notFound *BatchNotFoundError
+		if errors.As(err, &notFound) {
+			client.SRem(ctx, setKey, bid)
+			return nil, nil
+		}
+		return nil, err
+	}
+	return status, nil
 }
 
 // BatchSet provides iteration over all known batches.
 type BatchSet struct {
-	redis     redis.Cmdable
-	namespace string
+	redis redis.Cmdable
+	keys  *keys.Keys
 }
 
 // NewBatchSet creates a new BatchSet for iterating batches.
 func NewBatchSet(redis redis.Cmdable, namespace string) *BatchSet {
-	if namespace == "" {
-		namespace = "senna"
-	}
+	k := keys.New(namespace)
 	return &BatchSet{
-		redis:     redis,
-		namespace: namespace,
+		redis: redis,
+		keys:  k,
 	}
 }
 
 // Each iterates over all batches, calling fn for each.
 // Only returns batches that still have pending jobs.
 func (bs *BatchSet) Each(ctx context.Context, fn func(*BatchStatus) error) error {
-	bids, err := bs.redis.SMembers(ctx, bs.namespace+":batches").Result()
+	bids, err := bs.redis.SMembers(ctx, bs.keys.Batches()).Result()
 	if err != nil {
 		return err
 	}
 
 	for _, bid := range bids {
-		status := NewBatchStatus(bs.redis, bs.namespace, bid)
-		if err := status.Refresh(ctx); err != nil {
-			// Batch may have expired or been deleted
-			var notFound *BatchNotFoundError
-			if errors.As(err, &notFound) {
-				// Remove stale entry
-				bs.redis.SRem(ctx, bs.namespace+":batches", bid)
-				continue
-			}
+		status, err := loadBatchStatus(ctx, bs.redis, bs.keys, bs.keys.Batches(), bid)
+		if err != nil {
 			return err
+		}
+		if status == nil {
+			continue
 		}
 
 		// Skip completed batches (they linger for status queries)
@@ -267,42 +273,38 @@ func (bs *BatchSet) Each(ctx context.Context, fn func(*BatchStatus) error) error
 
 // Size returns the number of batches (may include completed ones).
 func (bs *BatchSet) Size(ctx context.Context) (int64, error) {
-	return bs.redis.SCard(ctx, bs.namespace+":batches").Result()
+	return bs.redis.SCard(ctx, bs.keys.Batches()).Result()
 }
 
 // DeadBatchSet provides iteration over batches that have dead jobs.
 type DeadBatchSet struct {
-	redis     redis.Cmdable
-	namespace string
+	redis redis.Cmdable
+	keys  *keys.Keys
 }
 
 // NewDeadBatchSet creates a new DeadBatchSet for iterating dead batches.
 func NewDeadBatchSet(redis redis.Cmdable, namespace string) *DeadBatchSet {
-	if namespace == "" {
-		namespace = "senna"
-	}
+	k := keys.New(namespace)
 	return &DeadBatchSet{
-		redis:     redis,
-		namespace: namespace,
+		redis: redis,
+		keys:  k,
 	}
 }
 
 // Each iterates over all dead batches, calling fn for each.
 func (dbs *DeadBatchSet) Each(ctx context.Context, fn func(*BatchStatus) error) error {
-	bids, err := dbs.redis.SMembers(ctx, dbs.namespace+":batches:dead").Result()
+	bids, err := dbs.redis.SMembers(ctx, dbs.keys.DeadBatches()).Result()
 	if err != nil {
 		return err
 	}
 
 	for _, bid := range bids {
-		status := NewBatchStatus(dbs.redis, dbs.namespace, bid)
-		if err := status.Refresh(ctx); err != nil {
-			var notFound *BatchNotFoundError
-			if errors.As(err, &notFound) {
-				dbs.redis.SRem(ctx, dbs.namespace+":batches:dead", bid)
-				continue
-			}
+		status, err := loadBatchStatus(ctx, dbs.redis, dbs.keys, dbs.keys.DeadBatches(), bid)
+		if err != nil {
 			return err
+		}
+		if status == nil {
+			continue
 		}
 
 		if err := fn(status); err != nil {
@@ -315,5 +317,5 @@ func (dbs *DeadBatchSet) Each(ctx context.Context, fn func(*BatchStatus) error) 
 
 // Size returns the number of dead batches.
 func (dbs *DeadBatchSet) Size(ctx context.Context) (int64, error) {
-	return dbs.redis.SCard(ctx, dbs.namespace+":batches:dead").Result()
+	return dbs.redis.SCard(ctx, dbs.keys.DeadBatches()).Result()
 }

@@ -35,7 +35,7 @@ func NewJob(jobType string, args map[string]any) *Job {
 		Type:       jobType,
 		Queue:      "default",
 		Args:       args,
-		Retry:      25,
+		Retry:      DefaultRetryCount,
 		RetryCount: 0,
 		CreatedAt:  now,
 		EnqueuedAt: now,
