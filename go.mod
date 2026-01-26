@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/redis/go-redis/v9 v9.17.2
+	github.com/redis/go-redis/v9 v9.17.3
 	github.com/robfig/cron/v3 v3.0.1
 )
 
