@@ -2,8 +2,6 @@ module github.com/mgomes/senna
 
 go 1.25.5
 
-toolchain go1.26.1
-
 require (
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.17.2
