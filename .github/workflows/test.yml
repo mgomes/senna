@@ -12,6 +12,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        go-version:
+          - name: go1.25.5
+            version: "1.25.5"
         store:
           - name: redis-6
             image: redis:6.2-alpine
@@ -24,7 +27,7 @@ jobs:
           - name: valkey-8
             image: valkey/valkey:8-alpine
 
-    name: ${{ matrix.store.name }}
+    name: ${{ matrix.go-version.name }} / ${{ matrix.store.name }}
 
     services:
       store:
@@ -43,14 +46,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go-version.version }}
 
       - name: Download dependencies
         run: go mod download
+        env:
+          GOTOOLCHAIN: local
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
         env:
+          GOTOOLCHAIN: local
           REDIS_ADDR: localhost:6379
 
   lint:
@@ -61,7 +67,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: "1.26.1"
 
       - name: Run golangci-lint
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0 run
+        env:
+          GOTOOLCHAIN: local
