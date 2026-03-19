@@ -1,6 +1,8 @@
 module github.com/mgomes/senna
 
-go 1.26.1
+go 1.25.5
+
+toolchain go1.26.1
 
 require (
 	github.com/google/uuid v1.6.0

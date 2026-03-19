@@ -29,7 +29,8 @@ Senna is a background job processing library for Go, backed by Redis or Valkey. 
 
 ## Installation
 
-Senna requires Go 1.26.1 or later.
+Senna requires Go 1.25.5 or later.
+Development and CI use the Go 1.26.1 toolchain.
 
 ```bash
 go get github.com/mgomes/senna
