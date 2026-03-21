@@ -162,12 +162,18 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 		if cfg.uniqueTTL <= 0 {
 			return nil, fmt.Errorf("unique TTL must be > 0 when using a unique key")
 		}
-		ok, err := c.redis.SetNX(ctx, c.keys.Unique(cfg.uniqueKey), job.ID, cfg.uniqueTTL).Result()
+		status, err := c.redis.SetArgs(ctx, c.keys.Unique(cfg.uniqueKey), job.ID, redis.SetArgs{
+			Mode: "NX",
+			TTL:  cfg.uniqueTTL,
+		}).Result()
+		if err == redis.Nil {
+			return nil, &senna.DuplicateJobError{UniqueKey: cfg.uniqueKey}
+		}
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			return nil, &senna.DuplicateJobError{UniqueKey: cfg.uniqueKey}
+		if status != "OK" {
+			return nil, fmt.Errorf("unexpected unique job lock status: %q", status)
 		}
 	}
 

@@ -830,7 +830,12 @@ func TestFetcher_Sequential_MixedQueues(t *testing.T) {
 	client.LPush(ctx, k.Queue("default"), string(defaultData))
 
 	// Simulate worker-1 holding the sequential lock
-	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+	if err := client.SetArgs(ctx, k.SequentialLock("transforms"), "worker-1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  30 * time.Second,
+	}).Err(); err != nil {
+		t.Fatalf("failed to set sequential lock: %v", err)
+	}
 
 	// Worker 2 should only be able to fetch from default queue
 	// since worker-1 holds the sequential lock
@@ -859,7 +864,12 @@ func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
 	ctx := context.Background()
 
 	// Simulate worker-1 holding the lock
-	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 30*time.Second)
+	if err := client.SetArgs(ctx, k.SequentialLock("transforms"), "worker-1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  30 * time.Second,
+	}).Err(); err != nil {
+		t.Fatalf("failed to set sequential lock: %v", err)
+	}
 
 	// Worker 2's blocking fetch should timeout (can't acquire lock)
 	start := time.Now()
@@ -984,7 +994,12 @@ func TestFetcher_Sequential_RenewSequentialLocks(t *testing.T) {
 	ctx := context.Background()
 
 	// Acquire lock for worker-1
-	client.SetNX(ctx, k.SequentialLock("transforms"), "worker-1", 5*time.Second)
+	if err := client.SetArgs(ctx, k.SequentialLock("transforms"), "worker-1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  5 * time.Second,
+	}).Err(); err != nil {
+		t.Fatalf("failed to set sequential lock: %v", err)
+	}
 	f.holdSequentialLock("transforms")
 
 	// Verify initial TTL
