@@ -3,7 +3,6 @@ package senna_test
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,28 +14,6 @@ import (
 	"github.com/mgomes/senna/worker"
 	"github.com/redis/go-redis/v9"
 )
-
-func getRedisAddrBatch() string {
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	return addr
-}
-
-func flushKeysBatch(t *testing.T, pattern string) {
-	c := redis.NewClient(&redis.Options{Addr: getRedisAddrBatch()})
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	keys, err := c.Keys(ctx, pattern).Result()
-	if err != nil {
-		t.Fatalf("failed to get keys: %v", err)
-	}
-	if len(keys) > 0 {
-		c.Del(ctx, keys...)
-	}
-}
 
 func TestBatch_CallbackOptions(t *testing.T) {
 	batch := client.NewBatch().

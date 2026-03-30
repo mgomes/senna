@@ -2,7 +2,6 @@ package senna_test
 
 import (
 	"context"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,30 +11,7 @@ import (
 	"github.com/mgomes/senna/client"
 	"github.com/mgomes/senna/ratelimit"
 	"github.com/mgomes/senna/worker"
-	"github.com/redis/go-redis/v9"
 )
-
-func getRedisAddr() string {
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	return addr
-}
-
-func flushKeys(t *testing.T, pattern string) {
-	client := redis.NewClient(&redis.Options{Addr: getRedisAddr()})
-	defer func() { _ = client.Close() }()
-
-	ctx := context.Background()
-	keys, err := client.Keys(ctx, pattern).Result()
-	if err != nil {
-		t.Fatalf("failed to get keys: %v", err)
-	}
-	if len(keys) > 0 {
-		client.Del(ctx, keys...)
-	}
-}
 
 func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	flushKeys(t, "integration:*")

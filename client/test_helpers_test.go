@@ -1,4 +1,4 @@
-package senna
+package client
 
 import (
 	"testing"
@@ -6,6 +6,10 @@ import (
 	"github.com/mgomes/senna/internal/testredis"
 	"github.com/redis/go-redis/v9"
 )
+
+func getTestRedisAddr() string {
+	return testredis.Addr()
+}
 
 func newTestRedisClient(t testing.TB) *redis.Client {
 	return testredis.NewClient(t)

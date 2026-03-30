@@ -1,4 +1,4 @@
-package senna
+package ratelimit_test
 
 import (
 	"testing"
@@ -7,10 +7,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func newTestRedisClient(t testing.TB) *redis.Client {
+func newTestClient(t testing.TB) *redis.Client {
 	return testredis.NewClient(t)
 }
 
-func flushTestKeys(t testing.TB, client *redis.Client, pattern string) {
+func flushKeys(t testing.TB, client *redis.Client, pattern string) {
 	testredis.FlushKeys(t, client, pattern)
 }

@@ -2,12 +2,10 @@ package ratelimit
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 )
 
 func waitForRateLimitWindow(interval time.Duration) {
@@ -32,54 +30,10 @@ func waitForRateLimitWindow(interval time.Duration) {
 	}
 }
 
-func redisAddr() string {
-	if url := os.Getenv("REDIS_URL"); url != "" {
-		return url
-	}
-	return "127.0.0.1:6379"
-}
-
-func newRedisClient(t *testing.T) *redis.Client {
-	t.Helper()
-	client := redis.NewClient(&redis.Options{Addr: redisAddr()})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		t.Fatalf("redis ping failed: %v", err)
-	}
-
-	return client
-}
-
-func cleanupKeys(t *testing.T, client *redis.Client, prefix string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var cursor uint64
-	pattern := prefix + "*"
-	for {
-		keys, next, err := client.Scan(ctx, cursor, pattern, 200).Result()
-		if err != nil {
-			t.Fatalf("scan failed: %v", err)
-		}
-		if len(keys) > 0 {
-			if err := client.Del(ctx, keys...).Err(); err != nil {
-				t.Fatalf("del failed: %v", err)
-			}
-		}
-		if next == 0 {
-			break
-		}
-		cursor = next
-	}
-}
-
 func TestWindowLimiterHonorsLimit(t *testing.T) {
 	client := newRedisClient(t)
 	prefix := "senna:rl:test:window:" + uuid.NewString()
-	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
+	t.Cleanup(func() { cleanupKeys(t, client, prefix+"*") })
 
 	l := Window(client, WindowConfig{
 		Name:        "w",
@@ -106,7 +60,7 @@ func TestWindowLimiterHonorsLimit(t *testing.T) {
 func TestBucketLimiterOverLimitReturnsRetry(t *testing.T) {
 	client := newRedisClient(t)
 	prefix := "senna:rl:test:bucket:" + uuid.NewString()
-	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
+	t.Cleanup(func() { cleanupKeys(t, client, prefix+"*") })
 
 	l := Bucket(client, BucketConfig{
 		Name:        "b",
@@ -130,7 +84,7 @@ func TestBucketLimiterOverLimitReturnsRetry(t *testing.T) {
 func TestPointsLimiterRefills(t *testing.T) {
 	client := newRedisClient(t)
 	prefix := "senna:rl:test:points:" + uuid.NewString()
-	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
+	t.Cleanup(func() { cleanupKeys(t, client, prefix+"*") })
 
 	l := Points(client, PointsConfig{
 		Name:        "p",
@@ -159,7 +113,7 @@ func TestPointsLimiterRefills(t *testing.T) {
 func TestLeakyLimiterDrains(t *testing.T) {
 	client := newRedisClient(t)
 	prefix := "senna:rl:test:leaky:" + uuid.NewString()
-	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
+	t.Cleanup(func() { cleanupKeys(t, client, prefix+"*") })
 
 	l := Leaky(client, LeakyConfig{
 		Name:        "l",
@@ -191,7 +145,7 @@ func TestLeakyLimiterDrains(t *testing.T) {
 func TestConcurrentLimiterReturnsSlotAfterRelease(t *testing.T) {
 	client := newRedisClient(t)
 	prefix := "senna:rl:test:concurrent:" + uuid.NewString()
-	t.Cleanup(func() { cleanupKeys(t, client, prefix) })
+	t.Cleanup(func() { cleanupKeys(t, client, prefix+"*") })
 
 	l := Concurrent(client, ConcurrentConfig{
 		Name:        "c",

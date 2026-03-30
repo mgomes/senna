@@ -2,56 +2,26 @@ package periodic
 
 import (
 	"context"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/mgomes/senna/internal/keys"
-	"github.com/redis/go-redis/v9"
 )
 
-func redisAddr() string {
-	if url := os.Getenv("REDIS_URL"); url != "" {
-		return url
-	}
-	return "127.0.0.1:6379"
-}
-
-func newRedisClient(t *testing.T) *redis.Client {
-	t.Helper()
-	client := redis.NewClient(&redis.Options{Addr: redisAddr()})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		t.Fatalf("redis ping failed: %v", err)
+func waitForMinuteWindow(guard time.Duration) {
+	if guard <= 0 {
+		return
 	}
 
-	return client
-}
-
-func cleanupKeys(t *testing.T, client *redis.Client, pattern string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var cursor uint64
 	for {
-		keys, next, err := client.Scan(ctx, cursor, pattern, 200).Result()
-		if err != nil {
-			t.Fatalf("scan failed: %v", err)
+		nextMinute := time.Now().Truncate(time.Minute).Add(time.Minute)
+		if remaining := time.Until(nextMinute); remaining > guard {
+			return
+		} else {
+			time.Sleep(remaining + 10*time.Millisecond)
 		}
-		if len(keys) > 0 {
-			if err := client.Del(ctx, keys...).Err(); err != nil {
-				t.Fatalf("del failed: %v", err)
-			}
-		}
-		if next == 0 {
-			break
-		}
-		cursor = next
 	}
 }
 
@@ -313,6 +283,8 @@ func TestScheduler_MultipleWorkers_OnlyOneEnqueues(t *testing.T) {
 	ns := "test-periodic-" + uuid.NewString()[:8]
 	k := keys.New(ns)
 	t.Cleanup(func() { cleanupKeys(t, client, ns+":*") })
+
+	waitForMinuteWindow(2 * time.Second)
 
 	// Create 3 schedulers simulating 3 workers
 	schedulers := make([]*Scheduler, 3)
