@@ -10,9 +10,7 @@ import (
 
 func TestClient_New(t *testing.T) {
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -30,9 +28,7 @@ func TestClient_Enqueue(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -73,9 +69,7 @@ func TestClient_EnqueueWithQueue(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -107,9 +101,7 @@ func TestClient_EnqueueWithRetry(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -133,9 +125,7 @@ func TestClient_EnqueueIn(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -168,9 +158,7 @@ func TestClient_EnqueueAt(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -199,9 +187,7 @@ func TestClient_UniqueJob(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -233,9 +219,7 @@ func TestClient_UniqueJobDifferentKeys(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -263,9 +247,7 @@ func TestClient_Batch(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -338,9 +320,7 @@ func TestClient_EncryptedJob(t *testing.T) {
 	}
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 		Encryption: &senna.EncryptionSettings{
 			Enabled: true,
@@ -376,9 +356,7 @@ func TestClient_MultipleQueues(t *testing.T) {
 	flushTestKeys(t, redisClient, "test:*")
 
 	client, err := New(&Config{
-		Redis: senna.RedisConfig{
-			Addr: getTestRedisAddr(),
-		},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test",
 	})
 	if err != nil {
@@ -413,7 +391,7 @@ func TestClient_EnqueueIn_CorrectTimestamp(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-schedule-ts:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-schedule-ts",
 	})
 	if err != nil {
@@ -452,7 +430,7 @@ func TestClient_EnqueueAt_CorrectTimestamp(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-schedule-at:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-schedule-at",
 	})
 	if err != nil {
@@ -489,7 +467,7 @@ func TestClient_EnqueueIn_WithOptions(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-schedule-opts:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-schedule-opts",
 	})
 	if err != nil {
@@ -524,7 +502,7 @@ func TestClient_EnqueueAt_InThePast(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-schedule-past:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-schedule-past",
 	})
 	if err != nil {
@@ -561,7 +539,7 @@ func TestClient_EnqueueIn_ZeroDuration(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-schedule-zero:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-schedule-zero",
 	})
 	if err != nil {
@@ -589,7 +567,7 @@ func TestClient_MultipleScheduledJobs_OrderedByTime(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-schedule-order:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-schedule-order",
 	})
 	if err != nil {
@@ -626,7 +604,7 @@ func TestClient_EnqueueBulk_Basic(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk",
 	})
 	if err != nil {
@@ -669,7 +647,7 @@ func TestClient_EnqueueBulk_Basic(t *testing.T) {
 
 func TestClient_EnqueueBulk_EmptyList(t *testing.T) {
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-empty",
 	})
 	if err != nil {
@@ -691,7 +669,7 @@ func TestClient_EnqueueBulk_WithQueue(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-queue:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-queue",
 	})
 	if err != nil {
@@ -732,7 +710,7 @@ func TestClient_EnqueueBulk_WithQueue(t *testing.T) {
 
 func TestClient_EnqueueBulk_WithRetry(t *testing.T) {
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-retry",
 	})
 	if err != nil {
@@ -756,7 +734,7 @@ func TestClient_EnqueueBulk_WithRetry(t *testing.T) {
 
 func TestClient_EnqueueBulk_UniqueKeyNotSupported(t *testing.T) {
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-unique",
 	})
 	if err != nil {
@@ -779,7 +757,7 @@ func TestClient_EnqueueBulkIn_Scheduled(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-in:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-in",
 	})
 	if err != nil {
@@ -821,7 +799,7 @@ func TestClient_EnqueueBulkAt_Scheduled(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-at:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-at",
 	})
 	if err != nil {
@@ -861,7 +839,7 @@ func TestClient_EnqueueBulk_LargeVolume(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-large:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-large",
 	})
 	if err != nil {
@@ -898,7 +876,7 @@ func TestClient_EnqueueBulk_WithBatch(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-batch:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-batch",
 	})
 	if err != nil {
@@ -930,7 +908,7 @@ func TestClient_EnqueueBulk_FiltersUnmarshalableJobs(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-filter:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-filter",
 	})
 	if err != nil {
@@ -991,7 +969,7 @@ func TestClient_EnqueueBulkIn_FiltersUnmarshalableJobs(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-bulk-filter-scheduled:*")
 
 	client, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-bulk-filter-scheduled",
 	})
 	if err != nil {

@@ -2,6 +2,7 @@ package testredis
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -9,20 +10,34 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func Addr() string {
+const defaultAddr = "localhost:6379"
+
+func parseOptions() (*redis.Options, error) {
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		return addr
+		return &redis.Options{Addr: addr}, nil
 	}
-	if addr := os.Getenv("REDIS_URL"); addr != "" {
-		return addr
+	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+		return redis.ParseURL(redisURL)
 	}
-	return "localhost:6379"
+	return &redis.Options{Addr: defaultAddr}, nil
+}
+
+func Options() *redis.Options {
+	opts, err := parseOptions()
+	if err != nil {
+		panic(fmt.Errorf("invalid REDIS_URL: %w", err))
+	}
+	return opts
+}
+
+func Addr() string {
+	return Options().Addr
 }
 
 func NewClient(t testing.TB) *redis.Client {
 	t.Helper()
 
-	client := redis.NewClient(&redis.Options{Addr: Addr()})
+	client := redis.NewClient(Options())
 	t.Cleanup(func() {
 		_ = client.Close()
 	})
@@ -63,7 +78,7 @@ func FlushKeys(t testing.TB, client *redis.Client, pattern string) {
 func FlushPattern(t testing.TB, pattern string) {
 	t.Helper()
 
-	client := redis.NewClient(&redis.Options{Addr: Addr()})
+	client := redis.NewClient(Options())
 	defer func() {
 		_ = client.Close()
 	}()

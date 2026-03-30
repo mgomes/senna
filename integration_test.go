@@ -17,7 +17,7 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	flushKeys(t, "integration:*")
 
 	client, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration",
 	})
 	if err != nil {
@@ -26,7 +26,7 @@ func TestIntegration_EnqueueAndProcess(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	worker, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -91,7 +91,7 @@ func TestIntegration_ScheduledJob(t *testing.T) {
 	flushKeys(t, "integration-scheduled:*")
 
 	client, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-scheduled",
 	})
 	if err != nil {
@@ -100,7 +100,7 @@ func TestIntegration_ScheduledJob(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	worker, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-scheduled",
 		Settings: senna.WorkerSettings{
 			Concurrency:     1,
@@ -163,7 +163,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 	flushKeys(t, "senna:ratelimit:bucket:test-integration-limiter*")
 
 	client, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-ratelimit",
 	})
 	if err != nil {
@@ -172,7 +172,7 @@ func TestIntegration_RateLimitedJob(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	worker, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-ratelimit",
 		Settings: senna.WorkerSettings{
 			Concurrency:     5,
@@ -229,7 +229,7 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 	flushKeys(t, "integration-concurrent:*")
 
 	client, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-concurrent",
 	})
 	if err != nil {
@@ -238,7 +238,7 @@ func TestIntegration_ConcurrentProcessing(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	worker, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-concurrent",
 		Settings: senna.WorkerSettings{
 			Concurrency:     10,
@@ -307,7 +307,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	flushKeys(t, "integration-shutdown:*")
 
 	client, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-shutdown",
 	})
 	if err != nil {
@@ -316,7 +316,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	worker, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddr()},
+		Redis:     getRedisConfig(),
 		Namespace: "integration-shutdown",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
