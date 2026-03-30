@@ -61,12 +61,15 @@ type WorkerSettings struct {
 	StrictPriority        bool // If true, always process higher priority queues first (can starve lower priority)
 }
 
-const DefaultRetryCount = 25
+const (
+	DefaultQueueName  = "default"
+	DefaultRetryCount = 25
+)
 
 func DefaultWorkerSettings() WorkerSettings {
 	return WorkerSettings{
 		Concurrency:           10,
-		Queues:                []QueueConfig{{Name: "default", Priority: 1}},
+		Queues:                []QueueConfig{{Name: DefaultQueueName, Priority: 1}},
 		ShutdownTimeout:       30 * time.Second,
 		PollInterval:          100 * time.Millisecond,
 		ScheduledPollInterval: 5 * time.Second,
@@ -88,7 +91,7 @@ type ClientSettings struct {
 
 func DefaultClientSettings() ClientSettings {
 	return ClientSettings{
-		DefaultQueue: "default",
+		DefaultQueue: DefaultQueueName,
 		DefaultRetry: DefaultRetryCount,
 	}
 }

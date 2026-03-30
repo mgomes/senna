@@ -35,16 +35,26 @@ type Settings struct {
 }
 
 func DefaultSettings() Settings {
+	defaults := senna.DefaultClientSettings()
 	return Settings{
-		DefaultQueue: "default",
-		DefaultRetry: senna.DefaultRetryCount,
+		DefaultQueue: defaults.DefaultQueue,
+		DefaultRetry: defaults.DefaultRetry,
 	}
 }
 
-func New(cfg *Config) (*Client, error) {
-	if cfg.Settings.DefaultQueue == "" {
-		cfg.Settings = DefaultSettings()
+func normalizeSettings(settings Settings) Settings {
+	defaults := DefaultSettings()
+	if settings.DefaultQueue == "" {
+		settings.DefaultQueue = defaults.DefaultQueue
 	}
+	if settings.DefaultRetry == 0 {
+		settings.DefaultRetry = defaults.DefaultRetry
+	}
+	return settings
+}
+
+func New(cfg *Config) (*Client, error) {
+	cfg.Settings = normalizeSettings(cfg.Settings)
 
 	client := redis.NewClient(cfg.Redis.Options())
 

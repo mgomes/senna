@@ -57,8 +57,8 @@ func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) 
 	}
 
 	cfg := &enqueueConfig{
-		queue: "default",
-		retry: 25,
+		queue: senna.DefaultQueueName,
+		retry: senna.DefaultRetryCount,
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -105,7 +105,7 @@ func (b *Batch) OnDeathCallback(jobType string, options ...map[string]any) *Batc
 	return b
 }
 
-// WithCallbackQueue sets the queue for callback jobs (defaults to "default").
+// WithCallbackQueue sets the queue for callback jobs.
 func (b *Batch) WithCallbackQueue(queue string) *Batch {
 	b.CallbackQueue = queue
 	return b

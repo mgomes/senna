@@ -423,7 +423,7 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		return
 	}
 
-	batch.EnqueueCallbacks(ctx, w.redis, w.keys, job.BatchID, &callbackResult, "default", batch.BatchTTL)
+	batch.EnqueueCallbacks(ctx, w.redis, w.keys, job.BatchID, &callbackResult, senna.DefaultQueueName, batch.BatchTTL)
 
 	parentResultType, ok := batch.ParentResultType(&callbackResult)
 	if ok {
