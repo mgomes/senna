@@ -43,13 +43,14 @@ func DefaultSettings() Settings {
 }
 
 func normalizeSettings(settings Settings) Settings {
-	defaults := DefaultSettings()
+	if settings == (Settings{}) {
+		return DefaultSettings()
+	}
+
 	if settings.DefaultQueue == "" {
-		settings.DefaultQueue = defaults.DefaultQueue
+		settings.DefaultQueue = senna.DefaultQueueName
 	}
-	if settings.DefaultRetry == 0 {
-		settings.DefaultRetry = defaults.DefaultRetry
-	}
+
 	return settings
 }
 
