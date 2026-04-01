@@ -13,6 +13,7 @@ var pointsCheckScript = script.New("points_check", pointsCheckLua)
 
 var pointsAdjustScript = script.New("points_adjust", pointsAdjustLua)
 
+// PointsLimiter implements a token-bucket style limiter with variable costs.
 type PointsLimiter struct {
 	name        string
 	capacity    int
@@ -23,6 +24,7 @@ type PointsLimiter struct {
 	keyPrefix   string
 }
 
+// PointsConfig configures a PointsLimiter.
 type PointsConfig struct {
 	Name        string
 	Capacity    int
@@ -32,6 +34,7 @@ type PointsConfig struct {
 	KeyPrefix   string
 }
 
+// Points constructs a PointsLimiter.
 func Points(client redis.Cmdable, cfg PointsConfig) *PointsLimiter {
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 5 * time.Second
@@ -50,14 +53,17 @@ func Points(client redis.Cmdable, cfg PointsConfig) *PointsLimiter {
 	}
 }
 
+// Name returns the limiter name.
 func (l *PointsLimiter) Name() string {
 	return l.name
 }
 
+// WithinLimit runs fn using a cost of one point.
 func (l *PointsLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	return l.WithinLimitCost(ctx, 1, fn)
 }
 
+// WithinLimitCost runs fn after acquiring the requested number of points.
 func (l *PointsLimiter) WithinLimitCost(ctx context.Context, cost int, fn func() error) error {
 	waitTime, err := l.AcquirePoints(ctx, cost)
 	if err != nil {
@@ -74,12 +80,14 @@ func (l *PointsLimiter) WithinLimitCost(ctx context.Context, cost int, fn func()
 	return fn()
 }
 
+// PointsHandle lets callers reconcile an estimated points cost with the actual cost used.
 type PointsHandle struct {
 	limiter  *PointsLimiter
 	ctx      context.Context
 	estimate int
 }
 
+// PointsUsed adjusts the limiter after actual usage differs from the estimate.
 func (h *PointsHandle) PointsUsed(actual int) error {
 	diff := h.estimate - actual
 	if diff == 0 {
@@ -88,6 +96,7 @@ func (h *PointsHandle) PointsUsed(actual int) error {
 	return h.limiter.adjust(h.ctx, diff)
 }
 
+// WithinLimitEstimate runs fn after acquiring an estimated number of points.
 func (l *PointsLimiter) WithinLimitEstimate(ctx context.Context, estimate int, fn func(h *PointsHandle) error) error {
 	waitTime, err := l.AcquirePoints(ctx, estimate)
 	if err != nil {
@@ -110,10 +119,12 @@ func (l *PointsLimiter) WithinLimitEstimate(ctx context.Context, estimate int, f
 	return fn(handle)
 }
 
+// Acquire acquires one point of capacity.
 func (l *PointsLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	return l.AcquirePoints(ctx, 1)
 }
 
+// AcquirePoints waits for or reports the availability of the requested points.
 func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
@@ -185,6 +196,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 	}
 }
 
+// Release is a no-op for points limiters.
 func (l *PointsLimiter) Release(ctx context.Context) error {
 	return nil
 }
@@ -205,6 +217,7 @@ func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
 	return err
 }
 
+// AvailablePoints returns the currently available point balance.
 func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 	nowUs := time.Now().UnixMicro()
 	refillTimeUs := l.refillTime.Microseconds()

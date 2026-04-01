@@ -21,6 +21,7 @@ var concurrentReleaseScript = script.New("concurrent_release", concurrentRelease
 
 var concurrentReclaimScript = script.New("concurrent_reclaim", concurrentReclaimLua)
 
+// ConcurrentLimiter limits how many jobs may run concurrently.
 type ConcurrentLimiter struct {
 	name        string
 	limit       int
@@ -34,6 +35,7 @@ type ConcurrentLimiter struct {
 	lockIDs     map[context.Context]string
 }
 
+// ConcurrentConfig configures a ConcurrentLimiter.
 type ConcurrentConfig struct {
 	Name        string
 	Limit       int
@@ -43,6 +45,7 @@ type ConcurrentConfig struct {
 	KeyPrefix   string
 }
 
+// Concurrent constructs a ConcurrentLimiter.
 func Concurrent(client redis.Cmdable, cfg ConcurrentConfig) *ConcurrentLimiter {
 	if cfg.LockTimeout == 0 {
 		cfg.LockTimeout = 30 * time.Second
@@ -65,6 +68,7 @@ func Concurrent(client redis.Cmdable, cfg ConcurrentConfig) *ConcurrentLimiter {
 	}
 }
 
+// Name returns the limiter name.
 func (l *ConcurrentLimiter) Name() string {
 	return l.name
 }
@@ -125,6 +129,7 @@ func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
 	return int(result.(int64)), nil
 }
 
+// WithinLimit runs fn after acquiring a concurrency slot and releases it afterward.
 func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	waitTime, err := l.Acquire(ctx)
 	if err != nil {
@@ -143,6 +148,7 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) er
 	return fn()
 }
 
+// Acquire waits for or reports availability of a concurrency slot.
 func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	if err := l.ensureInitialized(ctx); err != nil {
 		return 0, err
@@ -196,6 +202,7 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 	}
 }
 
+// Release frees the slot associated with the provided context.
 func (l *ConcurrentLimiter) Release(ctx context.Context) error {
 	l.lockMu.Lock()
 	lockID, ok := l.lockIDs[ctx]
@@ -215,6 +222,7 @@ func (l *ConcurrentLimiter) Release(ctx context.Context) error {
 	return err
 }
 
+// Held returns the number of currently held slots.
 func (l *ConcurrentLimiter) Held(ctx context.Context) (int, error) {
 	count, err := l.client.HLen(ctx, l.locksKey()).Result()
 	if err == redis.Nil {

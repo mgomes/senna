@@ -8,8 +8,10 @@ import (
 	"time"
 )
 
+// Middleware decorates a job handler.
 type Middleware func(Handler) Handler
 
+// Chain composes middlewares around a handler in declaration order.
 func Chain(middlewares ...Middleware) Middleware {
 	return func(final Handler) Handler {
 		for i := len(middlewares) - 1; i >= 0; i-- {
@@ -19,6 +21,7 @@ func Chain(middlewares ...Middleware) Middleware {
 	}
 }
 
+// LoggingMiddleware logs job completion and failures with durations.
 func LoggingMiddleware(logger *slog.Logger) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) error {
@@ -47,6 +50,7 @@ func LoggingMiddleware(logger *slog.Logger) Middleware {
 	}
 }
 
+// RecoveryMiddleware converts panics into returned errors.
 func RecoveryMiddleware() Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) (err error) {
@@ -60,6 +64,7 @@ func RecoveryMiddleware() Middleware {
 	}
 }
 
+// TimeoutMiddleware cancels job execution after the provided duration.
 func TimeoutMiddleware(d time.Duration) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) error {
@@ -81,6 +86,7 @@ func TimeoutMiddleware(d time.Duration) Middleware {
 	}
 }
 
+// RetryMiddleware wraps handler failures in retry-oriented Senna errors.
 func RetryMiddleware(maxRetries int, backoff BackoffFunc) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) error {
@@ -105,8 +111,10 @@ func RetryMiddleware(maxRetries int, backoff BackoffFunc) Middleware {
 	}
 }
 
+// BackoffFunc returns the retry delay for the given attempt.
 type BackoffFunc func(attempt int) time.Duration
 
+// ExponentialBackoff returns an exponential retry backoff capped at maxBackoff.
 func ExponentialBackoff(base time.Duration, maxBackoff time.Duration) BackoffFunc {
 	return func(attempt int) time.Duration {
 		backoff := base * (1 << uint(attempt))
@@ -117,6 +125,7 @@ func ExponentialBackoff(base time.Duration, maxBackoff time.Duration) BackoffFun
 	}
 }
 
+// DefaultBackoff returns Senna's default retry backoff function.
 func DefaultBackoff() BackoffFunc {
 	return func(attempt int) time.Duration {
 		secs := (attempt * attempt * attempt * attempt) + 15 + (attempt * 10)

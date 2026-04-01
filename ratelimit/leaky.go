@@ -11,6 +11,7 @@ import (
 
 var leakyScript = script.New("leaky", leakyLua)
 
+// LeakyLimiter implements a leaky-bucket limiter.
 type LeakyLimiter struct {
 	name        string
 	capacity    int
@@ -21,6 +22,7 @@ type LeakyLimiter struct {
 	keyPrefix   string
 }
 
+// LeakyConfig configures a LeakyLimiter.
 type LeakyConfig struct {
 	Name        string
 	Capacity    int
@@ -30,6 +32,7 @@ type LeakyConfig struct {
 	KeyPrefix   string
 }
 
+// Leaky constructs a LeakyLimiter.
 func Leaky(client redis.Cmdable, cfg LeakyConfig) *LeakyLimiter {
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 5 * time.Second
@@ -48,10 +51,12 @@ func Leaky(client redis.Cmdable, cfg LeakyConfig) *LeakyLimiter {
 	}
 }
 
+// Name returns the limiter name.
 func (l *LeakyLimiter) Name() string {
 	return l.name
 }
 
+// WithinLimit runs fn when the bucket level allows it.
 func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	waitTime, err := l.Acquire(ctx)
 	if err != nil {
@@ -68,6 +73,7 @@ func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	return fn()
 }
 
+// Acquire waits for or reports capacity in the leaky bucket.
 func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
@@ -139,10 +145,12 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	}
 }
 
+// Release is a no-op for leaky limiters.
 func (l *LeakyLimiter) Release(ctx context.Context) error {
 	return nil
 }
 
+// Level returns the current bucket fill level.
 func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
 	nowUs := time.Now().UnixMicro()
 	drainTimeUs := l.drainTime.Microseconds()

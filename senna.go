@@ -6,14 +6,17 @@ import (
 	"github.com/mgomes/senna/ratelimit"
 )
 
+// WithinLimit runs fn through the limiter using a background context.
 func WithinLimit(limiter ratelimit.Limiter, fn func() error) error {
 	return limiter.WithinLimit(context.Background(), fn)
 }
 
+// WithinLimitCtx runs fn through the limiter using the provided context.
 func WithinLimitCtx(ctx context.Context, limiter ratelimit.Limiter, fn func() error) error {
 	return limiter.WithinLimit(ctx, fn)
 }
 
+// RateLimitMiddleware rejects work when the limiter reports the job is over limit.
 func RateLimitMiddleware(limiter ratelimit.Limiter) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) error {
@@ -24,6 +27,7 @@ func RateLimitMiddleware(limiter ratelimit.Limiter) Middleware {
 	}
 }
 
+// RateLimitMiddlewareWithReschedule retries over-limit jobs after the limiter's wait time.
 func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) error {

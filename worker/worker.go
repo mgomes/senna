@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Worker fetches and executes jobs from Redis queues.
 type Worker struct {
 	id         string
 	redis      *redis.Client
@@ -36,6 +37,7 @@ type Worker struct {
 	stopCh     chan struct{}
 }
 
+// Config configures a Worker.
 type Config struct {
 	Redis      senna.RedisConfig
 	Namespace  string
@@ -43,6 +45,7 @@ type Config struct {
 	Encryption *senna.EncryptionSettings
 }
 
+// New creates a Worker and verifies the Redis connection.
 func New(cfg *Config) (*Worker, error) {
 	if cfg.Settings.Concurrency == 0 {
 		cfg.Settings = senna.DefaultWorkerSettings()
@@ -95,10 +98,12 @@ func hostname() string {
 	return h
 }
 
+// Redis returns the underlying Redis client.
 func (w *Worker) Redis() *redis.Client {
 	return w.redis
 }
 
+// Register registers a handler for the given job type.
 func (w *Worker) Register(jobType string, handler senna.Handler, opts ...JobOption) {
 	jobOpts := &JobOptions{
 		MaxRetries:   senna.DefaultRetryCount,
@@ -110,6 +115,7 @@ func (w *Worker) Register(jobType string, handler senna.Handler, opts ...JobOpti
 	w.handlers.Register(jobType, handler, jobOpts)
 }
 
+// Use appends middleware to the worker and its registered handlers.
 func (w *Worker) Use(mw ...senna.Middleware) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -135,6 +141,7 @@ func (w *Worker) PeriodicJobs() []*periodic.Job {
 	return w.periodic.Jobs()
 }
 
+// Run starts the worker loop and blocks until shutdown completes.
 func (w *Worker) Run(ctx context.Context) error {
 	w.mu.Lock()
 	if w.running {
@@ -200,10 +207,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+// Stop requests a graceful worker shutdown.
 func (w *Worker) Stop() {
 	close(w.stopCh)
 }
 
+// Close closes the underlying Redis client.
 func (w *Worker) Close() error {
 	return w.redis.Close()
 }

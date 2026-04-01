@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Client enqueues jobs and exposes batch and iteration helpers.
 type Client struct {
 	redis     *redis.Client
 	keys      *keys.Keys
@@ -22,6 +23,7 @@ type Client struct {
 	encryptor *encryption.Encryptor
 }
 
+// Config configures a Client.
 type Config struct {
 	Redis      senna.RedisConfig
 	Namespace  string
@@ -29,11 +31,13 @@ type Config struct {
 	Encryption *senna.EncryptionSettings
 }
 
+// Settings configures enqueue defaults for a Client.
 type Settings struct {
 	DefaultQueue string
 	DefaultRetry int
 }
 
+// DefaultSettings returns the default client settings.
 func DefaultSettings() Settings {
 	defaults := senna.DefaultClientSettings()
 	return Settings{
@@ -54,6 +58,7 @@ func normalizeSettings(settings Settings) Settings {
 	return settings
 }
 
+// New creates a Client and verifies the Redis connection.
 func New(cfg *Config) (*Client, error) {
 	cfg.Settings = normalizeSettings(cfg.Settings)
 
@@ -80,14 +85,17 @@ func New(cfg *Config) (*Client, error) {
 	return c, nil
 }
 
+// Close closes the underlying Redis client.
 func (c *Client) Close() error {
 	return c.redis.Close()
 }
 
+// Redis returns the underlying Redis client.
 func (c *Client) Redis() *redis.Client {
 	return c.redis
 }
 
+// EnqueueOption configures how a job is enqueued.
 type EnqueueOption func(*enqueueConfig)
 
 type enqueueConfig struct {
@@ -101,18 +109,21 @@ type enqueueConfig struct {
 	at        time.Time
 }
 
+// WithQueue enqueues the job onto the provided queue.
 func WithQueue(q string) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.queue = q
 	}
 }
 
+// WithRetry sets the retry count for the enqueued job.
 func WithRetry(n int) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.retry = n
 	}
 }
 
+// WithUniqueKey deduplicates jobs by key for the provided TTL.
 func WithUniqueKey(key string, ttl time.Duration) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.uniqueKey = key
@@ -120,30 +131,35 @@ func WithUniqueKey(key string, ttl time.Duration) EnqueueOption {
 	}
 }
 
+// WithBatch associates the enqueued job with a batch ID.
 func WithBatch(batchID string) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.batchID = batchID
 	}
 }
 
+// WithEncryption encrypts job arguments when client encryption is enabled.
 func WithEncryption() EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.encrypt = true
 	}
 }
 
+// WithDelay schedules the job to run after the provided delay.
 func WithDelay(d time.Duration) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.delay = d
 	}
 }
 
+// WithScheduleAt schedules the job to run at the provided time.
 func WithScheduleAt(t time.Time) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.at = t
 	}
 }
 
+// Enqueue creates a job and enqueues it immediately or at a scheduled time.
 func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	cfg := &enqueueConfig{
 		queue: c.settings.DefaultQueue,
@@ -198,11 +214,13 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 	return c.enqueueNow(ctx, job)
 }
 
+// EnqueueIn schedules a job to run after the provided delay.
 func (c *Client) EnqueueIn(ctx context.Context, d time.Duration, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	opts = append(opts, WithDelay(d))
 	return c.Enqueue(ctx, jobType, args, opts...)
 }
 
+// EnqueueAt schedules a job to run at the provided time.
 func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	opts = append(opts, WithScheduleAt(t))
 	return c.Enqueue(ctx, jobType, args, opts...)
@@ -368,6 +386,7 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 	return job, nil
 }
 
+// EnqueueBatch stores batch state and enqueues the batch's jobs.
 func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 	// Validation
 	if b.err != nil {

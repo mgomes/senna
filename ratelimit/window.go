@@ -12,6 +12,7 @@ import (
 
 var windowScript = script.New("window", windowLua)
 
+// WindowLimiter implements a sliding-window limiter.
 type WindowLimiter struct {
 	name        string
 	limit       int
@@ -22,6 +23,7 @@ type WindowLimiter struct {
 	keyPrefix   string
 }
 
+// WindowConfig configures a WindowLimiter.
 type WindowConfig struct {
 	Name        string
 	Limit       int
@@ -31,6 +33,7 @@ type WindowConfig struct {
 	KeyPrefix   string
 }
 
+// Window constructs a WindowLimiter.
 func Window(client redis.Cmdable, cfg WindowConfig) *WindowLimiter {
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 5 * time.Second
@@ -49,10 +52,12 @@ func Window(client redis.Cmdable, cfg WindowConfig) *WindowLimiter {
 	}
 }
 
+// Name returns the limiter name.
 func (l *WindowLimiter) Name() string {
 	return l.name
 }
 
+// WithinLimit runs fn when capacity is available.
 func (l *WindowLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	waitTime, err := l.Acquire(ctx)
 	if err != nil {
@@ -69,6 +74,7 @@ func (l *WindowLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 	return fn()
 }
 
+// Acquire waits for or reports capacity in the sliding window.
 func (l *WindowLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
@@ -134,10 +140,12 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	}
 }
 
+// Release is a no-op for window limiters.
 func (l *WindowLimiter) Release(ctx context.Context) error {
 	return nil
 }
 
+// Remaining returns the remaining capacity in the current window.
 func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
 	nowUs := time.Now().UnixMicro()
 	windowUs := l.interval.Microseconds()

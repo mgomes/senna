@@ -29,6 +29,7 @@ type iterableHandlerEntry struct {
 	options *IterableJobOptions
 }
 
+// JobOptions describes execution settings derived from JobOption values.
 type JobOptions struct {
 	MaxRetries     int
 	RetryBackoff   senna.BackoffFunc
@@ -38,6 +39,7 @@ type JobOptions struct {
 	RateLimiter    ratelimit.Limiter
 }
 
+// UniqueConfig stores uniqueness metadata for a job type.
 type UniqueConfig struct {
 	Key string
 	TTL time.Duration

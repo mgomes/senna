@@ -11,6 +11,7 @@ import (
 
 var bucketScript = script.New("bucket", bucketLua)
 
+// BucketLimiter implements a fixed-window bucket limiter.
 type BucketLimiter struct {
 	name        string
 	limit       int
@@ -21,6 +22,7 @@ type BucketLimiter struct {
 	keyPrefix   string
 }
 
+// BucketConfig configures a BucketLimiter.
 type BucketConfig struct {
 	Name        string
 	Limit       int
@@ -30,6 +32,7 @@ type BucketConfig struct {
 	KeyPrefix   string
 }
 
+// Bucket constructs a BucketLimiter.
 func Bucket(client redis.Cmdable, cfg BucketConfig) *BucketLimiter {
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 5 * time.Second
@@ -48,10 +51,12 @@ func Bucket(client redis.Cmdable, cfg BucketConfig) *BucketLimiter {
 	}
 }
 
+// Name returns the limiter name.
 func (l *BucketLimiter) Name() string {
 	return l.name
 }
 
+// WithinLimit runs fn when capacity is available.
 func (l *BucketLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	waitTime, err := l.Acquire(ctx)
 	if err != nil {
@@ -68,6 +73,7 @@ func (l *BucketLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 	return fn()
 }
 
+// Acquire waits for or reports bucket capacity for a single unit of work.
 func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
@@ -127,10 +133,12 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 	}
 }
 
+// Release is a no-op for bucket limiters.
 func (l *BucketLimiter) Release(ctx context.Context) error {
 	return nil
 }
 
+// Remaining returns the remaining capacity in the current bucket window.
 func (l *BucketLimiter) Remaining(ctx context.Context) (int, error) {
 	nowUs := time.Now().UnixMicro()
 	windowUs := l.interval.Microseconds()
