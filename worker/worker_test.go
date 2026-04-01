@@ -14,7 +14,7 @@ import (
 
 func TestWorker_New_DefaultSettings(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-default",
 	})
 	if err != nil {
@@ -35,7 +35,7 @@ func TestWorker_New_DefaultSettings(t *testing.T) {
 
 func TestWorker_New_WithSettings(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-settings",
 		Settings: senna.WorkerSettings{
 			Concurrency:     5,
@@ -65,7 +65,7 @@ func TestWorker_New_EncryptionEnabled(t *testing.T) {
 	}
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-enc",
 		Settings:  senna.DefaultWorkerSettings(),
 		Encryption: &senna.EncryptionSettings{
@@ -88,7 +88,7 @@ func TestWorker_New_EncryptionEnabled(t *testing.T) {
 
 func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 	_, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-invalid-enc",
 		Settings:  senna.DefaultWorkerSettings(),
 		Encryption: &senna.EncryptionSettings{
@@ -103,7 +103,7 @@ func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 
 func TestWorker_Register_WithOptions(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-register",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -134,7 +134,7 @@ func TestWorker_Register_WithOptions(t *testing.T) {
 
 func TestWorker_Use_AddsMiddleware(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-mw",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -165,7 +165,7 @@ func TestWorker_Use_AddsMiddleware(t *testing.T) {
 
 func TestWorker_Redis_ReturnsClient(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-redis",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -252,7 +252,7 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-process-error:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-process-error",
 		Settings: senna.WorkerSettings{
 			Concurrency:     1,
@@ -284,7 +284,7 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 
 func TestWorker_ProcessJob_RetryableError(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-process-retry",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -333,7 +333,7 @@ func TestWorker_DefaultBackoff(t *testing.T) {
 
 func TestWorker_MultipleHandlers(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-multi-handler",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -367,7 +367,7 @@ func TestWorker_MultipleHandlers(t *testing.T) {
 
 func TestWorker_UnknownJobType(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-unknown-job",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -391,7 +391,7 @@ func TestWorker_UnknownJobType(t *testing.T) {
 
 func TestWorker_MiddlewareOrder(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-mw-order",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -444,7 +444,7 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-batch-failures:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-batch-failures",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -494,7 +494,7 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 
 func TestWorker_Periodic_NotEnabled(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-periodic-disabled",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -519,7 +519,7 @@ func TestWorker_Periodic_Enabled(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-periodic-enabled:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-periodic-enabled",
 		Settings: senna.WorkerSettings{
 			Concurrency:     1,
@@ -551,7 +551,7 @@ func TestWorker_Periodic_Enabled(t *testing.T) {
 
 func TestWorker_Periodic_InvalidCron(t *testing.T) {
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-periodic-invalid",
 		Settings: senna.WorkerSettings{
 			Concurrency:     1,
@@ -578,7 +578,7 @@ func TestWorker_Scheduler_EnqueuesDueJobs(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-scheduler-due:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-scheduler-due",
 		Settings: senna.WorkerSettings{
 			Concurrency:           1,
@@ -626,7 +626,7 @@ func TestWorker_Scheduler_KeepsFutureJobs(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-scheduler-future:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-scheduler-future",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -667,7 +667,7 @@ func TestWorker_Scheduler_ProcessesMixedJobs(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-scheduler-mixed:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-scheduler-mixed",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -721,7 +721,7 @@ func TestWorker_Scheduler_EnqueuesRetries(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-scheduler-retry:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-scheduler-retry",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -763,7 +763,7 @@ func TestWorker_Scheduler_RoutesToCorrectQueue(t *testing.T) {
 	flushTestKeys(t, redisClient, "test-scheduler-queue:*")
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-scheduler-queue",
 		Settings:  senna.DefaultWorkerSettings(),
 	})
@@ -810,7 +810,7 @@ func TestWorker_Scheduler_RoutesToCorrectQueue(t *testing.T) {
 func TestWorker_ScheduledPollInterval_Configurable(t *testing.T) {
 	customInterval := 50 * time.Millisecond
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: "test-scheduler-interval",
 		Settings: senna.WorkerSettings{
 			Concurrency:           1,
@@ -848,7 +848,7 @@ func TestWorker_Scheduler_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	workers := make([]*Worker, 3)
 	for i := range workers {
 		w, err := New(&Config{
-			Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+			Redis:     getTestRedisConfig(),
 			Namespace: "test-scheduler-concurrent",
 			Settings:  senna.DefaultWorkerSettings(),
 		})
@@ -907,7 +907,7 @@ func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	workers := make([]*Worker, 3)
 	for i := range workers {
 		w, err := New(&Config{
-			Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+			Redis:     getTestRedisConfig(),
 			Namespace: "test-retry-concurrent",
 			Settings:  senna.DefaultWorkerSettings(),
 		})
@@ -968,7 +968,7 @@ func TestWorker_RequeueOrphanedJobs_StaleHeartbeat(t *testing.T) {
 
 	// Create a worker to get access to keys helper
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: ns,
 		Settings: senna.WorkerSettings{
 			Concurrency:   1,
@@ -1044,7 +1044,7 @@ func TestWorker_RequeueOrphanedJobs_ActiveWorkerNotAffected(t *testing.T) {
 	ns := "test-orphan-active"
 
 	w, err := New(&Config{
-		Redis:     senna.RedisConfig{Addr: getTestRedisAddr()},
+		Redis:     getTestRedisConfig(),
 		Namespace: ns,
 		Settings: senna.WorkerSettings{
 			Concurrency:   1,

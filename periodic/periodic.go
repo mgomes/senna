@@ -88,7 +88,7 @@ func (s *Scheduler) Register(cronExpr, jobType string, opts ...Option) error {
 		Name:     jobType,
 		Schedule: cronExpr,
 		JobType:  jobType,
-		Queue:    "default",
+		Queue:    senna.DefaultQueueName,
 		Retry:    senna.DefaultRetryCount,
 		schedule: schedule,
 	}

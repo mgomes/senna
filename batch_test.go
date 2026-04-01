@@ -3,7 +3,6 @@ package senna_test
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,30 +12,7 @@ import (
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/client"
 	"github.com/mgomes/senna/worker"
-	"github.com/redis/go-redis/v9"
 )
-
-func getRedisAddrBatch() string {
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	return addr
-}
-
-func flushKeysBatch(t *testing.T, pattern string) {
-	c := redis.NewClient(&redis.Options{Addr: getRedisAddrBatch()})
-	defer func() { _ = c.Close() }()
-
-	ctx := context.Background()
-	keys, err := c.Keys(ctx, pattern).Result()
-	if err != nil {
-		t.Fatalf("failed to get keys: %v", err)
-	}
-	if len(keys) > 0 {
-		c.Del(ctx, keys...)
-	}
-}
 
 func TestBatch_CallbackOptions(t *testing.T) {
 	batch := client.NewBatch().
@@ -71,7 +47,7 @@ func TestBatch_TTLSetsExpire(t *testing.T) {
 	flushKeysBatch(t, "batch-ttl:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-ttl",
 	})
 	if err != nil {
@@ -110,7 +86,7 @@ func TestBatch_UnsupportedOptions(t *testing.T) {
 	flushKeysBatch(t, "batch-unsupported:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-unsupported",
 	})
 	if err != nil {
@@ -151,7 +127,7 @@ func TestBatch_SuccessCallback(t *testing.T) {
 	flushKeysBatch(t, "batch-success:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-success",
 	})
 	if err != nil {
@@ -160,7 +136,7 @@ func TestBatch_SuccessCallback(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-success",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -248,7 +224,7 @@ func TestBatch_DeathCallback(t *testing.T) {
 	flushKeysBatch(t, "batch-death:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-death",
 	})
 	if err != nil {
@@ -257,7 +233,7 @@ func TestBatch_DeathCallback(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-death",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -340,7 +316,7 @@ func TestBatch_Status(t *testing.T) {
 	flushKeysBatch(t, "batch-status:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-status",
 	})
 	if err != nil {
@@ -397,7 +373,7 @@ func TestBatch_Status(t *testing.T) {
 func TestBatch_InvalidBatchStatus(t *testing.T) {
 	flushKeysBatch(t, "batch-invalid:*")
 
-	redisClient := redis.NewClient(&redis.Options{Addr: getRedisAddrBatch()})
+	redisClient := newTestRedisClient(t)
 	defer func() { _ = redisClient.Close() }()
 
 	status := senna.NewBatchStatus(redisClient, "batch-invalid", "nonexistent")
@@ -413,7 +389,7 @@ func TestBatch_DynamicJobAdding(t *testing.T) {
 	flushKeysBatch(t, "batch-dynamic:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-dynamic",
 	})
 	if err != nil {
@@ -422,7 +398,7 @@ func TestBatch_DynamicJobAdding(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-dynamic",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -528,7 +504,7 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	flushKeysBatch(t, "batch-cbqueue:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-cbqueue",
 	})
 	if err != nil {
@@ -537,7 +513,7 @@ func TestBatch_CallbackQueue(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-cbqueue",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -600,7 +576,7 @@ func TestBatch_SpecialCharsInJobType(t *testing.T) {
 	flushKeysBatch(t, "batch-special:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-special",
 	})
 	if err != nil {
@@ -609,7 +585,7 @@ func TestBatch_SpecialCharsInJobType(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-special",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -678,7 +654,7 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 
 	// Client with custom default queue
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-defqueue",
 		Settings: client.Settings{
 			DefaultQueue: "custom",
@@ -692,7 +668,7 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 
 	// Worker only listens to "custom" queue (not "default")
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-defqueue",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -759,7 +735,7 @@ func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
 	flushKeysBatch(t, "batch-empty:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-empty",
 	})
 	if err != nil {
@@ -768,7 +744,7 @@ func TestBatch_EmptyBatchFiresCallbacks(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-empty",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,
@@ -848,7 +824,7 @@ func TestBatch_InvalidatedBatchCompletes(t *testing.T) {
 	flushKeysBatch(t, "batch-invalidate:*")
 
 	c, err := client.New(&client.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-invalidate",
 	})
 	if err != nil {
@@ -857,7 +833,7 @@ func TestBatch_InvalidatedBatchCompletes(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	w, err := worker.New(&worker.Config{
-		Redis:     senna.RedisConfig{Addr: getRedisAddrBatch()},
+		Redis:     getRedisConfigBatch(),
 		Namespace: "batch-invalidate",
 		Settings: senna.WorkerSettings{
 			Concurrency:     2,

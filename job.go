@@ -33,7 +33,7 @@ func NewJob(jobType string, args map[string]any) *Job {
 	return &Job{
 		ID:         uuid.New().String(),
 		Type:       jobType,
-		Queue:      "default",
+		Queue:      DefaultQueueName,
 		Args:       args,
 		Retry:      DefaultRetryCount,
 		RetryCount: 0,
