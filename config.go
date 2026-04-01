@@ -6,6 +6,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Config configures shared Senna settings used by clients and workers.
 type Config struct {
 	Redis      RedisConfig
 	Namespace  string
@@ -15,6 +16,7 @@ type Config struct {
 	Metrics    MetricsSettings
 }
 
+// RedisConfig configures the Redis connection used by Senna.
 type RedisConfig struct {
 	Addr         string
 	Password     string
@@ -26,6 +28,7 @@ type RedisConfig struct {
 	WriteTimeout time.Duration
 }
 
+// Options converts the RedisConfig into go-redis client options.
 func (c RedisConfig) Options() *redis.Options {
 	opts := &redis.Options{
 		Addr:     c.Addr,
@@ -50,6 +53,7 @@ func (c RedisConfig) Options() *redis.Options {
 	return opts
 }
 
+// WorkerSettings configures worker runtime behavior.
 type WorkerSettings struct {
 	Concurrency           int
 	Queues                []QueueConfig
@@ -62,10 +66,13 @@ type WorkerSettings struct {
 }
 
 const (
-	DefaultQueueName  = "default"
+	// DefaultQueueName is the default queue used by clients and workers.
+	DefaultQueueName = "default"
+	// DefaultRetryCount is the default retry count assigned to new jobs.
 	DefaultRetryCount = 25
 )
 
+// DefaultWorkerSettings returns the default worker settings.
 func DefaultWorkerSettings() WorkerSettings {
 	return WorkerSettings{
 		Concurrency:           10,
@@ -77,6 +84,7 @@ func DefaultWorkerSettings() WorkerSettings {
 	}
 }
 
+// QueueConfig configures a worker queue and its scheduling behavior.
 type QueueConfig struct {
 	Name       string
 	Priority   int
@@ -84,11 +92,13 @@ type QueueConfig struct {
 	Sequential bool // Only one worker globally processes this queue at a time
 }
 
+// ClientSettings configures enqueue defaults for a client.
 type ClientSettings struct {
 	DefaultQueue string
 	DefaultRetry int
 }
 
+// DefaultClientSettings returns the default client settings.
 func DefaultClientSettings() ClientSettings {
 	return ClientSettings{
 		DefaultQueue: DefaultQueueName,
@@ -96,11 +106,13 @@ func DefaultClientSettings() ClientSettings {
 	}
 }
 
+// EncryptionSettings configures job argument encryption.
 type EncryptionSettings struct {
 	Enabled bool
 	Key     []byte
 }
 
+// MetricsSettings configures metrics emission.
 type MetricsSettings struct {
 	Enabled    bool
 	StatsdAddr string
@@ -109,32 +121,38 @@ type MetricsSettings struct {
 	Tags       map[string]string
 }
 
+// Option mutates a Config.
 type Option func(*Config)
 
+// WithNamespace sets the Redis key namespace.
 func WithNamespace(ns string) Option {
 	return func(c *Config) {
 		c.Namespace = ns
 	}
 }
 
+// WithConcurrency sets the worker concurrency.
 func WithConcurrency(n int) Option {
 	return func(c *Config) {
 		c.Worker.Concurrency = n
 	}
 }
 
+// WithQueues sets the worker queue configuration.
 func WithQueues(queues ...QueueConfig) Option {
 	return func(c *Config) {
 		c.Worker.Queues = queues
 	}
 }
 
+// WithShutdownTimeout sets the worker shutdown timeout.
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.ShutdownTimeout = d
 	}
 }
 
+// WithEncryptionConfig enables encryption with the provided key.
 func WithEncryptionConfig(key []byte) Option {
 	return func(c *Config) {
 		c.Encryption.Enabled = true
@@ -142,6 +160,7 @@ func WithEncryptionConfig(key []byte) Option {
 	}
 }
 
+// WithMetrics enables metrics emission with the provided address and prefix.
 func WithMetrics(addr, prefix string) Option {
 	return func(c *Config) {
 		c.Metrics.Enabled = true
@@ -150,18 +169,21 @@ func WithMetrics(addr, prefix string) Option {
 	}
 }
 
+// WithPeriodicEnabled enables periodic job scheduling for workers.
 func WithPeriodicEnabled() Option {
 	return func(c *Config) {
 		c.Worker.PeriodicEnabled = true
 	}
 }
 
+// WithScheduledPollInterval sets how often a worker checks scheduled jobs.
 func WithScheduledPollInterval(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.ScheduledPollInterval = d
 	}
 }
 
+// WithStrictPriority makes workers always prefer higher-priority queues.
 func WithStrictPriority() Option {
 	return func(c *Config) {
 		c.Worker.StrictPriority = true

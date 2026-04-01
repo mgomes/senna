@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// Job represents a queued unit of work.
 type Job struct {
 	ID              string         `json:"jid"`
 	Type            string         `json:"class"`
@@ -28,6 +29,7 @@ type Job struct {
 	raw             string         `json:"-"`
 }
 
+// NewJob constructs a job with default queue, retry, and timestamp values.
 func NewJob(jobType string, args map[string]any) *Job {
 	now := time.Now()
 	return &Job{
@@ -42,10 +44,12 @@ func NewJob(jobType string, args map[string]any) *Job {
 	}
 }
 
+// Marshal encodes the job as JSON.
 func (j *Job) Marshal() ([]byte, error) {
 	return json.Marshal(j)
 }
 
+// UnmarshalJob decodes a JSON job payload.
 func UnmarshalJob(data []byte) (*Job, error) {
 	var job Job
 	if err := json.Unmarshal(data, &job); err != nil {
@@ -54,12 +58,15 @@ func UnmarshalJob(data []byte) (*Job, error) {
 	return &job, nil
 }
 
+// Raw returns the raw Redis payload associated with the job.
 func (j *Job) Raw() string {
 	return j.raw
 }
 
+// SetRaw stores the raw Redis payload associated with the job.
 func (j *Job) SetRaw(raw string) {
 	j.raw = raw
 }
 
+// Handler processes a job.
 type Handler func(ctx context.Context, job *Job) error

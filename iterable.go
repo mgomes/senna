@@ -106,6 +106,7 @@ type SkipItemError struct {
 	Reason string
 }
 
+// Error implements error.
 func (e *SkipItemError) Error() string {
 	return fmt.Sprintf("skipping item: %s", e.Reason)
 }
@@ -116,6 +117,7 @@ type StopIterationError struct {
 	Reason string
 }
 
+// Error implements error.
 func (e *StopIterationError) Error() string {
 	return fmt.Sprintf("stopping iteration: %s", e.Reason)
 }
@@ -124,6 +126,7 @@ func (e *StopIterationError) Error() string {
 // Does not increment retry count or trigger batch failure callbacks.
 type InterruptedError struct{}
 
+// Error implements error.
 func (e *InterruptedError) Error() string {
 	return "job interrupted"
 }
