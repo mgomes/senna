@@ -24,6 +24,51 @@ func waitForRateLimitWindow(interval, guard time.Duration) {
 	}
 }
 
+type stubLimiter struct {
+	name          string
+	waitTime      time.Duration
+	acquireErr    error
+	releaseErr    error
+	releaseCalled bool
+}
+
+func (l *stubLimiter) WithinLimit(ctx context.Context, fn func() error) (err error) {
+	waitTime, err := l.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if waitTime > 0 {
+		return &ratelimit.OverLimitError{LimiterName: l.Name(), LimiterType: "stub", RetryIn: waitTime}
+	}
+	defer func() {
+		if releaseErr := l.Release(ctx); releaseErr != nil {
+			if err == nil {
+				err = releaseErr
+				return
+			}
+			err = errors.Join(err, releaseErr)
+		}
+	}()
+
+	return fn()
+}
+
+func (l *stubLimiter) Acquire(ctx context.Context) (time.Duration, error) {
+	return l.waitTime, l.acquireErr
+}
+
+func (l *stubLimiter) Release(ctx context.Context) error {
+	l.releaseCalled = true
+	return l.releaseErr
+}
+
+func (l *stubLimiter) Name() string {
+	if l.name == "" {
+		return "stub"
+	}
+	return l.name
+}
+
 func TestWithinLimit_Success(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "senna:ratelimit:bucket:senna-test-within-limit*")
@@ -256,6 +301,74 @@ func TestRateLimitMiddlewareWithReschedule_ReturnsRetryableError(t *testing.T) {
 	}
 	if retryErr.RetryIn <= 0 {
 		t.Errorf("expected positive RetryIn, got %v", retryErr.RetryIn)
+	}
+}
+
+func TestRateLimitMiddlewareWithReschedule_ReturnsReleaseError(t *testing.T) {
+	releaseErr := errors.New("release failed")
+	limiter := &stubLimiter{releaseErr: releaseErr}
+	handler := RateLimitMiddlewareWithReschedule(limiter)(func(ctx context.Context, job *Job) error {
+		return nil
+	})
+
+	err := handler(context.Background(), NewJob("test_job", nil))
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("RateLimitMiddlewareWithReschedule() error = %v, want release error", err)
+	}
+	if !limiter.releaseCalled {
+		t.Fatal("RateLimitMiddlewareWithReschedule() did not release limiter")
+	}
+}
+
+func TestRateLimitMiddlewareWithReschedule_JoinsHandlerAndReleaseErrors(t *testing.T) {
+	handlerErr := errors.New("handler failed")
+	releaseErr := errors.New("release failed")
+	limiter := &stubLimiter{releaseErr: releaseErr}
+	handler := RateLimitMiddlewareWithReschedule(limiter)(func(ctx context.Context, job *Job) error {
+		return handlerErr
+	})
+
+	err := handler(context.Background(), NewJob("test_job", nil))
+	if !errors.Is(err, handlerErr) {
+		t.Fatalf("RateLimitMiddlewareWithReschedule() error = %v, want handler error", err)
+	}
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("RateLimitMiddlewareWithReschedule() error = %v, want release error", err)
+	}
+}
+
+func TestRateLimitMiddlewareWithReschedule_PreservesHandlerError(t *testing.T) {
+	handlerErr := errors.New("handler failed")
+	limiter := &stubLimiter{}
+	handler := RateLimitMiddlewareWithReschedule(limiter)(func(ctx context.Context, job *Job) error {
+		return handlerErr
+	})
+
+	err := handler(context.Background(), NewJob("test_job", nil))
+	if err != handlerErr {
+		t.Fatalf("RateLimitMiddlewareWithReschedule() error = %v, want original handler error", err)
+	}
+}
+
+func TestRateLimitMiddlewareWithReschedule_ReleasesAfterPanic(t *testing.T) {
+	limiter := &stubLimiter{}
+	handler := RateLimitMiddlewareWithReschedule(limiter)(func(ctx context.Context, job *Job) error {
+		panic("handler failed")
+	})
+
+	didPanic := false
+	func() {
+		defer func() {
+			didPanic = recover() != nil
+		}()
+		_ = handler(context.Background(), NewJob("test_job", nil))
+	}()
+
+	if !didPanic {
+		t.Fatal("RateLimitMiddlewareWithReschedule() did not propagate panic")
+	}
+	if !limiter.releaseCalled {
+		t.Fatal("RateLimitMiddlewareWithReschedule() did not release limiter after panic")
 	}
 }
 

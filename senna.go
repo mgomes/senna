@@ -2,6 +2,7 @@ package senna
 
 import (
 	"context"
+	"errors"
 
 	"github.com/mgomes/senna/ratelimit"
 )
@@ -30,7 +31,7 @@ func RateLimitMiddleware(limiter ratelimit.Limiter) Middleware {
 // RateLimitMiddlewareWithReschedule retries over-limit jobs after the limiter's wait time.
 func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 	return func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+		return func(ctx context.Context, job *Job) (err error) {
 			waitTime, err := limiter.Acquire(ctx)
 			if err != nil {
 				return err
@@ -42,7 +43,16 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 					RetryIn: waitTime,
 				}
 			}
-			defer func() { _ = limiter.Release(ctx) }()
+			defer func() {
+				if releaseErr := limiter.Release(ctx); releaseErr != nil {
+					if err == nil {
+						err = releaseErr
+						return
+					}
+					err = errors.Join(err, releaseErr)
+				}
+			}()
+
 			return next(ctx, job)
 		}
 	}
