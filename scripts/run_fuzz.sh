@@ -2,7 +2,7 @@
 set -euo pipefail
 
 go_cmd="${GO:-go}"
-fuzztime="${FUZZTIME:-5s}"
+fuzztime="${FUZZTIME:-1000x}"
 fuzzparallel="${FUZZPARALLEL:-}"
 found=0
 

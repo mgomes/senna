@@ -4,7 +4,7 @@ GO ?= go
 GOCACHE ?= $(CURDIR)/.gocache
 PKGS ?= ./...
 GOLANGCI_LINT ?= golangci-lint
-FUZZTIME ?= 5s
+FUZZTIME ?= 1000x
 FUZZPARALLEL ?=
 
 test:
