@@ -428,15 +428,11 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 		return
 	}
 
-	scriptKeys := []string{
-		w.keys.Batch(job.BatchID),
-		w.keys.BatchJobs(job.BatchID),
-		w.keys.BatchFailed(job.BatchID),
-		w.keys.DeadBatches(),
-	}
+	scriptKeys := batch.CompletionKeys(w.keys, job.BatchID)
+	scriptArgs := batch.CompletionArgs(w.keys, job.ID, string(result))
 
 	var callbackResult batch.CompleteResult
-	if err := batchCompleteScript.RunJSON(ctx, w.redis, &callbackResult, scriptKeys, job.ID, string(result)); err != nil {
+	if err := batchCompleteScript.RunJSON(ctx, w.redis, &callbackResult, scriptKeys, scriptArgs...); err != nil {
 		slog.ErrorContext(ctx, "batch script failed", "error", err, "batch_id", job.BatchID)
 		return
 	}
@@ -444,8 +440,6 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 	if callbackResult.Error != "" || callbackResult.AlreadyProcessed {
 		return
 	}
-
-	batch.EnqueueCallbacks(ctx, w.redis, w.keys, job.BatchID, &callbackResult, senna.DefaultQueueName, batch.BatchTTL)
 
 	parentResultType, ok := batch.ParentResultType(&callbackResult)
 	if ok {

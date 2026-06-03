@@ -1,11 +1,7 @@
 package batch
 
 import (
-	"context"
-	"maps"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 
 	senna "github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
@@ -13,43 +9,31 @@ import (
 
 const BatchTTL = 30 * 24 * time.Hour
 
-// EnqueueCallback creates and enqueues a batch callback job.
-func EnqueueCallback(ctx context.Context, redisClient *redis.Client, k *keys.Keys,
-	jobType, batchID, parentID string, options map[string]any, queue string, ttl time.Duration) {
+// ResultEmptySuccess completes an empty batch through the completion script.
+const ResultEmptySuccess = "empty_success"
 
-	args := map[string]any{
-		"batch_id": batchID,
+// CompletionKeys returns the Redis keys used by the batch completion script.
+func CompletionKeys(k *keys.Keys, batchID string) []string {
+	return []string{
+		k.Batch(batchID),
+		k.BatchJobs(batchID),
+		k.BatchFailed(batchID),
+		k.DeadBatches(),
+		k.BatchCallbacks(batchID),
+		k.Queues(),
 	}
-	if parentID != "" {
-		args["parent_id"] = parentID
-	}
-	maps.Copy(args, options)
-
-	job := senna.NewJob(jobType, args)
-	job.Queue = queue
-	job.CallbackBatchID = batchID
-	data, _ := job.Marshal()
-
-	// Track callback job ID for idempotent completion handling
-	redisClient.SAdd(ctx, k.BatchCallbacks(batchID), job.ID)
-	redisClient.Expire(ctx, k.BatchCallbacks(batchID), ttl)
-	redisClient.LPush(ctx, k.Queue(queue), string(data))
 }
 
-func CallbackQueue(result *CompleteResult, fallback string) string {
-	if result.CallbackQueue != "" {
-		return result.CallbackQueue
+// CompletionArgs returns the Redis arguments used by the batch completion script.
+func CompletionArgs(k *keys.Keys, jobID, result string) []any {
+	now := time.Now().Format(time.RFC3339Nano)
+	return []any{
+		jobID,
+		result,
+		senna.DefaultRetryCount,
+		now,
+		k.Queue(""),
 	}
-	return fallback
-}
-
-func EnqueueCallbacks(ctx context.Context, redisClient *redis.Client, k *keys.Keys,
-	batchID string, result *CompleteResult, fallbackQueue string, ttl time.Duration) string {
-	queue := CallbackQueue(result, fallbackQueue)
-	for _, cb := range result.Callbacks {
-		EnqueueCallback(ctx, redisClient, k, cb.JobType, batchID, result.ParentID, cb.Options, queue, ttl)
-	}
-	return queue
 }
 
 func ParentResultType(result *CompleteResult) (string, bool) {
