@@ -199,15 +199,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	go func() {
 		wg.Wait()
 		close(workersDone) // Signal lock renewer to stop
+		w.mu.Lock()
+		w.running = false
+		w.stopping = false
+		w.mu.Unlock()
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		w.mu.Lock()
-		w.running = false
-		w.stopping = false
-		w.mu.Unlock()
 		return nil
 	case <-time.After(w.config.Settings.ShutdownTimeout):
 		return context.DeadlineExceeded
