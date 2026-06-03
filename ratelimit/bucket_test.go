@@ -160,12 +160,15 @@ func TestBucketLimiter_WindowReset(t *testing.T) {
 		}
 	}
 
-	waitTime, _ := limiter.Acquire(ctx)
+	waitTime, err := limiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("over-limit acquire failed: %v", err)
+	}
 	if waitTime == 0 {
 		t.Fatal("should be rate limited")
 	}
 
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(waitTime + 50*time.Millisecond)
 
 	for i := range 3 {
 		waitTime, err := limiter.Acquire(ctx)
