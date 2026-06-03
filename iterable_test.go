@@ -136,13 +136,15 @@ func TestSliceIterator(t *testing.T) {
 		iter := SliceIterator(items, 0)
 		defer func() { _ = iter.Close() }()
 
-		for i := 0; iter.Next(ctx); i++ {
+		i := 0
+		for iter.Next(ctx) {
 			cursor := iter.Cursor()
 			pos, _ := CursorTo[int](cursor)
 			// Cursor should be next position to resume from
 			if pos != i+1 {
 				t.Errorf("cursor after item %d = %d, want %d", i, pos, i+1)
 			}
+			i++
 		}
 	})
 

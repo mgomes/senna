@@ -592,7 +592,8 @@ func TestClient_MultipleScheduledJobs_OrderedByTime(t *testing.T) {
 	}
 
 	// Verify they're ordered by score (earliest first)
-	for i := 1; i < len(items); i++ {
+	for offset := range len(items) - 1 {
+		i := offset + 1
 		if items[i].Score < items[i-1].Score {
 			t.Error("scheduled jobs should be ordered by timestamp")
 		}

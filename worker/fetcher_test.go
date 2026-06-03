@@ -46,7 +46,7 @@ func TestFetcher_SelectQueue_MultipleQueues(t *testing.T) {
 	iterations := 10000
 	ctx := context.Background()
 
-	for i := 0; i < iterations; i++ {
+	for range iterations {
 		queue := selectTestQueue(ctx, f, "worker-1")
 		counts[queue]++
 	}
@@ -786,14 +786,14 @@ func TestFetcher_Sequential_LockRenewal(t *testing.T) {
 	ctx := context.Background()
 
 	// Add jobs
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		job := senna.NewJob("job", nil)
 		data, _ := job.Marshal()
 		client.LPush(ctx, k.Queue("transforms"), string(data))
 	}
 
 	// Fetch and process jobs one at a time (sequential queue semantics)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		fetched, err := f.Fetch(ctx, "worker-1")
 		if err != nil {
 			t.Fatalf("fetch %d failed: %v", i, err)
