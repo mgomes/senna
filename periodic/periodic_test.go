@@ -397,7 +397,7 @@ func TestScheduler_ConcurrentClaim(t *testing.T) {
 	now := time.Now()
 	done := make(chan struct{})
 
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			s := NewScheduler(client, k)
@@ -408,7 +408,7 @@ func TestScheduler_ConcurrentClaim(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		<-done
 	}
 

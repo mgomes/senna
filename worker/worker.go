@@ -176,7 +176,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	// Start worker goroutines that block on Redis for jobs
 	var wg sync.WaitGroup
-	for i := 0; i < w.config.Settings.Concurrency; i++ {
+	for range w.config.Settings.Concurrency {
 		wg.Go(func() {
 			w.workerLoop(ctx)
 		})

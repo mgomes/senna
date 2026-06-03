@@ -1219,7 +1219,7 @@ func TestWorker_Scheduler_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	pastTime := time.Now().Add(-time.Minute)
 
 	// Add 10 jobs
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		job := senna.NewJob("concurrent_job", map[string]any{"index": i})
 		jobData, _ := job.Marshal()
 		redisClient.ZAdd(ctx, workers[0].keys.Scheduled(), redis.Z{
@@ -1278,7 +1278,7 @@ func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	pastTime := time.Now().Add(-time.Minute)
 
 	// Add 10 retry jobs
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		job := senna.NewJob("retry_job", map[string]any{"index": i})
 		job.RetryCount = 1
 		jobData, _ := job.Marshal()
