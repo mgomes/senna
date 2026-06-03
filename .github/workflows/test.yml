@@ -87,6 +87,6 @@ jobs:
           GOTOOLCHAIN: local
 
       - name: Run fuzz smoke tests
-        run: make fuzz FUZZTIME=5s
+        run: make fuzz FUZZTIME=5s FUZZPARALLEL=1
         env:
           GOTOOLCHAIN: local
