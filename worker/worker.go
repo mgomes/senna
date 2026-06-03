@@ -658,11 +658,14 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 
 	// Clean up stale worker entries from the hash
 	for _, id := range staleWorkers {
-		w.redis.HDel(ctx, w.keys.Workers(), id)
+		if err := w.redis.HDel(ctx, w.keys.Workers(), id).Err(); err != nil {
+			slog.WarnContext(ctx, "failed to remove stale worker heartbeat", "error", err, "worker_id", id)
+		}
 	}
 
 	// Use SCAN instead of KEYS to avoid blocking Redis on large databases
 	pattern := w.keys.InFlight("*")
+	queuePrefix := w.keys.Queue("")
 	var cursor uint64
 	for {
 		keys, nextCursor, err := w.redis.Scan(ctx, cursor, pattern, 100).Result()
@@ -676,20 +679,9 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 				continue
 			}
 
-			jobs, err := w.redis.LRange(ctx, key, 0, -1).Result()
-			if err != nil {
-				continue
+			if _, err := requeueOrphanedScript.Run(ctx, w.redis, []string{key, w.keys.Queues()}, queuePrefix); err != nil {
+				slog.WarnContext(ctx, "failed to requeue orphaned jobs", "error", err, "worker_id", workerID)
 			}
-
-			for _, data := range jobs {
-				var job senna.Job
-				if err := json.Unmarshal([]byte(data), &job); err != nil {
-					continue
-				}
-				w.redis.LPush(ctx, w.keys.Queue(job.Queue), data)
-			}
-
-			w.redis.Del(ctx, key)
 		}
 
 		cursor = nextCursor
