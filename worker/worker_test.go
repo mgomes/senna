@@ -1215,6 +1215,144 @@ func TestWorker_RequeueOrphanedJobs_StaleHeartbeat(t *testing.T) {
 	}
 }
 
+func TestWorker_RequeueOrphanedJobs_KeepsInFlightWhenQueueWriteFails(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-orphan-queue-fail:*")
+
+	ctx := context.Background()
+	ns := "test-orphan-queue-fail"
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: ns,
+		Settings: senna.WorkerSettings{
+			Concurrency:   1,
+			Queues:        []senna.QueueConfig{{Name: "default"}},
+			HeartbeatRate: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("worker.New() error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	crashedWorkerID := "crashed-worker-queue-fail"
+	staleTime := time.Now().Add(-2 * workerHeartbeatTimeout).Unix()
+	workerInfo := map[string]any{
+		"hostname":   "crashed-host",
+		"pid":        12345,
+		"beat_at":    staleTime,
+		"started_at": staleTime,
+	}
+	workerData, err := json.Marshal(workerInfo)
+	if err != nil {
+		t.Fatalf("json.Marshal(workerInfo) error = %v, want nil", err)
+	}
+	if err := redisClient.HSet(ctx, w.keys.Workers(), crashedWorkerID, string(workerData)).Err(); err != nil {
+		t.Fatalf("HSet(%q) worker heartbeat error = %v, want nil", w.keys.Workers(), err)
+	}
+
+	defaultJob := senna.NewJob("orphan_job", map[string]any{"id": 1})
+	defaultJob.Queue = "default"
+	defaultData, err := defaultJob.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() default job error = %v, want nil", err)
+	}
+	criticalJob := senna.NewJob("orphan_job", map[string]any{"id": 2})
+	criticalJob.Queue = "critical"
+	criticalData, err := criticalJob.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() critical job error = %v, want nil", err)
+	}
+
+	inFlightKey := w.keys.InFlight(crashedWorkerID)
+	if err := redisClient.LPush(ctx, inFlightKey, string(defaultData), string(criticalData)).Err(); err != nil {
+		t.Fatalf("LPush(%q) in-flight jobs error = %v, want nil", inFlightKey, err)
+	}
+	if err := redisClient.Set(ctx, w.keys.Queue("critical"), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) queue error = %v, want nil", w.keys.Queue("critical"), err)
+	}
+
+	w.requeueOrphanedJobs(ctx)
+
+	inFlightLen, err := redisClient.LLen(ctx, inFlightKey).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", inFlightKey, err)
+	}
+	if inFlightLen != 2 {
+		t.Errorf("LLen(%q) = %d, want %d", inFlightKey, inFlightLen, 2)
+	}
+
+	defaultQueueLen, err := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", w.keys.Queue("default"), err)
+	}
+	if defaultQueueLen != 0 {
+		t.Errorf("LLen(%q) = %d, want %d", w.keys.Queue("default"), defaultQueueLen, 0)
+	}
+}
+
+func TestWorker_RequeueOrphanedJobs_DiscardsInvalidPayloads(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-orphan-invalid:*")
+
+	ctx := context.Background()
+	ns := "test-orphan-invalid"
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: ns,
+		Settings: senna.WorkerSettings{
+			Concurrency:   1,
+			Queues:        []senna.QueueConfig{{Name: "default"}},
+			HeartbeatRate: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("worker.New() error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	crashedWorkerID := "crashed-worker-invalid"
+	staleTime := time.Now().Add(-2 * workerHeartbeatTimeout).Unix()
+	workerInfo := map[string]any{
+		"hostname":   "crashed-host",
+		"pid":        12345,
+		"beat_at":    staleTime,
+		"started_at": staleTime,
+	}
+	workerData, err := json.Marshal(workerInfo)
+	if err != nil {
+		t.Fatalf("json.Marshal(workerInfo) error = %v, want nil", err)
+	}
+	if err := redisClient.HSet(ctx, w.keys.Workers(), crashedWorkerID, string(workerData)).Err(); err != nil {
+		t.Fatalf("HSet(%q) worker heartbeat error = %v, want nil", w.keys.Workers(), err)
+	}
+
+	inFlightKey := w.keys.InFlight(crashedWorkerID)
+	if err := redisClient.LPush(ctx, inFlightKey, "not-json", "[]", "{}").Err(); err != nil {
+		t.Fatalf("LPush(%q) invalid payloads error = %v, want nil", inFlightKey, err)
+	}
+
+	w.requeueOrphanedJobs(ctx)
+
+	inFlightLen, err := redisClient.LLen(ctx, inFlightKey).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", inFlightKey, err)
+	}
+	if inFlightLen != 0 {
+		t.Errorf("LLen(%q) = %d, want %d", inFlightKey, inFlightLen, 0)
+	}
+
+	defaultQueueLen, err := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", w.keys.Queue("default"), err)
+	}
+	if defaultQueueLen != 0 {
+		t.Errorf("LLen(%q) = %d, want %d", w.keys.Queue("default"), defaultQueueLen, 0)
+	}
+}
+
 func TestWorker_RequeueOrphanedJobs_ActiveWorkerNotAffected(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-orphan-active:*")

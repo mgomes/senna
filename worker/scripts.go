@@ -13,6 +13,9 @@ var enqueueScheduledLua string
 //go:embed lua/sequential_fetch.lua
 var sequentialFetchLua string
 
+//go:embed lua/requeue_orphaned.lua
+var requeueOrphanedLua string
+
 var (
 	batchCompleteScript         = lua.BatchCompleteScript
 	batchCallbackCompleteScript = lua.BatchCallbackCompleteScript
@@ -20,4 +23,5 @@ var (
 	batchInvalidateScript       = lua.BatchInvalidateScript
 	enqueueScheduledScript      = script.New("enqueue_scheduled", enqueueScheduledLua)
 	sequentialFetchScript       = script.New("sequential_fetch", sequentialFetchLua)
+	requeueOrphanedScript       = script.New("requeue_orphaned", requeueOrphanedLua)
 )
