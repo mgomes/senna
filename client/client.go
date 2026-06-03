@@ -417,7 +417,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 	}
 
 	// Build and store batch state
-	state := c.buildBatchState(b, callbackQueue, emptyBatch)
+	state := c.buildBatchState(b, callbackQueue)
 
 	// Step 1: Store batch state
 	if err := c.storeBatchState(ctx, b.ID, state); err != nil {
@@ -438,57 +438,51 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 
 	// Handle empty batches
 	if emptyBatch {
-		c.handleEmptyBatch(ctx, b, callbackQueue)
+		if err := c.handleEmptyBatch(ctx, b); err != nil {
+			if b.ParentID != "" {
+				c.rollbackParentLink(ctx, b.ParentID, b.ID)
+			}
+			c.cleanupOrphanedBatch(ctx, b.ID)
+			return err
+		}
 	}
 
 	return nil
 }
 
-// enqueueEmptyBatchCallbacks enqueues callbacks for empty batches immediately.
-func (c *Client) enqueueEmptyBatchCallbacks(ctx context.Context, b *Batch, queue string) {
-	// OnComplete always fires for empty batches
-	if b.OnComplete != nil {
-		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnComplete.JobType, b.ID, b.ParentID, b.OnComplete.Options, queue, batch.BatchTTL)
-	}
-
-	// OnSuccess fires for empty batches (no jobs = no failures)
-	if b.OnSuccess != nil {
-		batch.EnqueueCallback(ctx, c.redis, c.keys, b.OnSuccess.JobType, b.ID, b.ParentID, b.OnSuccess.Options, queue, batch.BatchTTL)
-	}
-}
-
-// propagateEmptyChildBatch notifies the parent batch that an empty child batch
-// with no callbacks has completed. This is necessary because empty batches with
-// no callbacks have no jobs to process and no callbacks to trigger completion.
-func (c *Client) propagateEmptyChildBatch(ctx context.Context, childBatchID, parentID, queue string) {
-	c.propagateBatchCompletion(ctx, childBatchID, parentID, "success", queue)
-}
-
 // propagateBatchCompletion notifies a parent batch that a child has completed.
 // The resultType should be "success", "death", or "invalidated".
-func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, parentID, resultType, queue string) {
-	scriptKeys := []string{
-		c.keys.Batch(parentID),
-		c.keys.BatchJobs(parentID),
-		c.keys.BatchFailed(parentID),
-		c.keys.DeadBatches(),
-	}
+func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, parentID, resultType string) error {
+	scriptKeys := batch.CompletionKeys(c.keys, parentID)
+	scriptArgs := batch.CompletionArgs(c.keys, childBatchID, resultType)
 
 	var result batch.CompleteResult
-	if err := batchCompleteScript.RunJSON(ctx, c.redis, &result, scriptKeys, childBatchID, resultType); err != nil {
-		return
+	if err := batchCompleteScript.RunJSON(ctx, c.redis, &result, scriptKeys, scriptArgs...); err != nil {
+		return fmt.Errorf("failed to propagate batch completion to parent %s: %w", parentID, err)
 	}
 
 	if result.Error != "" || result.AlreadyProcessed {
-		return
+		if result.Error == "" {
+			return nil
+		}
+		if result.Error == "batch_not_found" {
+			return &senna.BatchNotFoundError{BatchID: parentID}
+		}
+		return fmt.Errorf("parent batch %s completion failed: %s", parentID, result.Error)
 	}
-
-	callbackQueue := batch.EnqueueCallbacks(ctx, c.redis, c.keys, parentID, &result, queue, batch.BatchTTL)
 
 	grandparentResult, ok := batch.ParentResultType(&result)
 	if ok {
-		c.propagateBatchCompletion(ctx, parentID, result.ParentID, grandparentResult, callbackQueue)
+		if err := c.propagateBatchCompletion(ctx, parentID, result.ParentID, grandparentResult); err != nil {
+			slog.WarnContext(ctx, "failed to propagate batch completion to ancestor",
+				"batch_id", parentID,
+				"parent_id", result.ParentID,
+				"error", err,
+			)
+		}
 	}
+
+	return nil
 }
 
 // cleanupOrphanedBatch removes a batch that failed to link to its parent.
@@ -540,32 +534,21 @@ func (c *Client) marshalBatchJobs(b *Batch) ([]marshaledJob, error) {
 }
 
 // buildBatchState constructs the BatchState from a Batch.
-func (c *Client) buildBatchState(b *Batch, callbackQueue string, emptyBatch bool) *senna.BatchState {
-	callbackCount := 0
-	if emptyBatch {
-		if b.OnComplete != nil {
-			callbackCount++
-		}
-		if b.OnSuccess != nil {
-			callbackCount++
-		}
-	}
-
+func (c *Client) buildBatchState(b *Batch, callbackQueue string) *senna.BatchState {
 	state := &senna.BatchState{
-		ID:               b.ID,
-		Description:      b.Description,
-		ParentID:         b.ParentID,
-		Total:            len(b.Jobs),
-		Pending:          len(b.Jobs),
-		Failures:         0,
-		Successes:        0,
-		CallbacksPending: callbackCount,
-		Dead:             false,
-		DeathFired:       false,
-		CompleteFired:    emptyBatch,
-		SuccessFired:     emptyBatch,
-		CreatedAt:        b.CreatedAt,
-		CallbackQueue:    callbackQueue,
+		ID:            b.ID,
+		Description:   b.Description,
+		ParentID:      b.ParentID,
+		Total:         len(b.Jobs),
+		Pending:       len(b.Jobs),
+		Failures:      0,
+		Successes:     0,
+		Dead:          false,
+		DeathFired:    false,
+		CompleteFired: false,
+		SuccessFired:  false,
+		CreatedAt:     b.CreatedAt,
+		CallbackQueue: callbackQueue,
 	}
 
 	if b.OnComplete != nil {
@@ -663,14 +646,32 @@ func (c *Client) enqueueBatchJobs(ctx context.Context, b *Batch, jobs []marshale
 	return nil
 }
 
-// handleEmptyBatch handles callbacks and propagation for empty batches.
-func (c *Client) handleEmptyBatch(ctx context.Context, b *Batch, callbackQueue string) {
-	c.enqueueEmptyBatchCallbacks(ctx, b, callbackQueue)
+// handleEmptyBatch marks an empty batch complete and enqueues callbacks atomically.
+func (c *Client) handleEmptyBatch(ctx context.Context, b *Batch) error {
+	scriptKeys := batch.CompletionKeys(c.keys, b.ID)
+	scriptArgs := batch.CompletionArgs(c.keys, b.ID, batch.ResultEmptySuccess)
 
-	// If this empty batch has a parent but no callbacks, propagate completion immediately
-	if b.ParentID != "" && b.OnComplete == nil && b.OnSuccess == nil {
-		c.propagateEmptyChildBatch(ctx, b.ID, b.ParentID, callbackQueue)
+	var result batch.CompleteResult
+	if err := batchCompleteScript.RunJSON(ctx, c.redis, &result, scriptKeys, scriptArgs...); err != nil {
+		return fmt.Errorf("failed to complete empty batch %s: %w", b.ID, err)
 	}
+
+	if result.Error != "" {
+		return fmt.Errorf("empty batch %s completion failed: %s", b.ID, result.Error)
+	}
+	if result.AlreadyProcessed {
+		return nil
+	}
+
+	parentResultType, ok := batch.ParentResultType(&result)
+	if !ok {
+		return nil
+	}
+
+	if err := c.propagateBatchCompletion(ctx, b.ID, result.ParentID, parentResultType); err != nil {
+		return err
+	}
+	return nil
 }
 
 // BatchStatus returns the status of a batch.

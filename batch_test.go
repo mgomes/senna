@@ -2,7 +2,10 @@ package senna_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -728,6 +731,392 @@ func TestBatch_ClientDefaultQueueForCallbacks(t *testing.T) {
 	}
 	if callbackQueue != "custom" {
 		t.Errorf("expected callback to run on 'custom' queue (client default), got '%s'", callbackQueue)
+	}
+}
+
+func TestBatch_CallbackEnqueueRejectsWrongQueueTypeWithoutStateMutation(t *testing.T) {
+	const namespace = "batch-callback-atomic"
+	flushKeysBatch(t, namespace+":*")
+
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(defaultLogger)
+	})
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := c.Redis().Set(ctx, namespace+":queue:callbacks", "not-a-list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison callback queue key: %v", err)
+	}
+
+	var jobsProcessed atomic.Int32
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		jobsProcessed.Add(1)
+		return nil
+	})
+	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
+		t.Error("callback should not run when callback queue has the wrong Redis type")
+		return nil
+	})
+
+	go func() {
+		_ = w.Run(ctx)
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	batch := client.NewBatch().
+		Add("batch_job", nil).
+		OnCompleteCallback("on_complete").
+		WithCallbackQueue("callbacks")
+
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if jobsProcessed.Load() == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if jobsProcessed.Load() != 1 {
+		t.Fatalf("batch job should have run once, got %d", jobsProcessed.Load())
+	}
+
+	data, err := c.Redis().Get(context.Background(), namespace+":batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to read batch state: %v", err)
+	}
+
+	var state senna.BatchState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		t.Fatalf("failed to decode batch state: %v", err)
+	}
+
+	if state.Pending != 1 {
+		t.Errorf("BatchState.Pending = %d, want 1", state.Pending)
+	}
+	if state.Successes != 0 {
+		t.Errorf("BatchState.Successes = %d, want 0", state.Successes)
+	}
+	if state.CallbacksPending != 0 {
+		t.Errorf("BatchState.CallbacksPending = %d, want 0", state.CallbacksPending)
+	}
+
+	callbacks, err := c.Redis().SCard(context.Background(), namespace+":batch:"+batch.ID+":callbacks").Result()
+	if err != nil {
+		t.Fatalf("failed to read callback set size: %v", err)
+	}
+	if callbacks != 0 {
+		t.Errorf("callback set size = %d, want 0", callbacks)
+	}
+}
+
+func TestBatch_EmptyBatchCallbackEnqueueErrorCleansState(t *testing.T) {
+	const namespace = "batch-empty-callback-atomic"
+	flushKeysBatch(t, namespace+":*")
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	if err := c.Redis().Set(ctx, namespace+":queue:callbacks", "not-a-list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison callback queue key: %v", err)
+	}
+
+	batch := client.NewBatch().
+		OnCompleteCallback("on_complete").
+		WithCallbackQueue("callbacks")
+
+	err = c.EnqueueBatch(ctx, batch)
+	if err == nil {
+		t.Fatal("expected empty batch enqueue to fail for wrong callback queue type")
+	}
+	if !strings.Contains(err.Error(), "queue key has type string, want list") {
+		t.Fatalf("unexpected empty batch enqueue error: %v", err)
+	}
+
+	exists, err := c.Redis().Exists(ctx, namespace+":batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to check batch state: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("batch state should be cleaned up after callback enqueue failure")
+	}
+
+	callbacks, err := c.Redis().Exists(ctx, namespace+":batch:"+batch.ID+":callbacks").Result()
+	if err != nil {
+		t.Fatalf("failed to check callback set: %v", err)
+	}
+	if callbacks != 0 {
+		t.Fatalf("callback set should be cleaned up after callback enqueue failure")
+	}
+}
+
+func TestBatch_EmptyChildDoesNotRollbackCompletedParentOnAncestorPropagationError(t *testing.T) {
+	const namespace = "batch-empty-ancestor-propagation"
+	flushKeysBatch(t, namespace+":*")
+
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(defaultLogger)
+	})
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	now := time.Now()
+	grandparentID := "grandparent"
+	parentID := "parent"
+
+	grandparentState := senna.BatchState{
+		ID:            grandparentID,
+		Total:         1,
+		Pending:       1,
+		CreatedAt:     now,
+		OnComplete:    &senna.CallbackInfo{JobType: "grandparent_complete"},
+		CallbackQueue: "callbacks",
+	}
+	parentState := senna.BatchState{
+		ID:        parentID,
+		ParentID:  grandparentID,
+		CreatedAt: now,
+	}
+
+	grandparentData, err := json.Marshal(grandparentState)
+	if err != nil {
+		t.Fatalf("failed to marshal grandparent state: %v", err)
+	}
+	parentData, err := json.Marshal(parentState)
+	if err != nil {
+		t.Fatalf("failed to marshal parent state: %v", err)
+	}
+
+	if err := c.Redis().Set(ctx, namespace+":batch:"+grandparentID, string(grandparentData), time.Hour).Err(); err != nil {
+		t.Fatalf("failed to store grandparent state: %v", err)
+	}
+	if err := c.Redis().SAdd(ctx, namespace+":batch:"+grandparentID+":jobs", parentID).Err(); err != nil {
+		t.Fatalf("failed to store grandparent jobs set: %v", err)
+	}
+	if err := c.Redis().Set(ctx, namespace+":batch:"+parentID, string(parentData), time.Hour).Err(); err != nil {
+		t.Fatalf("failed to store parent state: %v", err)
+	}
+	if err := c.Redis().Set(ctx, namespace+":queue:callbacks", "not-a-list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison grandparent callback queue key: %v", err)
+	}
+
+	child := client.NewBatch().WithParent(parentID)
+	if err := c.EnqueueBatch(ctx, child); err != nil {
+		t.Fatalf("EnqueueBatch(empty child) error = %v, want nil", err)
+	}
+
+	parentRaw, err := c.Redis().Get(ctx, namespace+":batch:"+parentID).Result()
+	if err != nil {
+		t.Fatalf("failed to read parent state: %v", err)
+	}
+	var gotParent senna.BatchState
+	if err := json.Unmarshal([]byte(parentRaw), &gotParent); err != nil {
+		t.Fatalf("failed to decode parent state: %v", err)
+	}
+	if gotParent.Pending != 0 {
+		t.Fatalf("parent Pending = %d, want 0", gotParent.Pending)
+	}
+	if !gotParent.CompleteFired {
+		t.Fatal("parent CompleteFired = false, want true")
+	}
+
+	childExists, err := c.Redis().Exists(ctx, namespace+":batch:"+child.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to check child state: %v", err)
+	}
+	if childExists != 1 {
+		t.Fatalf("child batch state should remain after ancestor propagation failure")
+	}
+
+	grandparentRaw, err := c.Redis().Get(ctx, namespace+":batch:"+grandparentID).Result()
+	if err != nil {
+		t.Fatalf("failed to read grandparent state: %v", err)
+	}
+	var gotGrandparent senna.BatchState
+	if err := json.Unmarshal([]byte(grandparentRaw), &gotGrandparent); err != nil {
+		t.Fatalf("failed to decode grandparent state: %v", err)
+	}
+	if gotGrandparent.Pending != 1 {
+		t.Fatalf("grandparent Pending = %d, want 1", gotGrandparent.Pending)
+	}
+	if gotGrandparent.CallbacksPending != 0 {
+		t.Fatalf("grandparent CallbacksPending = %d, want 0", gotGrandparent.CallbacksPending)
+	}
+}
+
+func TestBatch_ReopenedBatchUsesUniqueCallbackIDs(t *testing.T) {
+	const namespace = "batch-reopen-callback-ids"
+	flushKeysBatch(t, namespace+":*")
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+		Settings: senna.WorkerSettings{
+			Concurrency:     2,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var callbackCount atomic.Int32
+	var childProcessed atomic.Bool
+	var firstCallbackTimedOut atomic.Bool
+	var enqueueChildErr atomic.Value
+
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		return nil
+	})
+	w.Register("child_job", func(ctx context.Context, job *senna.Job) error {
+		childProcessed.Store(true)
+		return nil
+	})
+	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
+		count := callbackCount.Add(1)
+		if count != 1 {
+			return nil
+		}
+
+		parentID, ok := job.Args["batch_id"].(string)
+		if !ok || parentID == "" {
+			enqueueChildErr.Store("missing batch_id in callback args")
+			return nil
+		}
+
+		child := client.NewBatch().
+			WithParent(parentID).
+			Add("child_job", nil)
+		if err := c.EnqueueBatch(ctx, child); err != nil {
+			enqueueChildErr.Store(err.Error())
+			return nil
+		}
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if callbackCount.Load() >= 2 {
+				return nil
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		firstCallbackTimedOut.Store(true)
+		return nil
+	})
+
+	go func() {
+		_ = w.Run(ctx)
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	batch := client.NewBatch().
+		Add("batch_job", nil).
+		OnCompleteCallback("on_complete")
+
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var state senna.BatchState
+	for time.Now().Before(deadline) {
+		data, err := c.Redis().Get(ctx, namespace+":batch:"+batch.ID).Result()
+		if err == nil {
+			if err := json.Unmarshal([]byte(data), &state); err != nil {
+				t.Fatalf("failed to decode batch state: %v", err)
+			}
+			if callbackCount.Load() >= 2 && state.CallbacksPending == 0 {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if value := enqueueChildErr.Load(); value != nil {
+		t.Fatalf("failed to enqueue child batch from callback: %v", value)
+	}
+	if firstCallbackTimedOut.Load() {
+		t.Fatal("first callback timed out waiting for reopened batch callback")
+	}
+	if !childProcessed.Load() {
+		t.Fatal("child job should have processed after callback reopened the parent batch")
+	}
+	if callbackCount.Load() != 2 {
+		t.Fatalf("callback count = %d, want 2", callbackCount.Load())
+	}
+	if state.CallbacksPending != 0 {
+		t.Fatalf("BatchState.CallbacksPending = %d, want 0", state.CallbacksPending)
+	}
+	if state.CallbackSequence != 2 {
+		t.Fatalf("BatchState.CallbackSequence = %d, want 2", state.CallbackSequence)
 	}
 }
 

@@ -20,6 +20,7 @@ type BatchState struct {
 	Failures         int           `json:"failures"`
 	Successes        int           `json:"successes"`
 	CallbacksPending int           `json:"callbacks_pending,omitempty"`
+	CallbackSequence int           `json:"callback_seq,omitempty"`
 	Dead             bool          `json:"dead"`
 	DeathFired       bool          `json:"death_fired"`
 	CompleteFired    bool          `json:"complete_fired"`
