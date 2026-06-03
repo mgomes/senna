@@ -179,22 +179,39 @@ func TestLeakyLimiter_LevelRejectsMalformedState(t *testing.T) {
 		DrainTime: time.Second,
 	})
 
-	for _, field := range []string{"level", "last_drip"} {
-		if err := client.Del(ctx, "senna:ratelimit:leaky:test-level-malformed").Err(); err != nil {
-			t.Fatalf("Del malformed leaky limiter state error = %v", err)
-		}
-		if err := client.HSet(ctx, "senna:ratelimit:leaky:test-level-malformed", field, "not-a-number").Err(); err != nil {
-			t.Fatalf("HSet malformed leaky limiter %s error = %v", field, err)
-		}
+	tests := []struct {
+		name       string
+		field      string
+		value      string
+		wantNumErr bool
+	}{
+		{name: "level text", field: "level", value: "not-a-number", wantNumErr: true},
+		{name: "level NaN", field: "level", value: "NaN"},
+		{name: "level positive infinity", field: "level", value: "+Inf"},
+		{name: "level negative infinity", field: "level", value: "-Inf"},
+		{name: "last drip text", field: "last_drip", value: "not-a-number", wantNumErr: true},
+	}
 
-		_, err := limiter.Level(ctx)
-		if err == nil {
-			t.Fatalf("LeakyLimiter.Level() with malformed %s error = nil, want malformed state error", field)
-		}
-		var numberErr *strconv.NumError
-		if !errors.As(err, &numberErr) {
-			t.Fatalf("LeakyLimiter.Level() with malformed %s error = %v, want strconv.NumError", field, err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := client.Del(ctx, "senna:ratelimit:leaky:test-level-malformed").Err(); err != nil {
+				t.Fatalf("Del malformed leaky limiter state error = %v", err)
+			}
+			if err := client.HSet(ctx, "senna:ratelimit:leaky:test-level-malformed", tt.field, tt.value).Err(); err != nil {
+				t.Fatalf("HSet malformed leaky limiter %s=%q error = %v", tt.field, tt.value, err)
+			}
+
+			_, err := limiter.Level(ctx)
+			if err == nil {
+				t.Fatalf("LeakyLimiter.Level() with malformed %s=%q error = nil, want malformed state error", tt.field, tt.value)
+			}
+			if tt.wantNumErr {
+				var numberErr *strconv.NumError
+				if !errors.As(err, &numberErr) {
+					t.Fatalf("LeakyLimiter.Level() with malformed %s=%q error = %v, want strconv.NumError", tt.field, tt.value, err)
+				}
+			}
+		})
 	}
 }
 

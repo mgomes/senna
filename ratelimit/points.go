@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -242,6 +243,9 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 			points, err = strconv.ParseFloat(s, 64)
 			if err != nil {
 				return 0, fmt.Errorf("parse points limiter balance: %w", err)
+			}
+			if math.IsNaN(points) || math.IsInf(points, 0) {
+				return 0, fmt.Errorf("parse points limiter balance: non-finite value %q", s)
 			}
 		}
 	}

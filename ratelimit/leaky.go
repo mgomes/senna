@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -174,6 +175,9 @@ func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
 			level, err = strconv.ParseFloat(s, 64)
 			if err != nil {
 				return 0, fmt.Errorf("parse leaky limiter level: %w", err)
+			}
+			if math.IsNaN(level) || math.IsInf(level, 0) {
+				return 0, fmt.Errorf("parse leaky limiter level: non-finite value %q", s)
 			}
 		}
 	}

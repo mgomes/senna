@@ -247,22 +247,39 @@ func TestPointsLimiter_AvailablePointsRejectsMalformedState(t *testing.T) {
 		RefillTime: time.Second,
 	})
 
-	for _, field := range []string{"points", "last_refill"} {
-		if err := client.Del(ctx, "senna:ratelimit:points:test-available-malformed").Err(); err != nil {
-			t.Fatalf("Del malformed points limiter state error = %v", err)
-		}
-		if err := client.HSet(ctx, "senna:ratelimit:points:test-available-malformed", field, "not-a-number").Err(); err != nil {
-			t.Fatalf("HSet malformed points limiter %s error = %v", field, err)
-		}
+	tests := []struct {
+		name       string
+		field      string
+		value      string
+		wantNumErr bool
+	}{
+		{name: "points text", field: "points", value: "not-a-number", wantNumErr: true},
+		{name: "points NaN", field: "points", value: "NaN"},
+		{name: "points positive infinity", field: "points", value: "+Inf"},
+		{name: "points negative infinity", field: "points", value: "-Inf"},
+		{name: "last refill text", field: "last_refill", value: "not-a-number", wantNumErr: true},
+	}
 
-		_, err := limiter.AvailablePoints(ctx)
-		if err == nil {
-			t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s error = nil, want malformed state error", field)
-		}
-		var numberErr *strconv.NumError
-		if !errors.As(err, &numberErr) {
-			t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s error = %v, want strconv.NumError", field, err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := client.Del(ctx, "senna:ratelimit:points:test-available-malformed").Err(); err != nil {
+				t.Fatalf("Del malformed points limiter state error = %v", err)
+			}
+			if err := client.HSet(ctx, "senna:ratelimit:points:test-available-malformed", tt.field, tt.value).Err(); err != nil {
+				t.Fatalf("HSet malformed points limiter %s=%q error = %v", tt.field, tt.value, err)
+			}
+
+			_, err := limiter.AvailablePoints(ctx)
+			if err == nil {
+				t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s=%q error = nil, want malformed state error", tt.field, tt.value)
+			}
+			if tt.wantNumErr {
+				var numberErr *strconv.NumError
+				if !errors.As(err, &numberErr) {
+					t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s=%q error = %v, want strconv.NumError", tt.field, tt.value, err)
+				}
+			}
+		})
 	}
 }
 
