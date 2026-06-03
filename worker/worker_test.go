@@ -101,6 +101,185 @@ func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestWorker_StopIsIdempotent(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-stop-idempotent")
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+
+	w.Stop()
+	w.Stop()
+
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func TestWorker_RunRestartsAfterCleanShutdown(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-run-restart")
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("first Worker.Run() error = %v, want nil", err)
+	}
+
+	errCh = runWorker(t, w)
+	waitForWorkerRunning(t, w)
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("second Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func TestWorker_RunRestartsAfterTimedOutShutdownCompletes(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-timeout-restart")
+	w.config.Settings.ShutdownTimeout = 10 * time.Millisecond
+
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	w.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
+		close(started)
+		time.Sleep(50 * time.Millisecond)
+		close(finished)
+		return nil
+	})
+
+	job := senna.NewJob("slow_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v", err)
+	}
+	if err := w.redis.LPush(context.Background(), w.keys.Queue("default"), string(data)).Err(); err != nil {
+		t.Fatalf("LPush(slow_job) error = %v", err)
+	}
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow_job handler did not start")
+	}
+
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Worker.Run() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("slow_job handler did not finish")
+	}
+	waitForWorkerStopped(t, w)
+
+	errCh = runWorker(t, w)
+	waitForWorkerRunning(t, w)
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("second Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func newLifecycleTestWorker(t *testing.T, namespace string) *Worker {
+	t.Helper()
+
+	settings := senna.DefaultWorkerSettings()
+	settings.Concurrency = 1
+	settings.PollInterval = 10 * time.Millisecond
+	settings.ShutdownTimeout = time.Second
+	settings.HeartbeatRate = time.Hour
+	settings.ScheduledPollInterval = time.Hour
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+		Settings:  settings,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	flushTestKeys(t, w.redis, namespace+":*")
+	t.Cleanup(func() {
+		flushTestKeys(t, w.redis, namespace+":*")
+		_ = w.redis.Close()
+	})
+
+	return w
+}
+
+func runWorker(t *testing.T, w *Worker) <-chan error {
+	t.Helper()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Run(context.Background())
+	}()
+	return errCh
+}
+
+func waitForWorkerRunning(t *testing.T, w *Worker) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		w.mu.RLock()
+		running := w.running
+		w.mu.RUnlock()
+		if running {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("Worker.Run() did not enter running state")
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForWorkerExit(t *testing.T, errCh <-chan error) error {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker.Run() did not stop")
+		return nil
+	}
+}
+
+func waitForWorkerStopped(t *testing.T, w *Worker) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		w.mu.RLock()
+		running := w.running
+		stopping := w.stopping
+		w.mu.RUnlock()
+		if !running && !stopping {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("Worker.Run() did not clear lifecycle state")
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestWorker_Register_WithOptions(t *testing.T) {
 	w, err := New(&Config{
 		Redis:     getTestRedisConfig(),

@@ -278,6 +278,59 @@ func TestScheduler_StartStop(t *testing.T) {
 	}
 }
 
+func TestScheduler_StopBeforeStartReturns(t *testing.T) {
+	client := newRedisClient(t)
+	ns := "test-periodic-" + uuid.NewString()[:8]
+	k := keys.New(ns)
+	t.Cleanup(func() { cleanupKeys(t, client, ns+":*") })
+
+	s := NewScheduler(client, k)
+	done := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() before Start() hung")
+	}
+}
+
+func TestScheduler_StopIsIdempotent(t *testing.T) {
+	client := newRedisClient(t)
+	ns := "test-periodic-" + uuid.NewString()[:8]
+	k := keys.New(ns)
+	t.Cleanup(func() { cleanupKeys(t, client, ns+":*") })
+
+	s := NewScheduler(client, k)
+	s.interval = 50 * time.Millisecond
+	s.Start(context.Background())
+	time.Sleep(100 * time.Millisecond)
+
+	s.Stop()
+	s.Stop()
+}
+
+func TestScheduler_StartsAfterStop(t *testing.T) {
+	client := newRedisClient(t)
+	ns := "test-periodic-" + uuid.NewString()[:8]
+	k := keys.New(ns)
+	t.Cleanup(func() { cleanupKeys(t, client, ns+":*") })
+
+	s := NewScheduler(client, k)
+	s.interval = 50 * time.Millisecond
+
+	s.Start(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	s.Stop()
+
+	s.Start(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	s.Stop()
+}
+
 func TestScheduler_MultipleWorkers_OnlyOneEnqueues(t *testing.T) {
 	client := newRedisClient(t)
 	ns := "test-periodic-" + uuid.NewString()[:8]

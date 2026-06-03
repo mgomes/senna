@@ -52,18 +52,24 @@ func WithArgs(args map[string]any) Option {
 
 // Scheduler manages periodic jobs and ensures only one worker enqueues each job.
 type Scheduler struct {
-	redis    redis.Cmdable
-	keys     *keys.Keys
-	jobs     []*Job
-	parser   cron.Parser
-	interval time.Duration
-	mu       sync.RWMutex
-	stopCh   chan struct{}
-	done     chan struct{}
+	redis       redis.Cmdable
+	keys        *keys.Keys
+	jobs        []*Job
+	parser      cron.Parser
+	interval    time.Duration
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	running     bool
+	stopping    bool
+	stopCh      chan struct{}
+	done        chan struct{}
 }
 
 // NewScheduler creates a new periodic job scheduler.
 func NewScheduler(redis redis.Cmdable, k *keys.Keys) *Scheduler {
+	done := make(chan struct{})
+	close(done)
+
 	return &Scheduler{
 		redis: redis,
 		keys:  k,
@@ -73,7 +79,7 @@ func NewScheduler(redis redis.Cmdable, k *keys.Keys) *Scheduler {
 		),
 		interval: 15 * time.Second,
 		stopCh:   make(chan struct{}),
-		done:     make(chan struct{}),
+		done:     done,
 	}
 }
 
@@ -106,17 +112,50 @@ func (s *Scheduler) Register(cronExpr, jobType string, opts ...Option) error {
 
 // Start begins the periodic job scheduler.
 func (s *Scheduler) Start(ctx context.Context) {
-	go s.run(ctx)
+	s.lifecycleMu.Lock()
+	if s.running || s.stopping {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.stopCh = make(chan struct{})
+	s.done = make(chan struct{})
+	stopCh := s.stopCh
+	done := s.done
+	s.running = true
+	s.lifecycleMu.Unlock()
+
+	go s.run(ctx, stopCh, done)
 }
 
 // Stop halts the scheduler and waits for it to finish.
 func (s *Scheduler) Stop() {
-	close(s.stopCh)
-	<-s.done
+	s.lifecycleMu.Lock()
+	if !s.running && !s.stopping {
+		done := s.done
+		s.lifecycleMu.Unlock()
+		<-done
+		return
+	}
+	if !s.stopping {
+		close(s.stopCh)
+		s.stopping = true
+	}
+	done := s.done
+	s.lifecycleMu.Unlock()
+
+	<-done
 }
 
-func (s *Scheduler) run(ctx context.Context) {
-	defer close(s.done)
+func (s *Scheduler) run(ctx context.Context, stopCh <-chan struct{}, done chan<- struct{}) {
+	defer func() {
+		close(done)
+		s.lifecycleMu.Lock()
+		if s.done == done {
+			s.running = false
+			s.stopping = false
+		}
+		s.lifecycleMu.Unlock()
+	}()
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -128,7 +167,7 @@ func (s *Scheduler) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			s.checkAndEnqueue(ctx)
