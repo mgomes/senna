@@ -145,7 +145,13 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) (e
 		}
 	}
 	defer func() {
-		err = errors.Join(err, l.Release(ctx))
+		if releaseErr := l.Release(ctx); releaseErr != nil {
+			if err == nil {
+				err = releaseErr
+				return
+			}
+			err = errors.Join(err, releaseErr)
+		}
 	}()
 
 	return fn()

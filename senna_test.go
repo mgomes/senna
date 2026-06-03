@@ -41,7 +41,13 @@ func (l *stubLimiter) WithinLimit(ctx context.Context, fn func() error) (err err
 		return &ratelimit.OverLimitError{LimiterName: l.Name(), LimiterType: "stub", RetryIn: waitTime}
 	}
 	defer func() {
-		err = errors.Join(err, l.Release(ctx))
+		if releaseErr := l.Release(ctx); releaseErr != nil {
+			if err == nil {
+				err = releaseErr
+				return
+			}
+			err = errors.Join(err, releaseErr)
+		}
 	}()
 
 	return fn()
@@ -328,6 +334,19 @@ func TestRateLimitMiddlewareWithReschedule_JoinsHandlerAndReleaseErrors(t *testi
 	}
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("RateLimitMiddlewareWithReschedule() error = %v, want release error", err)
+	}
+}
+
+func TestRateLimitMiddlewareWithReschedule_PreservesHandlerError(t *testing.T) {
+	handlerErr := errors.New("handler failed")
+	limiter := &stubLimiter{}
+	handler := RateLimitMiddlewareWithReschedule(limiter)(func(ctx context.Context, job *Job) error {
+		return handlerErr
+	})
+
+	err := handler(context.Background(), NewJob("test_job", nil))
+	if err != handlerErr {
+		t.Fatalf("RateLimitMiddlewareWithReschedule() error = %v, want original handler error", err)
 	}
 }
 

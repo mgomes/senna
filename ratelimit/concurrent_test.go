@@ -2,6 +2,7 @@ package ratelimit_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,6 +178,28 @@ func TestConcurrentLimiter_WithinLimitReturnsReleaseError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ConcurrentLimiter.WithinLimit() error = nil, want release error")
+	}
+}
+
+func TestConcurrentLimiter_WithinLimitPreservesHandlerError(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:concurrent:test-handler-error*")
+
+	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
+		Name:        "test-handler-error",
+		Limit:       1,
+		LockTimeout: time.Minute,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	handlerErr := errors.New("handler failed")
+	err := limiter.WithinLimit(ctx, func() error {
+		return handlerErr
+	})
+	if err != handlerErr {
+		t.Fatalf("ConcurrentLimiter.WithinLimit() error = %v, want original handler error", err)
 	}
 }
 

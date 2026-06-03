@@ -44,7 +44,13 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 				}
 			}
 			defer func() {
-				err = errors.Join(err, limiter.Release(ctx))
+				if releaseErr := limiter.Release(ctx); releaseErr != nil {
+					if err == nil {
+						err = releaseErr
+						return
+					}
+					err = errors.Join(err, releaseErr)
+				}
 			}()
 
 			return next(ctx, job)
