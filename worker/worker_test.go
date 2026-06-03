@@ -859,7 +859,9 @@ func TestWorker_Scheduler_EnqueuesDueJobs(t *testing.T) {
 	})
 
 	// Call enqueueScheduled directly
-	w.enqueueScheduled(ctx)
+	if err := w.enqueueScheduled(ctx); err != nil {
+		t.Fatalf("enqueueScheduled() error = %v, want nil", err)
+	}
 
 	// Job should now be in the queue
 	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
@@ -913,7 +915,9 @@ func TestWorker_Scheduler_KeepsScheduledJobsWhenQueueWriteFails(t *testing.T) {
 		t.Fatalf("Set(%q) queue error = %v, want nil", w.keys.Queue("critical"), err)
 	}
 
-	w.enqueueScheduled(ctx)
+	if err := w.enqueueScheduled(ctx); err == nil {
+		t.Fatal("enqueueScheduled() error = nil, want error")
+	}
 
 	scheduledLen, err := redisClient.ZCard(ctx, w.keys.Scheduled()).Result()
 	if err != nil {
@@ -958,7 +962,9 @@ func TestWorker_Scheduler_KeepsFutureJobs(t *testing.T) {
 	})
 
 	// Call enqueueScheduled
-	w.enqueueScheduled(ctx)
+	if err := w.enqueueScheduled(ctx); err != nil {
+		t.Fatalf("enqueueScheduled() error = %v, want nil", err)
+	}
 
 	// Job should still be in scheduled set
 	scheduledLen, _ := redisClient.ZCard(ctx, w.keys.Scheduled()).Result()
@@ -1012,7 +1018,9 @@ func TestWorker_Scheduler_ProcessesMixedJobs(t *testing.T) {
 	}
 
 	// Call enqueueScheduled
-	w.enqueueScheduled(ctx)
+	if err := w.enqueueScheduled(ctx); err != nil {
+		t.Fatalf("enqueueScheduled() error = %v, want nil", err)
+	}
 
 	// 2 due jobs should be in queue
 	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
@@ -1054,7 +1062,9 @@ func TestWorker_Scheduler_EnqueuesRetries(t *testing.T) {
 	})
 
 	// Call enqueueRetries
-	w.enqueueRetries(ctx)
+	if err := w.enqueueRetries(ctx); err != nil {
+		t.Fatalf("enqueueRetries() error = %v, want nil", err)
+	}
 
 	// Job should now be in the queue
 	queueLen, _ := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
@@ -1103,7 +1113,9 @@ func TestWorker_Scheduler_KeepsRetryJobsWhenQueueWriteFails(t *testing.T) {
 		t.Fatalf("Set(%q) queue error = %v, want nil", w.keys.Queue("critical"), err)
 	}
 
-	w.enqueueRetries(ctx)
+	if err := w.enqueueRetries(ctx); err == nil {
+		t.Fatal("enqueueRetries() error = nil, want error")
+	}
 
 	retryLen, err := redisClient.ZCard(ctx, w.keys.Retry()).Result()
 	if err != nil {
@@ -1149,7 +1161,9 @@ func TestWorker_Scheduler_RoutesToCorrectQueue(t *testing.T) {
 	})
 
 	// Call enqueueScheduled
-	w.enqueueScheduled(ctx)
+	if err := w.enqueueScheduled(ctx); err != nil {
+		t.Fatalf("enqueueScheduled() error = %v, want nil", err)
+	}
 
 	// Check jobs are in correct queues
 	criticalLen, _ := redisClient.LLen(ctx, w.keys.Queue("critical")).Result()
@@ -1229,17 +1243,18 @@ func TestWorker_Scheduler_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	}
 
 	// Run schedulers concurrently from all workers
-	done := make(chan struct{})
+	errCh := make(chan error, len(workers))
 	for _, w := range workers {
 		go func(w *Worker) {
-			w.enqueueScheduled(ctx)
-			done <- struct{}{}
+			errCh <- w.enqueueScheduled(ctx)
 		}(w)
 	}
 
 	// Wait for all workers
 	for range workers {
-		<-done
+		if err := <-errCh; err != nil {
+			t.Errorf("enqueueScheduled() error = %v, want nil", err)
+		}
 	}
 
 	// Verify exactly 10 jobs in queue (no duplicates)
@@ -1289,17 +1304,18 @@ func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	}
 
 	// Run retry processors concurrently from all workers
-	done := make(chan struct{})
+	errCh := make(chan error, len(workers))
 	for _, w := range workers {
 		go func(w *Worker) {
-			w.enqueueRetries(ctx)
-			done <- struct{}{}
+			errCh <- w.enqueueRetries(ctx)
 		}(w)
 	}
 
 	// Wait for all workers
 	for range workers {
-		<-done
+		if err := <-errCh; err != nil {
+			t.Errorf("enqueueRetries() error = %v, want nil", err)
+		}
 	}
 
 	// Verify exactly 10 jobs in queue (no duplicates)
