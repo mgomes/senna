@@ -486,6 +486,131 @@ func TestBatch_DynamicJobAdding(t *testing.T) {
 	}
 }
 
+func TestBatch_DynamicAddRejectsWrongQueueTypeWithoutTrackingJob(t *testing.T) {
+	const namespace = "batch-dynamic-add-atomic"
+	flushKeysBatch(t, namespace+":*")
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := c.Redis().Set(ctx, namespace+":queue:blocked", "not-a-list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison dynamic add queue key: %v", err)
+	}
+
+	var parentProcessed atomic.Bool
+	var addAttempted atomic.Bool
+	var addErr atomic.Value
+	var childID atomic.Value
+
+	w.Register("parent_job", func(ctx context.Context, job *senna.Job) error {
+		parentProcessed.Store(true)
+
+		bh := worker.BatchFromContext(ctx)
+		if bh == nil {
+			addErr.Store("missing batch handle")
+			return nil
+		}
+
+		child := senna.NewJob("child_job", nil)
+		child.Queue = "blocked"
+		childID.Store(child.ID)
+		if err := bh.AddJobs(ctx, []*senna.Job{child}); err != nil {
+			addErr.Store(err.Error())
+		}
+		addAttempted.Store(true)
+		return nil
+	})
+
+	w.Register("child_job", func(ctx context.Context, job *senna.Job) error {
+		t.Error("child job should not run when dynamic add queue has the wrong Redis type")
+		return nil
+	})
+
+	go func() {
+		_ = w.Run(ctx)
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	batch := client.NewBatch().Add("parent_job", nil)
+	if err := c.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("failed to enqueue batch: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if parentProcessed.Load() && addAttempted.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if !parentProcessed.Load() {
+		t.Fatal("parent job should have processed")
+	}
+	value := addErr.Load()
+	if value == nil {
+		t.Fatal("dynamic AddJobs should fail for wrong queue type")
+	}
+	if !strings.Contains(value.(string), "queue key has type string, want list") {
+		t.Fatalf("dynamic AddJobs error = %q, want wrong queue type", value.(string))
+	}
+
+	childValue := childID.Load()
+	if childValue == nil {
+		t.Fatal("child job ID should be captured")
+	}
+	tracked, err := c.Redis().SIsMember(context.Background(), namespace+":batch:"+batch.ID+":jobs", childValue.(string)).Result()
+	if err != nil {
+		t.Fatalf("failed to check batch jobs set: %v", err)
+	}
+	if tracked {
+		t.Fatalf("failed dynamic add should not leave child job %s in batch jobs set", childValue.(string))
+	}
+
+	data, err := c.Redis().Get(context.Background(), namespace+":batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to read batch state: %v", err)
+	}
+	var state senna.BatchState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		t.Fatalf("failed to decode batch state: %v", err)
+	}
+	if state.Total != 1 {
+		t.Fatalf("BatchState.Total = %d, want 1", state.Total)
+	}
+	if state.Pending != 0 {
+		t.Fatalf("BatchState.Pending = %d, want 0", state.Pending)
+	}
+}
+
 func TestBatch_ValidWithinBatch(t *testing.T) {
 	// Test ValidWithinBatch when not in a batch
 	valid, err := worker.ValidWithinBatch(context.Background())
