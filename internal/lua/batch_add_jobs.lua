@@ -10,12 +10,21 @@ local batch_key = KEYS[1]
 local jobs_key = KEYS[2]
 local num_jobs = tonumber(ARGV[1])
 
--- Get current batch state
-local batch_data = redis.call('GET', batch_key)
-if not batch_data then
+local batch_type = redis.call('TYPE', batch_key).ok
+if batch_type == 'none' then
     return cjson.encode({error = "batch_not_found"})
 end
+if batch_type ~= 'string' then
+    return redis.error_reply('batch key has type ' .. batch_type .. ', want string')
+end
 
+local jobs_type = redis.call('TYPE', jobs_key).ok
+if jobs_type ~= 'none' and jobs_type ~= 'set' then
+    return redis.error_reply('batch jobs key has type ' .. jobs_type .. ', want set')
+end
+
+-- Get current batch state
+local batch_data = redis.call('GET', batch_key)
 local batch = cjson.decode(batch_data)
 
 -- Check if batch is invalidated
@@ -28,17 +37,26 @@ if batch.complete_fired then
     return cjson.encode({error = "batch_complete"})
 end
 
+-- Args are: job_id, queue_key, job_data (3 per job). Validate every queue
+-- before mutating so wrong-type destinations cannot leave phantom batch jobs.
+for i = 0, num_jobs - 1 do
+    local base = 2 + (i * 3)
+    local queue_key = ARGV[base + 1]
+
+    local queue_type = redis.call('TYPE', queue_key).ok
+    if queue_type ~= 'none' and queue_type ~= 'list' then
+        return redis.error_reply('queue key has type ' .. queue_type .. ', want list')
+    end
+end
+
 -- Process jobs: add to pending set and enqueue atomically
--- Args are: job_id, queue_key, job_data (3 per job)
 for i = 0, num_jobs - 1 do
     local base = 2 + (i * 3)
     local job_id = ARGV[base]
     local queue_key = ARGV[base + 1]
     local job_data = ARGV[base + 2]
 
-    -- Add job ID to pending set
     redis.call('SADD', jobs_key, job_id)
-    -- Enqueue the job
     redis.call('LPUSH', queue_key, job_data)
 end
 
