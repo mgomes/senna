@@ -101,6 +101,106 @@ func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestWorker_StopIsIdempotent(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-stop-idempotent")
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+
+	w.Stop()
+	w.Stop()
+
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func TestWorker_RunRestartsAfterCleanShutdown(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-run-restart")
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("first Worker.Run() error = %v, want nil", err)
+	}
+
+	errCh = runWorker(t, w)
+	waitForWorkerRunning(t, w)
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("second Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func newLifecycleTestWorker(t *testing.T, namespace string) *Worker {
+	t.Helper()
+
+	settings := senna.DefaultWorkerSettings()
+	settings.Concurrency = 1
+	settings.PollInterval = 10 * time.Millisecond
+	settings.ShutdownTimeout = time.Second
+	settings.HeartbeatRate = time.Hour
+	settings.ScheduledPollInterval = time.Hour
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+		Settings:  settings,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = w.redis.Close() })
+
+	return w
+}
+
+func runWorker(t *testing.T, w *Worker) <-chan error {
+	t.Helper()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Run(context.Background())
+	}()
+	return errCh
+}
+
+func waitForWorkerRunning(t *testing.T, w *Worker) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		w.mu.RLock()
+		running := w.running
+		w.mu.RUnlock()
+		if running {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("Worker.Run() did not enter running state")
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForWorkerExit(t *testing.T, errCh <-chan error) error {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker.Run() did not stop")
+		return nil
+	}
+}
+
 func TestWorker_Register_WithOptions(t *testing.T) {
 	w, err := New(&Config{
 		Redis:     getTestRedisConfig(),

@@ -33,6 +33,7 @@ type Worker struct {
 	middleware []senna.Middleware
 	periodic   *periodic.Scheduler
 	running    bool
+	stopping   bool
 	mu         sync.RWMutex
 	stopCh     chan struct{}
 }
@@ -149,6 +150,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		return errors.New("worker already running")
 	}
 	w.running = true
+	w.stopping = false
+	w.stopCh = make(chan struct{})
+	stopCh := w.stopCh
 	w.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -156,6 +160,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	// Channel to signal when all workers have finished processing
 	workersDone := make(chan struct{})
@@ -172,17 +177,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	// Start worker goroutines that block on Redis for jobs
 	var wg sync.WaitGroup
 	for i := 0; i < w.config.Settings.Concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			w.workerLoop(ctx)
-		}()
+		})
 	}
 
 	select {
 	case <-sigCh:
 	case <-ctx.Done():
-	case <-w.stopCh:
+	case <-stopCh:
 	}
 
 	cancel()
@@ -201,6 +204,10 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	select {
 	case <-done:
+		w.mu.Lock()
+		w.running = false
+		w.stopping = false
+		w.mu.Unlock()
 		return nil
 	case <-time.After(w.config.Settings.ShutdownTimeout):
 		return context.DeadlineExceeded
@@ -209,7 +216,13 @@ func (w *Worker) Run(ctx context.Context) error {
 
 // Stop requests a graceful worker shutdown.
 func (w *Worker) Stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.running || w.stopping {
+		return
+	}
 	close(w.stopCh)
+	w.stopping = true
 }
 
 // Close closes the underlying Redis client.
