@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -135,7 +136,15 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	if err != nil {
 		return err
 	}
-	defer func() { _ = iter.Close() }()
+	iterClosed := false
+	defer func() {
+		if iterClosed {
+			return
+		}
+		if err := iter.Close(); err != nil {
+			slog.WarnContext(ctx, "failed to close iterable iterator", "job_id", job.ID, "error", err)
+		}
+	}()
 
 	// Cursor save ticker
 	saveInterval := opts.CursorSaveInterval
@@ -235,6 +244,17 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		return nil // Ack job (success), no OnComplete
 	}
 
+	if err := iter.Close(); err != nil {
+		iterClosed = true
+		w.preserveCancellation(ctx, state, stateKey)
+		w.updateIterationTiming(state, runStart)
+		if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
+			slog.WarnContext(ctx, "failed to save iteration state on iterator close error", "job_id", job.ID, "error", saveErr)
+		}
+		return fmt.Errorf("close iterable iterator: %w", err)
+	}
+	iterClosed = true
+
 	// Complete - fire OnComplete and DELETE state from Redis
 	w.preserveCancellation(ctx, state, stateKey)
 	w.updateIterationTiming(state, runStart)
@@ -249,7 +269,9 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	}
 
 	// Delete state on successful completion
-	w.redis.Del(ctx, stateKey)
+	if err := w.redis.Del(ctx, stateKey).Err(); err != nil {
+		slog.WarnContext(ctx, "failed to delete completed iteration state", "job_id", job.ID, "error", err)
+	}
 
 	return nil
 }

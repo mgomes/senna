@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -73,6 +74,28 @@ func (h *testIterableHandler) Processed() []any {
 	return result
 }
 
+type closeErrorIterator struct {
+	senna.Iterator
+	err error
+}
+
+func (it closeErrorIterator) Close() error {
+	return it.err
+}
+
+type closeErrorIterableHandler struct {
+	*testIterableHandler
+	closeErr error
+}
+
+func (h *closeErrorIterableHandler) BuildIterator(ctx context.Context, job *senna.Job, cursor senna.Cursor) (senna.Iterator, error) {
+	iter, err := h.testIterableHandler.BuildIterator(ctx, job, cursor)
+	if err != nil {
+		return nil, err
+	}
+	return closeErrorIterator{Iterator: iter, err: h.closeErr}, nil
+}
+
 func TestIterable_ProcessAll(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-iterable:*")
@@ -128,6 +151,59 @@ func TestIterable_ProcessAll(t *testing.T) {
 	exists, _ := client.Exists(ctx, k.IterationState(job.ID)).Result()
 	if exists != 0 {
 		t.Error("iteration state should be deleted on completion")
+	}
+}
+
+func TestIterable_CloseErrorPreventsCompletion(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-close:*")
+
+	k := keys.New("test-iterable-close")
+	closeErr := errors.New("close failed")
+	handler := &closeErrorIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1, 2}),
+		closeErr:            closeErr,
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	ctx := context.Background()
+	job := senna.NewJob("test_iterable", nil)
+
+	var completeCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnComplete: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				completeCalled.Store(true)
+				return nil
+			},
+		},
+	}
+
+	err := w.processIterable(ctx, job, handler, opts)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("processIterable() error = %v, want close error %v", err, closeErr)
+	}
+	if completeCalled.Load() {
+		t.Fatal("OnComplete called despite iterator close failure")
+	}
+
+	state, err := w.loadIterationState(ctx, k.IterationState(job.ID))
+	if err != nil {
+		t.Fatalf("loadIterationState() error = %v, want nil", err)
+	}
+	if state == nil {
+		t.Fatal("iteration state = nil, want saved state after close failure")
+	}
+	if state.TotalItems != 2 {
+		t.Errorf("iteration state total items = %d, want 2", state.TotalItems)
 	}
 }
 
