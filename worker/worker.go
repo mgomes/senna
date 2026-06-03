@@ -602,13 +602,17 @@ func (w *Worker) scheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.enqueueScheduled(ctx)
-			w.enqueueRetries(ctx)
+			if err := w.enqueueScheduled(ctx); err != nil {
+				slog.WarnContext(ctx, "failed to enqueue scheduled jobs", "error", err)
+			}
+			if err := w.enqueueRetries(ctx); err != nil {
+				slog.WarnContext(ctx, "failed to enqueue retry jobs", "error", err)
+			}
 		}
 	}
 }
 
-func (w *Worker) enqueueFromZSet(ctx context.Context, sourceKey string) {
+func (w *Worker) enqueueFromZSet(ctx context.Context, sourceKey string) error {
 	now := fmt.Sprintf("%d", time.Now().Unix())
 	queuePrefix := w.keys.Queue("")
 
@@ -619,22 +623,25 @@ func (w *Worker) enqueueFromZSet(ctx context.Context, sourceKey string) {
 			now, 100, queuePrefix,
 		)
 		if err != nil {
-			return
+			return fmt.Errorf("promote jobs from %q: %w", sourceKey, err)
 		}
 
 		count, ok := result.(int64)
-		if !ok || count == 0 {
-			return
+		if !ok {
+			return fmt.Errorf("promote jobs from %q: unexpected script result %T", sourceKey, result)
+		}
+		if count == 0 {
+			return nil
 		}
 	}
 }
 
-func (w *Worker) enqueueScheduled(ctx context.Context) {
-	w.enqueueFromZSet(ctx, w.keys.Scheduled())
+func (w *Worker) enqueueScheduled(ctx context.Context) error {
+	return w.enqueueFromZSet(ctx, w.keys.Scheduled())
 }
 
-func (w *Worker) enqueueRetries(ctx context.Context) {
-	w.enqueueFromZSet(ctx, w.keys.Retry())
+func (w *Worker) enqueueRetries(ctx context.Context) error {
+	return w.enqueueFromZSet(ctx, w.keys.Retry())
 }
 
 func (w *Worker) reaper(ctx context.Context) {
