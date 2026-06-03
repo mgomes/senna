@@ -12,6 +12,14 @@ local max_score = ARGV[1]
 local limit = tonumber(ARGV[2])
 local queue_prefix = ARGV[3]
 
+local zset_type = redis.call('TYPE', zset_key).ok
+if zset_type == 'none' then
+    return 0
+end
+if zset_type ~= 'zset' then
+    return redis.error_reply('source key has type ' .. zset_type .. ', want zset')
+end
+
 -- Get jobs with score <= max_score
 local items = redis.call('ZRANGEBYSCORE', zset_key, '-inf', max_score, 'LIMIT', 0, limit)
 
@@ -19,9 +27,8 @@ if #items == 0 then
     return 0
 end
 
--- Parse each job, remove from zset, and push to queue
 -- Use pcall to safely handle malformed JSON without aborting the script
-local enqueued = 0
+local targets = {}
 for _, data in ipairs(items) do
     local ok, job = pcall(cjson.decode, data)
     local should_enqueue = false
@@ -39,19 +46,34 @@ for _, data in ipairs(items) do
         -- Non-string queue value (e.g., number, boolean) falls through with should_enqueue = false
     end
 
-    -- Always remove from the sorted set
-    redis.call('ZREM', zset_key, data)
-
     if should_enqueue then
         local queue_key = queue_prefix .. queue
 
-        -- Add queue to known queues set
-        redis.call('SADD', queues_key, queue)
+        local queue_type = redis.call('TYPE', queue_key).ok
+        if queue_type ~= 'none' and queue_type ~= 'list' then
+            return redis.error_reply('queue key has type ' .. queue_type .. ', want list')
+        end
 
-        -- Push job to queue
-        redis.call('LPUSH', queue_key, data)
-        enqueued = enqueued + 1
+        table.insert(targets, {queue = queue, key = queue_key, data = data})
     end
 end
 
-return enqueued
+if #targets > 0 then
+    local queues_type = redis.call('TYPE', queues_key).ok
+    if queues_type ~= 'none' and queues_type ~= 'set' then
+        return redis.error_reply('queues key has type ' .. queues_type .. ', want set')
+    end
+end
+
+-- Always remove due items from the sorted set after validation. Malformed or
+-- unsupported payloads are discarded, preserving the previous behavior.
+for _, data in ipairs(items) do
+    redis.call('ZREM', zset_key, data)
+end
+
+for _, target in ipairs(targets) do
+    redis.call('SADD', queues_key, target.queue)
+    redis.call('LPUSH', target.key, target.data)
+end
+
+return #targets

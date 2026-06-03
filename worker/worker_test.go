@@ -800,6 +800,64 @@ func TestWorker_Scheduler_EnqueuesDueJobs(t *testing.T) {
 	}
 }
 
+func TestWorker_Scheduler_KeepsScheduledJobsWhenQueueWriteFails(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-queue-fail:*")
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-scheduler-queue-fail",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("worker.New() error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	defaultJob := senna.NewJob("scheduled_job", nil)
+	defaultData, err := defaultJob.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() default job error = %v, want nil", err)
+	}
+	criticalJob := senna.NewJob("scheduled_job", nil)
+	criticalJob.Queue = "critical"
+	criticalData, err := criticalJob.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() critical job error = %v, want nil", err)
+	}
+
+	if err := redisClient.ZAdd(ctx, w.keys.Scheduled(),
+		redis.Z{Score: float64(pastTime.Unix()), Member: string(defaultData)},
+		redis.Z{Score: float64(pastTime.Unix()), Member: string(criticalData)},
+	).Err(); err != nil {
+		t.Fatalf("ZAdd(%q) scheduled jobs error = %v, want nil", w.keys.Scheduled(), err)
+	}
+	if err := redisClient.Set(ctx, w.keys.Queue("critical"), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) queue error = %v, want nil", w.keys.Queue("critical"), err)
+	}
+
+	w.enqueueScheduled(ctx)
+
+	scheduledLen, err := redisClient.ZCard(ctx, w.keys.Scheduled()).Result()
+	if err != nil {
+		t.Fatalf("ZCard(%q) error = %v, want nil", w.keys.Scheduled(), err)
+	}
+	if scheduledLen != 2 {
+		t.Errorf("ZCard(%q) = %d, want %d", w.keys.Scheduled(), scheduledLen, 2)
+	}
+
+	defaultQueueLen, err := redisClient.LLen(ctx, w.keys.Queue("default")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", w.keys.Queue("default"), err)
+	}
+	if defaultQueueLen != 0 {
+		t.Errorf("LLen(%q) = %d, want %d", w.keys.Queue("default"), defaultQueueLen, 0)
+	}
+}
+
 func TestWorker_Scheduler_KeepsFutureJobs(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-scheduler-future:*")
@@ -934,6 +992,51 @@ func TestWorker_Scheduler_EnqueuesRetries(t *testing.T) {
 	retryLen, _ := redisClient.ZCard(ctx, w.keys.Retry()).Result()
 	if retryLen != 0 {
 		t.Errorf("expected 0 jobs in retry, got %d", retryLen)
+	}
+}
+
+func TestWorker_Scheduler_KeepsRetryJobsWhenQueueWriteFails(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-scheduler-retry-queue-fail:*")
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-scheduler-retry-queue-fail",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("worker.New() error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+	pastTime := time.Now().Add(-time.Minute)
+
+	job := senna.NewJob("retry_job", nil)
+	job.Queue = "critical"
+	job.RetryCount = 1
+	jobData, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() retry job error = %v, want nil", err)
+	}
+	if err := redisClient.ZAdd(ctx, w.keys.Retry(), redis.Z{
+		Score:  float64(pastTime.Unix()),
+		Member: string(jobData),
+	}).Err(); err != nil {
+		t.Fatalf("ZAdd(%q) retry job error = %v, want nil", w.keys.Retry(), err)
+	}
+	if err := redisClient.Set(ctx, w.keys.Queue("critical"), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) queue error = %v, want nil", w.keys.Queue("critical"), err)
+	}
+
+	w.enqueueRetries(ctx)
+
+	retryLen, err := redisClient.ZCard(ctx, w.keys.Retry()).Result()
+	if err != nil {
+		t.Fatalf("ZCard(%q) error = %v, want nil", w.keys.Retry(), err)
+	}
+	if retryLen != 1 {
+		t.Errorf("ZCard(%q) = %d, want %d", w.keys.Retry(), retryLen, 1)
 	}
 }
 
