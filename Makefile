@@ -1,15 +1,19 @@
-.PHONY: test test-race lint
+.PHONY: test test-race fuzz lint
 
 GO ?= go
 GOCACHE ?= $(CURDIR)/.gocache
 PKGS ?= ./...
 GOLANGCI_LINT ?= golangci-lint
+FUZZTIME ?= 5s
 
 test:
 	GOCACHE=$(GOCACHE) $(GO) test $(PKGS)
 
 test-race:
 	GOCACHE=$(GOCACHE) $(GO) test -race $(PKGS)
+
+fuzz:
+	GOCACHE=$(GOCACHE) FUZZTIME=$(FUZZTIME) GO=$(GO) ./scripts/run_fuzz.sh
 
 lint:
 	@command -v $(GOLANGCI_LINT) >/dev/null 2>&1 && { \

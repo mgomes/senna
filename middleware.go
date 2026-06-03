@@ -117,9 +117,22 @@ type BackoffFunc func(attempt int) time.Duration
 // ExponentialBackoff returns an exponential retry backoff capped at maxBackoff.
 func ExponentialBackoff(base time.Duration, maxBackoff time.Duration) BackoffFunc {
 	return func(attempt int) time.Duration {
-		backoff := base * (1 << uint(attempt))
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+		if base <= 0 || attempt <= 0 {
+			if base > maxBackoff {
+				return maxBackoff
+			}
+			return base
+		}
+		if maxBackoff <= base {
+			return maxBackoff
+		}
+
+		backoff := base
+		for range attempt {
+			if backoff > maxBackoff/2 {
+				return maxBackoff
+			}
+			backoff *= 2
 		}
 		return backoff
 	}
@@ -128,7 +141,55 @@ func ExponentialBackoff(base time.Duration, maxBackoff time.Duration) BackoffFun
 // DefaultBackoff returns Senna's default retry backoff function.
 func DefaultBackoff() BackoffFunc {
 	return func(attempt int) time.Duration {
-		secs := (attempt * attempt * attempt * attempt) + 15 + (attempt * 10)
+		if attempt < 0 {
+			attempt = 0
+		}
+		secs, ok := defaultBackoffSeconds(int64(attempt))
+		if !ok {
+			return maxDuration
+		}
 		return time.Duration(secs) * time.Second
 	}
+}
+
+const (
+	maxDuration        = time.Duration(1<<63 - 1)
+	maxDurationSeconds = int64(maxDuration / time.Second)
+)
+
+func defaultBackoffSeconds(attempt int64) (int64, bool) {
+	squared, ok := checkedMulDurationSeconds(attempt, attempt)
+	if !ok {
+		return 0, false
+	}
+	fourth, ok := checkedMulDurationSeconds(squared, squared)
+	if !ok {
+		return 0, false
+	}
+	linear, ok := checkedMulDurationSeconds(attempt, 10)
+	if !ok {
+		return 0, false
+	}
+	secs, ok := checkedAddDurationSeconds(fourth, linear)
+	if !ok {
+		return 0, false
+	}
+	return checkedAddDurationSeconds(secs, 15)
+}
+
+func checkedMulDurationSeconds(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > maxDurationSeconds/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func checkedAddDurationSeconds(a, b int64) (int64, bool) {
+	if a > maxDurationSeconds-b {
+		return 0, false
+	}
+	return a + b, true
 }
