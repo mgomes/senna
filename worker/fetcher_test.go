@@ -283,6 +283,40 @@ func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 	}
 }
 
+func TestFetcher_Nack_KeepsInFlightWhenRetryWriteFails(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-nack-fail:*")
+
+	k := keys.New("test-nack-fail")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.Queue("default"), string(data))
+
+	fetched, _ := f.Fetch(ctx, "worker-1")
+	if err := client.Set(ctx, k.Retry(), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) retry key failed: %v", k.Retry(), err)
+	}
+
+	err := f.Nack(ctx, "worker-1", fetched, 5*time.Second)
+	if err == nil {
+		t.Fatalf("fetcher.Nack() error = nil, want non-nil")
+	}
+
+	inFlightLen, err := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", k.InFlight("worker-1"), err)
+	}
+	if inFlightLen != 1 {
+		t.Errorf("LLen(%q) = %d, want %d", k.InFlight("worker-1"), inFlightLen, 1)
+	}
+}
+
 func TestFetcher_Nack_IncrementsRetryCount(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-nack-count:*")
@@ -375,6 +409,40 @@ func TestFetcher_MoveToDead_AddsToDeadSet(t *testing.T) {
 	}
 }
 
+func TestFetcher_MoveToDead_KeepsInFlightWhenDeadWriteFails(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-dead-fail:*")
+
+	k := keys.New("test-dead-fail")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.Queue("default"), string(data))
+
+	fetched, _ := f.Fetch(ctx, "worker-1")
+	if err := client.Set(ctx, k.Dead(), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) dead key failed: %v", k.Dead(), err)
+	}
+
+	err := f.MoveToDead(ctx, "worker-1", fetched)
+	if err == nil {
+		t.Fatalf("fetcher.MoveToDead() error = nil, want non-nil")
+	}
+
+	inFlightLen, err := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", k.InFlight("worker-1"), err)
+	}
+	if inFlightLen != 1 {
+		t.Errorf("LLen(%q) = %d, want %d", k.InFlight("worker-1"), inFlightLen, 1)
+	}
+}
+
 func TestFetcher_MoveToDead_SetsFailedAt(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-dead-time:*")
@@ -463,6 +531,38 @@ func TestFetcher_AckWithoutRaw(t *testing.T) {
 	inFlightLen, _ := client.LLen(ctx, k.InFlight("worker-1")).Result()
 	if inFlightLen != 0 {
 		t.Errorf("expected 0 jobs in-flight, got %d", inFlightLen)
+	}
+}
+
+func TestFetcher_Requeue_KeepsInFlightWhenQueueWriteFails(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-requeue-fail:*")
+
+	k := keys.New("test-requeue-fail")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	data, _ := job.Marshal()
+	client.LPush(ctx, k.InFlight("worker-1"), string(data))
+	if err := client.Set(ctx, k.Queue("default"), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) queue key failed: %v", k.Queue("default"), err)
+	}
+
+	err := f.requeue(ctx, "worker-1", job)
+	if err == nil {
+		t.Fatalf("fetcher.requeue() error = nil, want non-nil")
+	}
+
+	inFlightLen, err := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", k.InFlight("worker-1"), err)
+	}
+	if inFlightLen != 1 {
+		t.Errorf("LLen(%q) = %d, want %d", k.InFlight("worker-1"), inFlightLen, 1)
 	}
 }
 
