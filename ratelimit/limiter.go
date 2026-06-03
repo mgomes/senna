@@ -9,9 +9,20 @@ import (
 // Limiter defines the interface implemented by Senna rate limiters.
 type Limiter interface {
 	WithinLimit(ctx context.Context, fn func() error) error
-	Acquire(ctx context.Context) (waitTime time.Duration, err error)
-	Release(ctx context.Context) error
+	// Acquire returns a non-nil lease when capacity is acquired with waitTime == 0.
+	Acquire(ctx context.Context) (lease Lease, waitTime time.Duration, err error)
 	Name() string
+}
+
+// Lease releases capacity acquired from a limiter.
+type Lease interface {
+	Release(ctx context.Context) error
+}
+
+type noopLease struct{}
+
+func (noopLease) Release(ctx context.Context) error {
+	return nil
 }
 
 // Result describes a rate-limit decision.

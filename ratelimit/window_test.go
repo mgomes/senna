@@ -25,7 +25,7 @@ func TestWindowLimiter_Basic(t *testing.T) {
 
 	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
@@ -34,7 +34,7 @@ func TestWindowLimiter_Basic(t *testing.T) {
 		}
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire 6 failed: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestWindowLimiter_SlidingBehavior(t *testing.T) {
 
 	waitForRateLimitWindow(500 * time.Millisecond)
 	for i := range 3 {
-		_, err := limiter.Acquire(ctx)
+		_, _, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
@@ -67,7 +67,7 @@ func TestWindowLimiter_SlidingBehavior(t *testing.T) {
 
 	time.Sleep(250 * time.Millisecond)
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("sliding acquire failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestWindowLimiter_UniqueMembers(t *testing.T) {
 
 	waitForRateLimitWindow(time.Second)
 	for i := range 100 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
@@ -167,7 +167,7 @@ func TestWindowLimiter_UniqueMembers(t *testing.T) {
 		}
 	}
 
-	waitTime, _ := limiter.Acquire(ctx)
+	_, waitTime, _ := limiter.Acquire(ctx)
 	if waitTime == 0 {
 		t.Fatal("should be rate limited after 100 requests")
 	}
@@ -187,7 +187,7 @@ func TestWindowLimiter_ContextCancellation(t *testing.T) {
 
 	ctx := context.Background()
 	waitForRateLimitWindow(time.Second)
-	_, err := limiter.Acquire(ctx)
+	_, _, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("first acquire failed: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestWindowLimiter_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err = limiter.Acquire(ctx)
+	_, _, err = limiter.Acquire(ctx)
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 	}

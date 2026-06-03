@@ -26,11 +26,6 @@ func (l *UnlimitedLimiter) WithinLimit(ctx context.Context, fn func() error) err
 }
 
 // Acquire immediately succeeds for unlimited limiters.
-func (l *UnlimitedLimiter) Acquire(ctx context.Context) (time.Duration, error) {
-	return 0, nil
-}
-
-// Release is a no-op for unlimited limiters.
-func (l *UnlimitedLimiter) Release(ctx context.Context) error {
-	return nil
+func (l *UnlimitedLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error) {
+	return noopLease{}, 0, nil
 }

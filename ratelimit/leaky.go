@@ -60,7 +60,7 @@ func (l *LeakyLimiter) Name() string {
 
 // WithinLimit runs fn when the bucket level allows it.
 func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
-	waitTime, err := l.Acquire(ctx)
+	_, waitTime, err := l.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 }
 
 // Acquire waits for or reports capacity in the leaky bucket.
-func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
+func (l *LeakyLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
@@ -95,7 +95,7 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 			l.capacity, drainTimeUs, nowUs, ttlSeconds,
 		)
 		if err != nil {
-			return 0, err
+			return nil, 0, err
 		}
 
 		arr := result.([]any)
@@ -110,11 +110,11 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 		retryIn := time.Duration(retryUs) * time.Microsecond
 
 		if allowed {
-			return 0, nil
+			return noopLease{}, 0, nil
 		}
 
 		if l.policy == PolicySkip {
-			return retryIn, nil
+			return nil, retryIn, nil
 		}
 
 		if time.Now().Add(retryIn).After(deadline) {
@@ -125,7 +125,7 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 			case float64:
 				level = v
 			}
-			return retryIn, &OverLimitError{
+			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
 				LimiterType: "leaky",
 				Limit:       l.capacity,
@@ -141,15 +141,10 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return nil, 0, ctx.Err()
 		case <-time.After(sleepTime):
 		}
 	}
-}
-
-// Release is a no-op for leaky limiters.
-func (l *LeakyLimiter) Release(ctx context.Context) error {
-	return nil
 }
 
 // Level returns the current bucket fill level.

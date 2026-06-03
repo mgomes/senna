@@ -32,8 +32,6 @@ type ConcurrentLimiter struct {
 	client      redis.Cmdable
 	keyPrefix   string
 	initialized atomic.Bool
-	lockMu      sync.Mutex
-	lockIDs     map[context.Context]string
 }
 
 // ConcurrentConfig configures a ConcurrentLimiter.
@@ -65,7 +63,6 @@ func Concurrent(client redis.Cmdable, cfg ConcurrentConfig) *ConcurrentLimiter {
 		policy:      cfg.Policy,
 		client:      client,
 		keyPrefix:   cfg.KeyPrefix,
-		lockIDs:     make(map[context.Context]string),
 	}
 }
 
@@ -132,7 +129,7 @@ func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
 
 // WithinLimit runs fn after acquiring a concurrency slot and releases it afterward.
 func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) (err error) {
-	waitTime, err := l.Acquire(ctx)
+	lease, waitTime, err := l.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -145,7 +142,7 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) (e
 		}
 	}
 	defer func() {
-		if releaseErr := l.Release(ctx); releaseErr != nil {
+		if releaseErr := lease.Release(ctx); releaseErr != nil {
 			if err == nil {
 				err = releaseErr
 				return
@@ -158,9 +155,9 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) (e
 }
 
 // Acquire waits for or reports availability of a concurrency slot.
-func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) {
+func (l *ConcurrentLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error) {
 	if err := l.ensureInitialized(ctx); err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 
 	deadline := time.Now().Add(l.waitTimeout)
@@ -168,7 +165,7 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 
 	for {
 		if _, err := l.reclaim(ctx); err != nil {
-			return 0, fmt.Errorf("reclaim expired concurrent limiter slots: %w", err)
+			return nil, 0, fmt.Errorf("reclaim expired concurrent limiter slots: %w", err)
 		}
 		nowMs := time.Now().UnixMilli()
 
@@ -177,25 +174,22 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 			tempLockID, nowMs, l.ttlSeconds(),
 		)
 		if err != nil {
-			return 0, err
+			return nil, 0, err
 		}
 
 		arr := result.([]any)
 		acquired := arr[0].(int64) == 1
 
 		if acquired {
-			l.lockMu.Lock()
-			l.lockIDs[ctx] = tempLockID
-			l.lockMu.Unlock()
-			return 0, nil
+			return &concurrentLease{limiter: l, lockID: tempLockID}, 0, nil
 		}
 
 		if l.policy == PolicySkip {
-			return l.waitTimeout, nil
+			return nil, l.waitTimeout, nil
 		}
 
 		if time.Now().After(deadline) {
-			return l.waitTimeout, &OverLimitError{
+			return nil, l.waitTimeout, &OverLimitError{
 				LimiterName: l.name,
 				LimiterType: "concurrent",
 				Limit:       l.limit,
@@ -207,25 +201,30 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 		sleepTime := 100 * time.Millisecond
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return nil, 0, ctx.Err()
 		case <-time.After(sleepTime):
 		}
 	}
 }
 
-// Release frees the slot associated with the provided context.
-func (l *ConcurrentLimiter) Release(ctx context.Context) error {
-	l.lockMu.Lock()
-	lockID, ok := l.lockIDs[ctx]
-	if ok {
-		delete(l.lockIDs, ctx)
-	}
-	l.lockMu.Unlock()
+type concurrentLease struct {
+	limiter *ConcurrentLimiter
+	lockID  string
+	once    sync.Once
+	err     error
+}
 
-	if !ok || lockID == "" {
+func (l *concurrentLease) Release(ctx context.Context) error {
+	if l == nil || l.lockID == "" {
 		return nil
 	}
+	l.once.Do(func() {
+		l.err = l.limiter.release(ctx, l.lockID)
+	})
+	return l.err
+}
 
+func (l *ConcurrentLimiter) release(ctx context.Context, lockID string) error {
 	_, err := concurrentReleaseScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey()},
 		lockID, l.ttlSeconds(),

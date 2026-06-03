@@ -15,7 +15,7 @@ func TestUnlimitedLimiter_AlwaysAllows(t *testing.T) {
 	ctx := context.Background()
 
 	for range 1000 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire failed: %v", err)
 		}
@@ -99,8 +99,11 @@ func TestUnlimitedLimiter_Release(t *testing.T) {
 	limiter := ratelimit.Unlimited("test")
 	ctx := context.Background()
 
-	err := limiter.Release(ctx)
-	if err != nil {
+	lease, waitTime, err := limiter.Acquire(ctx)
+	if err != nil || waitTime != 0 {
+		t.Fatalf("UnlimitedLimiter.Acquire() = (%v, %v), want (0, nil)", waitTime, err)
+	}
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release should never fail: %v", err)
 	}
 }
