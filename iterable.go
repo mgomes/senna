@@ -165,6 +165,9 @@ func (f *iterableFunc) ProcessItem(ctx context.Context, job *Job, item any) erro
 
 // SliceIterator creates an iterator over a slice starting at the given offset.
 func SliceIterator[T any](items []T, offset int) Iterator {
+	if offset < 0 {
+		offset = 0
+	}
 	return &sliceIterator[T]{
 		items: items,
 		index: offset - 1, // -1 because Next() increments before returning
