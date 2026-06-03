@@ -158,6 +158,52 @@ func TestConcurrentLimiter_ReleaseFreesSlot(t *testing.T) {
 	}
 }
 
+func TestConcurrentLimiter_ReleasesMultipleSlotsForSameContext(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:concurrent:test-release-same-context*")
+
+	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
+		Name:        "test-release-same-context",
+		Limit:       3,
+		LockTimeout: time.Minute,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	for i := range 3 {
+		waitTime, err := limiter.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("ConcurrentLimiter.Acquire(%d) error = %v", i, err)
+		}
+		if waitTime != 0 {
+			t.Fatalf("ConcurrentLimiter.Acquire(%d) wait = %v, want 0", i, waitTime)
+		}
+	}
+
+	held, err := limiter.Held(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Held() after acquire error = %v", err)
+	}
+	if held != 3 {
+		t.Fatalf("ConcurrentLimiter.Held() after acquire = %d, want 3", held)
+	}
+
+	for i := range 3 {
+		if err := limiter.Release(ctx); err != nil {
+			t.Fatalf("ConcurrentLimiter.Release(%d) error = %v", i, err)
+		}
+	}
+
+	held, err = limiter.Held(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Held() after release error = %v", err)
+	}
+	if held != 0 {
+		t.Fatalf("ConcurrentLimiter.Held() after release = %d, want 0", held)
+	}
+}
+
 func TestConcurrentLimiter_WithinLimitReturnsReleaseError(t *testing.T) {
 	client := newTestClient(t)
 	cleanupClient := newTestClient(t)

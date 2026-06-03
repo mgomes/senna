@@ -33,7 +33,7 @@ type ConcurrentLimiter struct {
 	keyPrefix   string
 	initialized atomic.Bool
 	lockMu      sync.Mutex
-	lockIDs     map[context.Context]string
+	lockIDs     map[context.Context][]string
 }
 
 // ConcurrentConfig configures a ConcurrentLimiter.
@@ -65,7 +65,7 @@ func Concurrent(client redis.Cmdable, cfg ConcurrentConfig) *ConcurrentLimiter {
 		policy:      cfg.Policy,
 		client:      client,
 		keyPrefix:   cfg.KeyPrefix,
-		lockIDs:     make(map[context.Context]string),
+		lockIDs:     make(map[context.Context][]string),
 	}
 }
 
@@ -185,7 +185,7 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 
 		if acquired {
 			l.lockMu.Lock()
-			l.lockIDs[ctx] = tempLockID
+			l.lockIDs[ctx] = append(l.lockIDs[ctx], tempLockID)
 			l.lockMu.Unlock()
 			return 0, nil
 		}
@@ -216,9 +216,17 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (time.Duration, error) 
 // Release frees the slot associated with the provided context.
 func (l *ConcurrentLimiter) Release(ctx context.Context) error {
 	l.lockMu.Lock()
-	lockID, ok := l.lockIDs[ctx]
+	lockIDs := l.lockIDs[ctx]
+	ok := len(lockIDs) > 0
+	var lockID string
 	if ok {
+		lockID = lockIDs[len(lockIDs)-1]
+		lockIDs = lockIDs[:len(lockIDs)-1]
+	}
+	if len(lockIDs) == 0 {
 		delete(l.lockIDs, ctx)
+	} else {
+		l.lockIDs[ctx] = lockIDs
 	}
 	l.lockMu.Unlock()
 
