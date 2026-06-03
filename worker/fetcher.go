@@ -10,10 +10,18 @@ import (
 
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
+	"github.com/mgomes/senna/internal/script"
 	"github.com/redis/go-redis/v9"
 )
 
 const sequentialLockTTL = 30 * time.Second
+
+var (
+	ackJobScript        = script.New("ack-job", ackJobLua)
+	retryJobScript      = script.New("retry-job", retryJobLua)
+	moveToDeadJobScript = script.New("move-to-dead-job", moveToDeadJobLua)
+	requeueJobScript    = script.New("requeue-job", requeueJobLua)
+)
 
 type fetcher struct {
 	client         *redis.Client
@@ -495,19 +503,21 @@ func (f *fetcher) blockingFetchFromQueue(ctx context.Context, workerID, queueNam
 }
 
 func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) error {
-	if err := f.removeFromInFlight(ctx, workerID, job); err != nil {
+	payload, err := jobPayload(job)
+	if err != nil {
 		return err
 	}
-
+	keys := []string{f.keys.InFlight(workerID)}
 	if job.UniqueKey != "" {
-		f.client.Del(ctx, f.keys.Unique(job.UniqueKey))
+		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
-
-	return nil
+	_, err = ackJobScript.Run(ctx, f.client, keys, payload)
+	return err
 }
 
 func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, retryIn time.Duration) error {
-	if err := f.removeFromInFlight(ctx, workerID, job); err != nil {
+	payload, err := jobPayload(job)
+	if err != nil {
 		return err
 	}
 
@@ -518,17 +528,20 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, ret
 		if err != nil {
 			return err
 		}
-		return f.client.ZAdd(ctx, f.keys.Retry(), redis.Z{
-			Score:  float64(retryAt.Unix()),
-			Member: string(newData),
-		}).Err()
+		_, err = retryJobScript.Run(ctx, f.client,
+			[]string{f.keys.InFlight(workerID), f.keys.Retry()},
+			payload, retryAt.Unix(), string(newData),
+		)
+		return err
 	}
 
-	return nil
+	_, err = ackJobScript.Run(ctx, f.client, []string{f.keys.InFlight(workerID)}, payload)
+	return err
 }
 
 func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Job) error {
-	if err := f.removeFromInFlight(ctx, workerID, job); err != nil {
+	payload, err := jobPayload(job)
+	if err != nil {
 		return err
 	}
 
@@ -539,22 +552,28 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 		return err
 	}
 
+	keys := []string{f.keys.InFlight(workerID), f.keys.Dead()}
 	if job.UniqueKey != "" {
-		f.client.Del(ctx, f.keys.Unique(job.UniqueKey))
+		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
-
-	return f.client.ZAdd(ctx, f.keys.Dead(), redis.Z{
-		Score:  float64(now.Unix()),
-		Member: string(newData),
-	}).Err()
+	_, err = moveToDeadJobScript.Run(ctx, f.client, keys, payload, now.Unix(), string(newData))
+	return err
 }
 
-func (f *fetcher) removeFromInFlight(ctx context.Context, workerID string, job *senna.Job) error {
+func (f *fetcher) requeue(ctx context.Context, workerID string, job *senna.Job) error {
 	payload, err := jobPayload(job)
 	if err != nil {
 		return err
 	}
-	return f.client.LRem(ctx, f.keys.InFlight(workerID), 1, payload).Err()
+	data, err := job.Marshal()
+	if err != nil {
+		return err
+	}
+	_, err = requeueJobScript.Run(ctx, f.client,
+		[]string{f.keys.InFlight(workerID), f.keys.Queue(job.Queue)},
+		payload, string(data),
+	)
+	return err
 }
 
 func jobPayload(job *senna.Job) (string, error) {
@@ -569,3 +588,73 @@ func jobPayload(job *senna.Job) (string, error) {
 	}
 	return string(data), nil
 }
+
+const ackJobLua = `
+local in_flight_type = redis.call("TYPE", KEYS[1]).ok
+if in_flight_type ~= "none" and in_flight_type ~= "list" then
+	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
+end
+
+local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
+if removed > 0 and #KEYS >= 2 then
+	redis.call("DEL", KEYS[2])
+end
+return removed
+`
+
+const retryJobLua = `
+local in_flight_type = redis.call("TYPE", KEYS[1]).ok
+if in_flight_type ~= "none" and in_flight_type ~= "list" then
+	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
+end
+
+local retry_type = redis.call("TYPE", KEYS[2]).ok
+if retry_type ~= "none" and retry_type ~= "zset" then
+	return redis.error_reply("retry key has type " .. retry_type .. ", want zset")
+end
+
+local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
+if removed > 0 then
+	redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
+end
+return removed
+`
+
+const requeueJobLua = `
+local in_flight_type = redis.call("TYPE", KEYS[1]).ok
+if in_flight_type ~= "none" and in_flight_type ~= "list" then
+	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
+end
+
+local queue_type = redis.call("TYPE", KEYS[2]).ok
+if queue_type ~= "none" and queue_type ~= "list" then
+	return redis.error_reply("queue key has type " .. queue_type .. ", want list")
+end
+
+local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
+if removed > 0 then
+	redis.call("RPUSH", KEYS[2], ARGV[2])
+end
+return removed
+`
+
+const moveToDeadJobLua = `
+local in_flight_type = redis.call("TYPE", KEYS[1]).ok
+if in_flight_type ~= "none" and in_flight_type ~= "list" then
+	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
+end
+
+local dead_type = redis.call("TYPE", KEYS[2]).ok
+if dead_type ~= "none" and dead_type ~= "zset" then
+	return redis.error_reply("dead key has type " .. dead_type .. ", want zset")
+end
+
+local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
+if removed > 0 then
+	if #KEYS >= 3 then
+		redis.call("DEL", KEYS[3])
+	end
+	redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
+end
+return removed
+`

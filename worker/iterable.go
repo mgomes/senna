@@ -326,17 +326,5 @@ func (w *Worker) handleIterationInterrupt(ctx context.Context, state *senna.Iter
 // Used for interrupted iterable jobs to preserve job ID.
 // Unlike Ack, this preserves the unique key so uniqueness is maintained.
 func (w *Worker) requeue(ctx context.Context, job *senna.Job) error {
-	// Remove from in-flight without deleting unique key
-	// (Ack would delete the unique key, breaking uniqueness for interrupted jobs)
-	if err := w.fetcher.removeFromInFlight(ctx, w.id, job); err != nil {
-		slog.ErrorContext(ctx, "failed to remove job from in-flight", "error", err, "job_id", job.ID)
-	}
-
-	// Re-serialize with same ID and push to back of queue (RPUSH)
-	data, err := job.Marshal()
-	if err != nil {
-		return err
-	}
-
-	return w.redis.RPush(ctx, w.keys.Queue(job.Queue), string(data)).Err()
+	return w.fetcher.requeue(ctx, w.id, job)
 }
