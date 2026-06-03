@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/mgomes/senna/internal/script"
@@ -238,12 +239,18 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
-			_, _ = fmt.Sscanf(s, "%f", &points)
+			points, err = strconv.ParseFloat(s, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse points limiter balance: %w", err)
+			}
 		}
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			_, _ = fmt.Sscanf(s, "%d", &lastRefillUs)
+			lastRefillUs, err = strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse points limiter last refill: %w", err)
+			}
 		}
 	}
 	if lastRefillUs == 0 {

@@ -2,6 +2,8 @@ package ratelimit_test
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -231,6 +233,36 @@ func TestPointsLimiter_AvailablePoints(t *testing.T) {
 	}
 	if available < 68 || available > 72 {
 		t.Fatalf("expected ~70 available, got %f", available)
+	}
+}
+
+func TestPointsLimiter_AvailablePointsRejectsMalformedState(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:points:test-available-malformed*")
+
+	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
+		Name:       "test-available-malformed",
+		Capacity:   100,
+		RefillTime: time.Second,
+	})
+
+	for _, field := range []string{"points", "last_refill"} {
+		if err := client.Del(ctx, "senna:ratelimit:points:test-available-malformed").Err(); err != nil {
+			t.Fatalf("Del malformed points limiter state error = %v", err)
+		}
+		if err := client.HSet(ctx, "senna:ratelimit:points:test-available-malformed", field, "not-a-number").Err(); err != nil {
+			t.Fatalf("HSet malformed points limiter %s error = %v", field, err)
+		}
+
+		_, err := limiter.AvailablePoints(ctx)
+		if err == nil {
+			t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s error = nil, want malformed state error", field)
+		}
+		var numberErr *strconv.NumError
+		if !errors.As(err, &numberErr) {
+			t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s error = %v, want strconv.NumError", field, err)
+		}
 	}
 }
 
