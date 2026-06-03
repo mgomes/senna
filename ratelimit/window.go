@@ -149,6 +149,10 @@ func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
 	}
 
 	key := l.keyPrefix + ":" + l.name
+	if err := l.client.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%d", nowUs-windowUs)).Err(); err != nil {
+		return 0, err
+	}
+
 	count, err := l.client.ZCount(ctx, key, "-inf", "+inf").Result()
 	if err == redis.Nil {
 		return l.limit, nil
@@ -156,8 +160,6 @@ func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-
-	l.client.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%d", nowUs-windowUs))
 
 	return l.limit - int(count), nil
 }
