@@ -174,25 +174,22 @@ func TestLeakyLimiter_Concurrent(t *testing.T) {
 	limiter := ratelimit.Leaky(client, ratelimit.LeakyConfig{
 		Name:        "test-concurrent",
 		Capacity:    50,
-		DrainTime:   time.Second,
+		DrainTime:   time.Hour,
 		WaitTimeout: 100 * time.Millisecond,
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	waitForRateLimitWindow(time.Second)
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
 
 	for range 100 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			err := limiter.WithinLimit(ctx, func() error {
 				successCount.Add(1)
 				return nil
 			})
 			_ = err
-		}()
+		})
 	}
 
 	wg.Wait()
