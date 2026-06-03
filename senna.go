@@ -31,7 +31,7 @@ func RateLimitMiddleware(limiter ratelimit.Limiter) Middleware {
 // RateLimitMiddlewareWithReschedule retries over-limit jobs after the limiter's wait time.
 func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 	return func(next Handler) Handler {
-		return func(ctx context.Context, job *Job) error {
+		return func(ctx context.Context, job *Job) (err error) {
 			waitTime, err := limiter.Acquire(ctx)
 			if err != nil {
 				return err
@@ -43,8 +43,11 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 					RetryIn: waitTime,
 				}
 			}
-			handlerErr := next(ctx, job)
-			return errors.Join(handlerErr, limiter.Release(ctx))
+			defer func() {
+				err = errors.Join(err, limiter.Release(ctx))
+			}()
+
+			return next(ctx, job)
 		}
 	}
 }

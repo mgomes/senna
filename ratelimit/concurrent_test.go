@@ -180,6 +180,45 @@ func TestConcurrentLimiter_WithinLimitReturnsReleaseError(t *testing.T) {
 	}
 }
 
+func TestConcurrentLimiter_WithinLimitReleasesAfterPanic(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:concurrent:test-panic-release*")
+
+	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
+		Name:        "test-panic-release",
+		Limit:       1,
+		LockTimeout: time.Minute,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	didPanic := false
+	func() {
+		defer func() {
+			didPanic = recover() != nil
+		}()
+		_ = limiter.WithinLimit(ctx, func() error {
+			panic("job failed")
+		})
+	}()
+
+	if !didPanic {
+		t.Fatal("ConcurrentLimiter.WithinLimit() did not propagate panic")
+	}
+
+	waitTime, err := limiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Acquire() after panic release error = %v", err)
+	}
+	if waitTime != 0 {
+		t.Fatalf("ConcurrentLimiter.Acquire() after panic release wait = %v, want 0", waitTime)
+	}
+	if err := limiter.Release(ctx); err != nil {
+		t.Fatalf("ConcurrentLimiter.Release() after panic reacquire error = %v", err)
+	}
+}
+
 func TestConcurrentLimiter_AcquireReturnsReclaimError(t *testing.T) {
 	client := newTestClient(t)
 	cleanupClient := newTestClient(t)
