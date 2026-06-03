@@ -32,7 +32,7 @@ func RateLimitMiddleware(limiter ratelimit.Limiter) Middleware {
 func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) (err error) {
-			waitTime, err := limiter.Acquire(ctx)
+			lease, waitTime, err := limiter.Acquire(ctx)
 			if err != nil {
 				return err
 			}
@@ -44,7 +44,7 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 				}
 			}
 			defer func() {
-				if releaseErr := limiter.Release(ctx); releaseErr != nil {
+				if releaseErr := lease.Release(ctx); releaseErr != nil {
 					if err == nil {
 						err = releaseErr
 						return

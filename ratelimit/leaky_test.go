@@ -27,7 +27,7 @@ func TestLeakyLimiter_Basic(t *testing.T) {
 
 	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
@@ -36,7 +36,7 @@ func TestLeakyLimiter_Basic(t *testing.T) {
 		}
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire 6 failed: %v", err)
 	}
@@ -60,20 +60,20 @@ func TestLeakyLimiter_Draining(t *testing.T) {
 
 	waitForRateLimitWindow(500 * time.Millisecond)
 	for i := range 5 {
-		_, err := limiter.Acquire(ctx)
+		_, _, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
 	}
 
-	waitTime, _ := limiter.Acquire(ctx)
+	_, waitTime, _ := limiter.Acquire(ctx)
 	if waitTime == 0 {
 		t.Fatal("should be at capacity")
 	}
 
 	time.Sleep(150 * time.Millisecond)
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire after drain failed: %v", err)
 	}
@@ -123,12 +123,12 @@ func TestLeakyLimiter_SubMicroDrainFloors(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	if wait, err := limiter.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := limiter.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
 
 	// Second acquire should not panic/divide by zero; wait may be tiny due to fast drain.
-	if _, err := limiter.Acquire(ctx); err != nil && err != context.DeadlineExceeded {
+	if _, _, err := limiter.Acquire(ctx); err != nil && err != context.DeadlineExceeded {
 		t.Fatalf("second acquire error: %v", err)
 	}
 }
@@ -156,7 +156,7 @@ func TestLeakyLimiter_Level(t *testing.T) {
 	}
 
 	for range 5 {
-		_, _ = limiter.Acquire(ctx)
+		_, _, _ = limiter.Acquire(ctx)
 	}
 
 	level, err = limiter.Level(ctx)

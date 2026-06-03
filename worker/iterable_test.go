@@ -9,6 +9,7 @@ import (
 
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
+	"github.com/mgomes/senna/ratelimit"
 )
 
 type testRateLimiter struct {
@@ -20,13 +21,17 @@ func (l *testRateLimiter) WithinLimit(ctx context.Context, fn func() error) erro
 	return fn()
 }
 
-func (l *testRateLimiter) Acquire(ctx context.Context) (time.Duration, error) {
+func (l *testRateLimiter) Acquire(ctx context.Context) (ratelimit.Lease, time.Duration, error) {
 	l.acquired.Add(1)
-	return 0, nil
+	return testRateLimiterLease{limiter: l}, 0, nil
 }
 
-func (l *testRateLimiter) Release(ctx context.Context) error {
-	l.released.Add(1)
+type testRateLimiterLease struct {
+	limiter *testRateLimiter
+}
+
+func (l testRateLimiterLease) Release(ctx context.Context) error {
+	l.limiter.released.Add(1)
 	return nil
 }
 

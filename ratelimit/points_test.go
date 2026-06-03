@@ -28,7 +28,7 @@ func TestPointsLimiter_Basic(t *testing.T) {
 	// Exhaust all points (with extra to account for refilling during acquires)
 	waitForRateLimitWindow(time.Second)
 	for i := range 12 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
@@ -37,7 +37,7 @@ func TestPointsLimiter_Basic(t *testing.T) {
 		}
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire 13 failed: %v", err)
 	}
@@ -60,13 +60,13 @@ func TestPointsLimiter_SubMicroIntervalFloors(t *testing.T) {
 
 	// Consume available points.
 	for range 2 {
-		if wait, err := limiter.Acquire(ctx); err != nil || wait != 0 {
+		if _, wait, err := limiter.Acquire(ctx); err != nil || wait != 0 {
 			t.Fatalf("unexpected wait/err: wait=%v err=%v", wait, err)
 		}
 	}
 
 	// Third call should not panic/divide by zero; wait may be tiny due to fast refill.
-	if _, err := limiter.Acquire(ctx); err != nil && err != context.DeadlineExceeded {
+	if _, _, err := limiter.Acquire(ctx); err != nil && err != context.DeadlineExceeded {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -85,7 +85,7 @@ func TestPointsLimiter_VariableCost(t *testing.T) {
 	})
 
 	waitForRateLimitWindow(time.Second)
-	waitTime, err := limiter.AcquirePoints(ctx, 50)
+	_, waitTime, err := limiter.AcquirePoints(ctx, 50)
 	if err != nil {
 		t.Fatalf("acquire 50 failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestPointsLimiter_VariableCost(t *testing.T) {
 		t.Fatal("acquire 50 should not wait")
 	}
 
-	waitTime, err = limiter.AcquirePoints(ctx, 50)
+	_, waitTime, err = limiter.AcquirePoints(ctx, 50)
 	if err != nil {
 		t.Fatalf("acquire another 50 failed: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestPointsLimiter_VariableCost(t *testing.T) {
 		t.Fatal("acquire another 50 should not wait")
 	}
 
-	waitTime, _ = limiter.AcquirePoints(ctx, 1)
+	_, waitTime, _ = limiter.AcquirePoints(ctx, 1)
 	if waitTime == 0 {
 		t.Fatal("should be out of points")
 	}
@@ -183,10 +183,10 @@ func TestPointsLimiter_Refill(t *testing.T) {
 	// Exhaust all points (with a few extra to account for refilling during acquires)
 	waitForRateLimitWindow(200 * time.Millisecond)
 	for range 12 {
-		_, _ = limiter.Acquire(ctx)
+		_, _, _ = limiter.Acquire(ctx)
 	}
 
-	waitTime, _ := limiter.Acquire(ctx)
+	_, waitTime, _ := limiter.Acquire(ctx)
 	if waitTime == 0 {
 		t.Fatal("should be out of points")
 	}
@@ -194,7 +194,7 @@ func TestPointsLimiter_Refill(t *testing.T) {
 	// Wait for refill (refills 10 points over 200ms, so 100ms = ~5 points)
 	time.Sleep(150 * time.Millisecond)
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire after refill failed: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestPointsLimiter_AvailablePoints(t *testing.T) {
 		t.Fatalf("expected 100 available, got %f", available)
 	}
 
-	_, _ = limiter.AcquirePoints(ctx, 30)
+	_, _, _ = limiter.AcquirePoints(ctx, 30)
 
 	available, err = limiter.AvailablePoints(ctx)
 	if err != nil {

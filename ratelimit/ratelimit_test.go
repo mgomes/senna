@@ -46,13 +46,13 @@ func TestWindowLimiterHonorsLimit(t *testing.T) {
 
 	ctx := context.Background()
 	waitForRateLimitWindow(time.Second)
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("second acquire unexpected: wait=%v err=%v", wait, err)
 	}
-	if wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
 		t.Fatalf("expected over limit wait>0 got wait=%v err=%v", wait, err)
 	}
 }
@@ -73,10 +73,10 @@ func TestBucketLimiterOverLimitReturnsRetry(t *testing.T) {
 
 	ctx := context.Background()
 	waitForRateLimitWindow(time.Second)
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
-	if wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
 		t.Fatalf("expected retry wait>0, got wait=%v err=%v", wait, err)
 	}
 }
@@ -97,15 +97,15 @@ func TestPointsLimiterRefills(t *testing.T) {
 
 	ctx := context.Background()
 	waitForRateLimitWindow(200 * time.Millisecond)
-	if wait, err := l.AcquirePoints(ctx, 2); err != nil || wait != 0 {
+	if _, wait, err := l.AcquirePoints(ctx, 2); err != nil || wait != 0 {
 		t.Fatalf("acquire cost2 unexpected: wait=%v err=%v", wait, err)
 	}
-	if wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
 		t.Fatalf("expected over limit wait>0, got wait=%v err=%v", wait, err)
 	}
 
 	time.Sleep(250 * time.Millisecond)
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("expected refill and wait=0, got wait=%v err=%v", wait, err)
 	}
 }
@@ -126,18 +126,18 @@ func TestLeakyLimiterDrains(t *testing.T) {
 
 	ctx := context.Background()
 	waitForRateLimitWindow(200 * time.Millisecond)
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("second acquire unexpected: wait=%v err=%v", wait, err)
 	}
-	if wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait <= 0 {
 		t.Fatalf("expected over limit wait>0, got wait=%v err=%v", wait, err)
 	}
 
 	time.Sleep(250 * time.Millisecond)
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	if _, wait, err := l.Acquire(ctx); err != nil || wait != 0 {
 		t.Fatalf("expected drained and wait=0, got wait=%v err=%v", wait, err)
 	}
 }
@@ -156,20 +156,22 @@ func TestConcurrentLimiterReturnsSlotAfterRelease(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	lease, wait, err := l.Acquire(ctx)
+	if err != nil || wait != 0 {
 		t.Fatalf("first acquire unexpected: wait=%v err=%v", wait, err)
 	}
 
-	if wait, err := l.Acquire(ctx); err == nil && wait == 0 {
+	if _, wait, err := l.Acquire(ctx); err == nil && wait == 0 {
 		t.Fatalf("expected over limit error/wait, got wait=%v err=%v", wait, err)
 	}
 
-	if err := l.Release(ctx); err != nil {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 
-	if wait, err := l.Acquire(ctx); err != nil || wait != 0 {
+	lease, wait, err = l.Acquire(ctx)
+	if err != nil || wait != 0 {
 		t.Fatalf("expected slot after release, got wait=%v err=%v", wait, err)
 	}
-	_ = l.Release(ctx)
+	_ = lease.Release(ctx)
 }

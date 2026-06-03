@@ -58,7 +58,7 @@ func (l *BucketLimiter) Name() string {
 
 // WithinLimit runs fn when capacity is available.
 func (l *BucketLimiter) WithinLimit(ctx context.Context, fn func() error) error {
-	waitTime, err := l.Acquire(ctx)
+	_, waitTime, err := l.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func (l *BucketLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 }
 
 // Acquire waits for or reports bucket capacity for a single unit of work.
-func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
+func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
@@ -93,7 +93,7 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 			l.limit, windowUs, nowUs, ttlSeconds,
 		)
 		if err != nil {
-			return 0, err
+			return nil, 0, err
 		}
 
 		arr := result.([]any)
@@ -108,15 +108,15 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 		retryIn := time.Duration(retryUs) * time.Microsecond
 
 		if allowed {
-			return 0, nil
+			return noopLease{}, 0, nil
 		}
 
 		if l.policy == PolicySkip {
-			return retryIn, nil
+			return nil, retryIn, nil
 		}
 
 		if time.Now().Add(retryIn).After(deadline) {
-			return retryIn, &OverLimitError{
+			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
 				LimiterType: "bucket",
 				Limit:       l.limit,
@@ -127,15 +127,10 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (time.Duration, error) {
 
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return nil, 0, ctx.Err()
 		case <-time.After(retryIn):
 		}
 	}
-}
-
-// Release is a no-op for bucket limiters.
-func (l *BucketLimiter) Release(ctx context.Context) error {
-	return nil
 }
 
 // Remaining returns the remaining capacity in the current bucket window.

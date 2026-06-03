@@ -33,7 +33,7 @@ type stubLimiter struct {
 }
 
 func (l *stubLimiter) WithinLimit(ctx context.Context, fn func() error) (err error) {
-	waitTime, err := l.Acquire(ctx)
+	lease, waitTime, err := l.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -41,7 +41,7 @@ func (l *stubLimiter) WithinLimit(ctx context.Context, fn func() error) (err err
 		return &ratelimit.OverLimitError{LimiterName: l.Name(), LimiterType: "stub", RetryIn: waitTime}
 	}
 	defer func() {
-		if releaseErr := l.Release(ctx); releaseErr != nil {
+		if releaseErr := lease.Release(ctx); releaseErr != nil {
 			if err == nil {
 				err = releaseErr
 				return
@@ -53,13 +53,20 @@ func (l *stubLimiter) WithinLimit(ctx context.Context, fn func() error) (err err
 	return fn()
 }
 
-func (l *stubLimiter) Acquire(ctx context.Context) (time.Duration, error) {
-	return l.waitTime, l.acquireErr
+func (l *stubLimiter) Acquire(ctx context.Context) (ratelimit.Lease, time.Duration, error) {
+	if l.acquireErr != nil || l.waitTime > 0 {
+		return nil, l.waitTime, l.acquireErr
+	}
+	return stubLease{limiter: l}, 0, nil
 }
 
-func (l *stubLimiter) Release(ctx context.Context) error {
-	l.releaseCalled = true
-	return l.releaseErr
+type stubLease struct {
+	limiter *stubLimiter
+}
+
+func (l stubLease) Release(ctx context.Context) error {
+	l.limiter.releaseCalled = true
+	return l.limiter.releaseErr
 }
 
 func (l *stubLimiter) Name() string {

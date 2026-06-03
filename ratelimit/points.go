@@ -67,7 +67,7 @@ func (l *PointsLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 
 // WithinLimitCost runs fn after acquiring the requested number of points.
 func (l *PointsLimiter) WithinLimitCost(ctx context.Context, cost int, fn func() error) error {
-	waitTime, err := l.AcquirePoints(ctx, cost)
+	_, waitTime, err := l.AcquirePoints(ctx, cost)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (h *PointsHandle) PointsUsed(actual int) error {
 
 // WithinLimitEstimate runs fn after acquiring an estimated number of points.
 func (l *PointsLimiter) WithinLimitEstimate(ctx context.Context, estimate int, fn func(h *PointsHandle) error) error {
-	waitTime, err := l.AcquirePoints(ctx, estimate)
+	_, waitTime, err := l.AcquirePoints(ctx, estimate)
 	if err != nil {
 		return err
 	}
@@ -122,12 +122,12 @@ func (l *PointsLimiter) WithinLimitEstimate(ctx context.Context, estimate int, f
 }
 
 // Acquire acquires one point of capacity.
-func (l *PointsLimiter) Acquire(ctx context.Context) (time.Duration, error) {
+func (l *PointsLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error) {
 	return l.AcquirePoints(ctx, 1)
 }
 
 // AcquirePoints waits for or reports the availability of the requested points.
-func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Duration, error) {
+func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, time.Duration, error) {
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
@@ -146,7 +146,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 			l.capacity, refillTimeUs, cost, nowUs, ttlSeconds,
 		)
 		if err != nil {
-			return 0, err
+			return nil, 0, err
 		}
 
 		arr := result.([]any)
@@ -161,11 +161,11 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 		retryIn := time.Duration(retryUs) * time.Microsecond
 
 		if allowed {
-			return 0, nil
+			return noopLease{}, 0, nil
 		}
 
 		if l.policy == PolicySkip {
-			return retryIn, nil
+			return nil, retryIn, nil
 		}
 
 		if time.Now().Add(retryIn).After(deadline) {
@@ -176,7 +176,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 			case float64:
 				points = v
 			}
-			return retryIn, &OverLimitError{
+			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
 				LimiterType: "points",
 				Limit:       l.capacity,
@@ -192,15 +192,10 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (time.Durat
 
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return nil, 0, ctx.Err()
 		case <-time.After(sleepTime):
 		}
 	}
-}
-
-// Release is a no-op for points limiters.
-func (l *PointsLimiter) Release(ctx context.Context) error {
-	return nil
 }
 
 func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {

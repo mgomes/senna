@@ -47,7 +47,7 @@ func TestBucketLimiter_Basic(t *testing.T) {
 
 	waitForRateLimitWindow(time.Second)
 	for i := range 5 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
@@ -56,7 +56,7 @@ func TestBucketLimiter_Basic(t *testing.T) {
 		}
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire 6 failed: %v", err)
 	}
@@ -154,13 +154,13 @@ func TestBucketLimiter_WindowReset(t *testing.T) {
 
 	waitForRateLimitWindow(500 * time.Millisecond)
 	for i := range 3 {
-		_, err := limiter.Acquire(ctx)
+		_, _, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("first batch acquire %d failed: %v", i, err)
 		}
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	_, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("over-limit acquire failed: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestBucketLimiter_WindowReset(t *testing.T) {
 	time.Sleep(waitTime + 50*time.Millisecond)
 
 	for i := range 3 {
-		waitTime, err := limiter.Acquire(ctx)
+		_, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("second batch acquire %d failed: %v", i, err)
 		}
@@ -195,13 +195,13 @@ func TestBucketLimiter_PolicyRaise(t *testing.T) {
 	})
 
 	for i := range 2 {
-		_, err := limiter.Acquire(ctx)
+		_, _, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
 	}
 
-	_, err := limiter.Acquire(ctx)
+	_, _, err := limiter.Acquire(ctx)
 	if err == nil {
 		t.Fatal("expected error when rate limited with PolicyRaise")
 	}
@@ -228,7 +228,7 @@ func TestBucketLimiter_ContextCancellation(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	_, err := limiter.Acquire(ctx)
+	_, _, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("first acquire failed: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestBucketLimiter_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err = limiter.Acquire(ctx)
+	_, _, err = limiter.Acquire(ctx)
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 	}
@@ -270,7 +270,7 @@ func TestBucketLimiter_DifferentIntervals(t *testing.T) {
 
 			waitForRateLimitWindow(tt.interval)
 			for i := range 5 {
-				waitTime, err := limiter.Acquire(ctx)
+				_, waitTime, err := limiter.Acquire(ctx)
 				if err != nil {
 					t.Fatalf("acquire %d failed: %v", i, err)
 				}
@@ -279,7 +279,7 @@ func TestBucketLimiter_DifferentIntervals(t *testing.T) {
 				}
 			}
 
-			waitTime, _ := limiter.Acquire(ctx)
+			_, waitTime, _ := limiter.Acquire(ctx)
 			if waitTime == 0 {
 				t.Fatal("should be rate limited")
 			}

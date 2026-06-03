@@ -24,32 +24,42 @@ func TestConcurrentLimiter_Basic(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	var acquired []func()
+	var acquired []ratelimit.Lease
 
 	for i := range 3 {
-		waitTime, err := limiter.Acquire(ctx)
+		lease, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("acquire %d failed: %v", i, err)
 		}
 		if waitTime != 0 {
 			t.Fatalf("acquire %d should not wait", i)
 		}
-		acquired = append(acquired, func() { _ = limiter.Release(ctx) })
+		acquired = append(acquired, lease)
 	}
 
-	waitTime, _ := limiter.Acquire(ctx)
+	_, waitTime, _ := limiter.Acquire(ctx)
 	if waitTime == 0 {
 		t.Fatal("fourth acquire should be blocked")
 	}
 
-	acquired[0]()
+	if err := acquired[0].Release(ctx); err != nil {
+		t.Fatalf("release failed: %v", err)
+	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	lease, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire after release failed: %v", err)
 	}
 	if waitTime != 0 {
 		t.Fatal("acquire after release should not wait")
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release after reacquire failed: %v", err)
+	}
+	for i, lease := range acquired[1:] {
+		if err := lease.Release(ctx); err != nil {
+			t.Fatalf("cleanup release %d failed: %v", i+1, err)
+		}
 	}
 }
 
@@ -139,22 +149,25 @@ func TestConcurrentLimiter_ReleaseFreesSlot(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	_, err := limiter.Acquire(ctx)
+	lease, _, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("first acquire failed: %v", err)
 	}
 
 	// Release should free the slot for reuse
-	if err := limiter.Release(ctx); err != nil {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release failed: %v", err)
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	lease, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire after release failed: %v", err)
 	}
 	if waitTime != 0 {
 		t.Fatal("should acquire immediately after release")
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release after reacquire failed: %v", err)
 	}
 }
 
@@ -171,14 +184,16 @@ func TestConcurrentLimiter_ReleasesMultipleSlotsForSameContext(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
+	var leases []ratelimit.Lease
 	for i := range 3 {
-		waitTime, err := limiter.Acquire(ctx)
+		lease, waitTime, err := limiter.Acquire(ctx)
 		if err != nil {
 			t.Fatalf("ConcurrentLimiter.Acquire(%d) error = %v", i, err)
 		}
 		if waitTime != 0 {
 			t.Fatalf("ConcurrentLimiter.Acquire(%d) wait = %v, want 0", i, waitTime)
 		}
+		leases = append(leases, lease)
 	}
 
 	held, err := limiter.Held(ctx)
@@ -189,8 +204,8 @@ func TestConcurrentLimiter_ReleasesMultipleSlotsForSameContext(t *testing.T) {
 		t.Fatalf("ConcurrentLimiter.Held() after acquire = %d, want 3", held)
 	}
 
-	for i := range 3 {
-		if err := limiter.Release(ctx); err != nil {
+	for i, lease := range leases {
+		if err := lease.Release(ctx); err != nil {
 			t.Fatalf("ConcurrentLimiter.Release(%d) error = %v", i, err)
 		}
 	}
@@ -201,6 +216,68 @@ func TestConcurrentLimiter_ReleasesMultipleSlotsForSameContext(t *testing.T) {
 	}
 	if held != 0 {
 		t.Fatalf("ConcurrentLimiter.Held() after release = %d, want 0", held)
+	}
+}
+
+func TestConcurrentLimiter_LeaseReleaseIsTiedToAcquiredSlot(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:concurrent:test-release-exact-lease*")
+
+	limiter := ratelimit.Concurrent(client, ratelimit.ConcurrentConfig{
+		Name:        "test-release-exact-lease",
+		Limit:       2,
+		LockTimeout: 500 * time.Millisecond,
+		WaitTimeout: 10 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	firstLease, waitTime, err := limiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Acquire(first) error = %v", err)
+	}
+	if waitTime != 0 {
+		t.Fatalf("ConcurrentLimiter.Acquire(first) wait = %v, want 0", waitTime)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	secondLease, waitTime, err := limiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Acquire(second) error = %v", err)
+	}
+	if waitTime != 0 {
+		t.Fatalf("ConcurrentLimiter.Acquire(second) wait = %v, want 0", waitTime)
+	}
+
+	if err := firstLease.Release(ctx); err != nil {
+		t.Fatalf("first lease Release() error = %v", err)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	thirdLease, waitTime, err := limiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Acquire(third) error = %v", err)
+	}
+	if waitTime != 0 {
+		t.Fatalf("ConcurrentLimiter.Acquire(third) wait = %v, want 0", waitTime)
+	}
+
+	extraLease, waitTime, err := limiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("ConcurrentLimiter.Acquire(extra) error = %v", err)
+	}
+	if waitTime == 0 {
+		_ = extraLease.Release(ctx)
+		t.Fatal("ConcurrentLimiter.Acquire(extra) wait = 0, want over-limit wait")
+	}
+
+	if err := secondLease.Release(ctx); err != nil {
+		t.Fatalf("second lease Release() error = %v", err)
+	}
+	if err := thirdLease.Release(ctx); err != nil {
+		t.Fatalf("third lease Release() error = %v", err)
 	}
 }
 
@@ -276,14 +353,14 @@ func TestConcurrentLimiter_WithinLimitReleasesAfterPanic(t *testing.T) {
 		t.Fatal("ConcurrentLimiter.WithinLimit() did not propagate panic")
 	}
 
-	waitTime, err := limiter.Acquire(ctx)
+	lease, waitTime, err := limiter.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("ConcurrentLimiter.Acquire() after panic release error = %v", err)
 	}
 	if waitTime != 0 {
 		t.Fatalf("ConcurrentLimiter.Acquire() after panic release wait = %v, want 0", waitTime)
 	}
-	if err := limiter.Release(ctx); err != nil {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("ConcurrentLimiter.Release() after panic reacquire error = %v", err)
 	}
 }
@@ -303,17 +380,18 @@ func TestConcurrentLimiter_AcquireReturnsReclaimError(t *testing.T) {
 		Policy:      ratelimit.PolicySkip,
 	})
 
-	if waitTime, err := limiter.Acquire(ctx); err != nil || waitTime != 0 {
+	lease, waitTime, err := limiter.Acquire(ctx)
+	if err != nil || waitTime != 0 {
 		t.Fatalf("ConcurrentLimiter.Acquire() before close = (%v, %v), want (0, nil)", waitTime, err)
 	}
-	if err := limiter.Release(ctx); err != nil {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("ConcurrentLimiter.Release() before close error = %v", err)
 	}
 	if err := client.Close(); err != nil {
 		t.Fatalf("redis Close() error = %v", err)
 	}
 
-	if _, err := limiter.Acquire(ctx); err == nil {
+	if _, _, err := limiter.Acquire(ctx); err == nil {
 		t.Fatal("ConcurrentLimiter.Acquire() after client close error = nil, want reclaim error")
 	}
 }
@@ -386,8 +464,10 @@ func TestConcurrentLimiter_Held(t *testing.T) {
 		t.Fatalf("expected 0 held, got %d", held)
 	}
 
+	var leases []ratelimit.Lease
 	for range 3 {
-		_, _ = limiter.Acquire(ctx)
+		lease, _, _ := limiter.Acquire(ctx)
+		leases = append(leases, lease)
 	}
 
 	held, err = limiter.Held(ctx)
@@ -396,5 +476,10 @@ func TestConcurrentLimiter_Held(t *testing.T) {
 	}
 	if held != 3 {
 		t.Fatalf("expected 3 held, got %d", held)
+	}
+	for i, lease := range leases {
+		if err := lease.Release(ctx); err != nil {
+			t.Fatalf("cleanup release %d failed: %v", i, err)
+		}
 	}
 }
