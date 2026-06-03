@@ -3,6 +3,7 @@ set -euo pipefail
 
 go_cmd="${GO:-go}"
 fuzztime="${FUZZTIME:-5s}"
+fuzzparallel="${FUZZPARALLEL:-}"
 found=0
 
 for pkg in $("$go_cmd" list ./...); do
@@ -14,8 +15,15 @@ for pkg in $("$go_cmd" list ./...); do
 	while IFS= read -r target; do
 		[[ -z "$target" ]] && continue
 		found=1
-		echo "fuzzing $pkg $target for $fuzztime"
-		"$go_cmd" test -run '^$' -fuzz "^${target}$" -fuzztime "$fuzztime" "$pkg"
+		args=(test -run '^$' -fuzz "^${target}$" -fuzztime "$fuzztime")
+		if [[ -n "$fuzzparallel" ]]; then
+			args+=(-parallel "$fuzzparallel")
+			echo "fuzzing $pkg $target for $fuzztime with $fuzzparallel workers"
+		else
+			echo "fuzzing $pkg $target for $fuzztime"
+		fi
+		args+=("$pkg")
+		"$go_cmd" "${args[@]}"
 	done <<< "$targets"
 done
 
