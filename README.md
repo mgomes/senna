@@ -4,6 +4,8 @@
   <img src="senna-logo.png" width="30%" alt="Senna">
 </p>
 
+---
+
 Senna is a background job processing library for Go, backed by Redis or Valkey. It provides reliable job queuing, scheduling, retries, rate limiting, and batch processing with a clean, middleware-based architecture.
 
 ## Supported Backends
