@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mgomes/senna/ratelimit"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestWindowLimiter_Basic(t *testing.T) {
@@ -170,6 +171,46 @@ func TestWindowLimiter_UniqueMembers(t *testing.T) {
 	_, waitTime, _ := limiter.Acquire(ctx)
 	if waitTime == 0 {
 		t.Fatal("should be rate limited after 100 requests")
+	}
+}
+
+func TestWindowLimiter_RemainingPrunesExpiredEntries(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:window:test-remaining-prunes*")
+
+	name := "test-remaining-prunes"
+	key := "senna:ratelimit:window:" + name
+	limiter := ratelimit.Window(client, ratelimit.WindowConfig{
+		Name:        name,
+		Limit:       2,
+		Interval:    time.Second,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	expiredScore := float64(time.Now().Add(-2 * time.Second).UnixMicro())
+	if err := client.ZAdd(ctx, key,
+		redis.Z{Score: expiredScore, Member: "expired-1"},
+		redis.Z{Score: expiredScore, Member: "expired-2"},
+	).Err(); err != nil {
+		t.Fatalf("ZAdd(%q) expired entries failed: %v", key, err)
+	}
+
+	got, err := limiter.Remaining(ctx)
+	if err != nil {
+		t.Fatalf("WindowLimiter.Remaining(%q) error = %v, want nil", name, err)
+	}
+	if got != 2 {
+		t.Fatalf("WindowLimiter.Remaining(%q) = %d, want %d", name, got, 2)
+	}
+
+	count, err := client.ZCount(ctx, key, "-inf", "+inf").Result()
+	if err != nil {
+		t.Fatalf("ZCount(%q) error = %v, want nil", key, err)
+	}
+	if count != 0 {
+		t.Fatalf("ZCount(%q) = %d, want %d", key, count, 0)
 	}
 }
 
