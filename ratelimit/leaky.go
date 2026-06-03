@@ -3,6 +3,8 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 
 	"github.com/mgomes/senna/internal/script"
@@ -170,12 +172,21 @@ func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
 	var lastDripUs int64
 	if state[0] != nil {
 		if s, ok := state[0].(string); ok {
-			_, _ = fmt.Sscanf(s, "%f", &level)
+			level, err = strconv.ParseFloat(s, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse leaky limiter level: %w", err)
+			}
+			if math.IsNaN(level) || math.IsInf(level, 0) {
+				return 0, fmt.Errorf("parse leaky limiter level: non-finite value %q", s)
+			}
 		}
 	}
 	if state[1] != nil {
 		if s, ok := state[1].(string); ok {
-			_, _ = fmt.Sscanf(s, "%d", &lastDripUs)
+			lastDripUs, err = strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse leaky limiter last drip: %w", err)
+			}
 		}
 	}
 	if lastDripUs == 0 {

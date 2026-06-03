@@ -2,6 +2,8 @@ package ratelimit_test
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -231,6 +233,53 @@ func TestPointsLimiter_AvailablePoints(t *testing.T) {
 	}
 	if available < 68 || available > 72 {
 		t.Fatalf("expected ~70 available, got %f", available)
+	}
+}
+
+func TestPointsLimiter_AvailablePointsRejectsMalformedState(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:points:test-available-malformed*")
+
+	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
+		Name:       "test-available-malformed",
+		Capacity:   100,
+		RefillTime: time.Second,
+	})
+
+	tests := []struct {
+		name       string
+		field      string
+		value      string
+		wantNumErr bool
+	}{
+		{name: "points text", field: "points", value: "not-a-number", wantNumErr: true},
+		{name: "points NaN", field: "points", value: "NaN"},
+		{name: "points positive infinity", field: "points", value: "+Inf"},
+		{name: "points negative infinity", field: "points", value: "-Inf"},
+		{name: "last refill text", field: "last_refill", value: "not-a-number", wantNumErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := client.Del(ctx, "senna:ratelimit:points:test-available-malformed").Err(); err != nil {
+				t.Fatalf("Del malformed points limiter state error = %v", err)
+			}
+			if err := client.HSet(ctx, "senna:ratelimit:points:test-available-malformed", tt.field, tt.value).Err(); err != nil {
+				t.Fatalf("HSet malformed points limiter %s=%q error = %v", tt.field, tt.value, err)
+			}
+
+			_, err := limiter.AvailablePoints(ctx)
+			if err == nil {
+				t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s=%q error = nil, want malformed state error", tt.field, tt.value)
+			}
+			if tt.wantNumErr {
+				var numberErr *strconv.NumError
+				if !errors.As(err, &numberErr) {
+					t.Fatalf("PointsLimiter.AvailablePoints() with malformed %s=%q error = %v, want strconv.NumError", tt.field, tt.value, err)
+				}
+			}
+		})
 	}
 }
 

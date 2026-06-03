@@ -2,6 +2,8 @@ package ratelimit_test
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -163,6 +165,53 @@ func TestLeakyLimiter_Level(t *testing.T) {
 	}
 	if level < 4 || level > 5 {
 		t.Fatalf("expected level ~5, got %f", level)
+	}
+}
+
+func TestLeakyLimiter_LevelRejectsMalformedState(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:leaky:test-level-malformed*")
+
+	limiter := ratelimit.Leaky(client, ratelimit.LeakyConfig{
+		Name:      "test-level-malformed",
+		Capacity:  10,
+		DrainTime: time.Second,
+	})
+
+	tests := []struct {
+		name       string
+		field      string
+		value      string
+		wantNumErr bool
+	}{
+		{name: "level text", field: "level", value: "not-a-number", wantNumErr: true},
+		{name: "level NaN", field: "level", value: "NaN"},
+		{name: "level positive infinity", field: "level", value: "+Inf"},
+		{name: "level negative infinity", field: "level", value: "-Inf"},
+		{name: "last drip text", field: "last_drip", value: "not-a-number", wantNumErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := client.Del(ctx, "senna:ratelimit:leaky:test-level-malformed").Err(); err != nil {
+				t.Fatalf("Del malformed leaky limiter state error = %v", err)
+			}
+			if err := client.HSet(ctx, "senna:ratelimit:leaky:test-level-malformed", tt.field, tt.value).Err(); err != nil {
+				t.Fatalf("HSet malformed leaky limiter %s=%q error = %v", tt.field, tt.value, err)
+			}
+
+			_, err := limiter.Level(ctx)
+			if err == nil {
+				t.Fatalf("LeakyLimiter.Level() with malformed %s=%q error = nil, want malformed state error", tt.field, tt.value)
+			}
+			if tt.wantNumErr {
+				var numberErr *strconv.NumError
+				if !errors.As(err, &numberErr) {
+					t.Fatalf("LeakyLimiter.Level() with malformed %s=%q error = %v, want strconv.NumError", tt.field, tt.value, err)
+				}
+			}
+		})
 	}
 }
 
