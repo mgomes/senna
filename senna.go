@@ -2,6 +2,7 @@ package senna
 
 import (
 	"context"
+	"errors"
 
 	"github.com/mgomes/senna/ratelimit"
 )
@@ -42,8 +43,8 @@ func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
 					RetryIn: waitTime,
 				}
 			}
-			defer func() { _ = limiter.Release(ctx) }()
-			return next(ctx, job)
+			handlerErr := next(ctx, job)
+			return errors.Join(handlerErr, limiter.Release(ctx))
 		}
 	}
 }
