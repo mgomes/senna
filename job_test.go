@@ -213,13 +213,13 @@ func TestJob_MarshalNilArgs(t *testing.T) {
 
 func TestJob_MarshalComplexArgs(t *testing.T) {
 	job := NewJob("complex_job", map[string]any{
-		"string":  "value",
-		"number":  42,
-		"float":   3.14,
-		"bool":    true,
-		"null":    nil,
-		"array":   []any{1, 2, 3},
-		"nested":  map[string]any{"key": "value"},
+		"string": "value",
+		"number": 42,
+		"float":  3.14,
+		"bool":   true,
+		"null":   nil,
+		"array":  []any{1, 2, 3},
+		"nested": map[string]any{"key": "value"},
 	})
 
 	data, err := job.Marshal()
