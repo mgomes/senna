@@ -891,6 +891,110 @@ func TestBatch_EmptyBatchCallbackEnqueueErrorCleansState(t *testing.T) {
 	}
 }
 
+func TestBatch_EmptyChildDoesNotRollbackCompletedParentOnAncestorPropagationError(t *testing.T) {
+	const namespace = "batch-empty-ancestor-propagation"
+	flushKeysBatch(t, namespace+":*")
+
+	defaultLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(defaultLogger)
+	})
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	now := time.Now()
+	grandparentID := "grandparent"
+	parentID := "parent"
+
+	grandparentState := senna.BatchState{
+		ID:            grandparentID,
+		Total:         1,
+		Pending:       1,
+		CreatedAt:     now,
+		OnComplete:    &senna.CallbackInfo{JobType: "grandparent_complete"},
+		CallbackQueue: "callbacks",
+	}
+	parentState := senna.BatchState{
+		ID:        parentID,
+		ParentID:  grandparentID,
+		CreatedAt: now,
+	}
+
+	grandparentData, err := json.Marshal(grandparentState)
+	if err != nil {
+		t.Fatalf("failed to marshal grandparent state: %v", err)
+	}
+	parentData, err := json.Marshal(parentState)
+	if err != nil {
+		t.Fatalf("failed to marshal parent state: %v", err)
+	}
+
+	if err := c.Redis().Set(ctx, namespace+":batch:"+grandparentID, string(grandparentData), time.Hour).Err(); err != nil {
+		t.Fatalf("failed to store grandparent state: %v", err)
+	}
+	if err := c.Redis().SAdd(ctx, namespace+":batch:"+grandparentID+":jobs", parentID).Err(); err != nil {
+		t.Fatalf("failed to store grandparent jobs set: %v", err)
+	}
+	if err := c.Redis().Set(ctx, namespace+":batch:"+parentID, string(parentData), time.Hour).Err(); err != nil {
+		t.Fatalf("failed to store parent state: %v", err)
+	}
+	if err := c.Redis().Set(ctx, namespace+":queue:callbacks", "not-a-list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison grandparent callback queue key: %v", err)
+	}
+
+	child := client.NewBatch().WithParent(parentID)
+	if err := c.EnqueueBatch(ctx, child); err != nil {
+		t.Fatalf("EnqueueBatch(empty child) error = %v, want nil", err)
+	}
+
+	parentRaw, err := c.Redis().Get(ctx, namespace+":batch:"+parentID).Result()
+	if err != nil {
+		t.Fatalf("failed to read parent state: %v", err)
+	}
+	var gotParent senna.BatchState
+	if err := json.Unmarshal([]byte(parentRaw), &gotParent); err != nil {
+		t.Fatalf("failed to decode parent state: %v", err)
+	}
+	if gotParent.Pending != 0 {
+		t.Fatalf("parent Pending = %d, want 0", gotParent.Pending)
+	}
+	if !gotParent.CompleteFired {
+		t.Fatal("parent CompleteFired = false, want true")
+	}
+
+	childExists, err := c.Redis().Exists(ctx, namespace+":batch:"+child.ID).Result()
+	if err != nil {
+		t.Fatalf("failed to check child state: %v", err)
+	}
+	if childExists != 1 {
+		t.Fatalf("child batch state should remain after ancestor propagation failure")
+	}
+
+	grandparentRaw, err := c.Redis().Get(ctx, namespace+":batch:"+grandparentID).Result()
+	if err != nil {
+		t.Fatalf("failed to read grandparent state: %v", err)
+	}
+	var gotGrandparent senna.BatchState
+	if err := json.Unmarshal([]byte(grandparentRaw), &gotGrandparent); err != nil {
+		t.Fatalf("failed to decode grandparent state: %v", err)
+	}
+	if gotGrandparent.Pending != 1 {
+		t.Fatalf("grandparent Pending = %d, want 1", gotGrandparent.Pending)
+	}
+	if gotGrandparent.CallbacksPending != 0 {
+		t.Fatalf("grandparent CallbacksPending = %d, want 0", gotGrandparent.CallbacksPending)
+	}
+}
+
 func TestBatch_ReopenedBatchUsesUniqueCallbackIDs(t *testing.T) {
 	const namespace = "batch-reopen-callback-ids"
 	flushKeysBatch(t, namespace+":*")

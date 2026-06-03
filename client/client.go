@@ -474,7 +474,11 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 	grandparentResult, ok := batch.ParentResultType(&result)
 	if ok {
 		if err := c.propagateBatchCompletion(ctx, parentID, result.ParentID, grandparentResult); err != nil {
-			return err
+			slog.WarnContext(ctx, "failed to propagate batch completion to ancestor",
+				"batch_id", parentID,
+				"parent_id", result.ParentID,
+				"error", err,
+			)
 		}
 	}
 
