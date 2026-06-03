@@ -364,6 +364,80 @@ func TestWorker_Redis_ReturnsClient(t *testing.T) {
 	}
 }
 
+func TestWorker_RecordHeartbeatWritesWorkerInfo(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-worker-heartbeat:*")
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-worker-heartbeat",
+		Settings: senna.WorkerSettings{
+			Concurrency:   3,
+			Queues:        []senna.QueueConfig{{Name: "default", Priority: 1}},
+			HeartbeatRate: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(worker heartbeat) error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+	now := time.Unix(1_704_067_200, 0)
+	if err := w.recordHeartbeat(ctx, now); err != nil {
+		t.Fatalf("recordHeartbeat(%v) error = %v, want nil", now, err)
+	}
+
+	data, err := redisClient.HGet(ctx, w.keys.Workers(), w.id).Result()
+	if err != nil {
+		t.Fatalf("HGet(%q, %q) error = %v, want nil", w.keys.Workers(), w.id, err)
+	}
+
+	var got workerHeartbeatInfo
+	if err := json.Unmarshal([]byte(data), &got); err != nil {
+		t.Fatalf("json.Unmarshal(recordHeartbeat data) error = %v, want nil", err)
+	}
+	if got.BeatAt != now.Unix() {
+		t.Fatalf("recordHeartbeat(%v).BeatAt = %d, want %d", now, got.BeatAt, now.Unix())
+	}
+	if got.Concurrency != 3 {
+		t.Fatalf("recordHeartbeat(%v).Concurrency = %d, want 3", now, got.Concurrency)
+	}
+	if len(got.Queues) != 1 || got.Queues[0].Name != "default" {
+		t.Fatalf("recordHeartbeat(%v).Queues = %+v, want default queue", now, got.Queues)
+	}
+}
+
+func TestWorker_HeartbeatHelpersReturnRedisErrors(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-worker-heartbeat-error:*")
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-worker-heartbeat-error",
+		Settings:  senna.DefaultWorkerSettings(),
+	})
+	if err != nil {
+		t.Fatalf("New(worker heartbeat error) error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	ctx := context.Background()
+	if err := redisClient.Set(ctx, w.keys.Workers(), "not-a-hash", 0).Err(); err != nil {
+		t.Fatalf("Set(%q, wrong type) error = %v, want nil", w.keys.Workers(), err)
+	}
+
+	err = w.recordHeartbeat(ctx, time.Unix(1_704_067_200, 0))
+	if err == nil {
+		t.Fatal("recordHeartbeat(wrong workers key type) error = nil, want error")
+	}
+
+	err = w.removeHeartbeat(ctx)
+	if err == nil {
+		t.Fatal("removeHeartbeat(wrong workers key type) error = nil, want error")
+	}
+}
+
 func TestWorker_JobOptions(t *testing.T) {
 	tests := []struct {
 		name     string

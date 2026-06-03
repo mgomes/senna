@@ -506,6 +506,15 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 	}
 }
 
+type workerHeartbeatInfo struct {
+	Hostname    string              `json:"hostname"`
+	PID         int                 `json:"pid"`
+	Queues      []senna.QueueConfig `json:"queues"`
+	Concurrency int                 `json:"concurrency"`
+	StartedAt   int64               `json:"started_at"`
+	BeatAt      int64               `json:"beat_at"`
+}
+
 func (w *Worker) heartbeat(ctx context.Context) {
 	ticker := time.NewTicker(w.config.Settings.HeartbeatRate)
 	defer ticker.Stop()
@@ -513,21 +522,47 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			w.redis.HDel(context.Background(), w.keys.Workers(), w.id)
+			if err := w.removeHeartbeat(context.WithoutCancel(ctx)); err != nil {
+				slog.WarnContext(context.Background(),
+					"failed to remove worker heartbeat",
+					"error", err,
+					"worker_id", w.id,
+				)
+			}
 			return
 		case <-ticker.C:
-			info := map[string]any{
-				"hostname":    hostname(),
-				"pid":         os.Getpid(),
-				"queues":      w.config.Settings.Queues,
-				"concurrency": w.config.Settings.Concurrency,
-				"started_at":  time.Now().Unix(),
-				"beat_at":     time.Now().Unix(),
+			if err := w.recordHeartbeat(ctx, time.Now()); err != nil {
+				slog.WarnContext(ctx, "failed to record worker heartbeat", "error", err, "worker_id", w.id)
 			}
-			data, _ := json.Marshal(info)
-			w.redis.HSet(ctx, w.keys.Workers(), w.id, string(data))
 		}
 	}
+}
+
+func (w *Worker) recordHeartbeat(ctx context.Context, now time.Time) error {
+	unixNow := now.Unix()
+	info := workerHeartbeatInfo{
+		Hostname:    hostname(),
+		PID:         os.Getpid(),
+		Queues:      w.config.Settings.Queues,
+		Concurrency: w.config.Settings.Concurrency,
+		StartedAt:   unixNow,
+		BeatAt:      unixNow,
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("marshal worker heartbeat: %w", err)
+	}
+	if err := w.redis.HSet(ctx, w.keys.Workers(), w.id, string(data)).Err(); err != nil {
+		return fmt.Errorf("write worker heartbeat: %w", err)
+	}
+	return nil
+}
+
+func (w *Worker) removeHeartbeat(ctx context.Context) error {
+	if err := w.redis.HDel(ctx, w.keys.Workers(), w.id).Err(); err != nil {
+		return fmt.Errorf("remove worker heartbeat: %w", err)
+	}
+	return nil
 }
 
 // sequentialLockRenewer periodically renews locks for sequential queues
