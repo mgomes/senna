@@ -8,9 +8,11 @@ import (
 )
 
 func newTestClient(t testing.TB) *redis.Client {
+	t.Helper()
 	return testredis.NewClient(t)
 }
 
 func flushKeys(t testing.TB, client *redis.Client, pattern string) {
+	t.Helper()
 	testredis.FlushKeys(t, client, pattern)
 }

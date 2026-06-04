@@ -2,9 +2,12 @@ package client
 
 import (
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestNormalizeSettings(t *testing.T) {
+	t.Parallel()
 	defaults := DefaultSettings()
 
 	tests := []struct {
@@ -41,9 +44,10 @@ func TestNormalizeSettings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := normalizeSettings(tt.in)
-			if got != tt.want {
-				t.Fatalf("normalizeSettings(%+v) = %+v, want %+v", tt.in, got, tt.want)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("normalizeSettings(%+v) mismatch (-want +got):\n%s", tt.in, diff)
 			}
 		})
 	}

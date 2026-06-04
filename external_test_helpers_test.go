@@ -18,6 +18,7 @@ func getRedisConfig() senna.RedisConfig {
 }
 
 func flushKeys(t testing.TB, pattern string) {
+	t.Helper()
 	testredis.FlushPattern(t, pattern)
 }
 
@@ -31,9 +32,11 @@ func getRedisConfigBatch() senna.RedisConfig {
 }
 
 func flushKeysBatch(t testing.TB, pattern string) {
+	t.Helper()
 	testredis.FlushPattern(t, pattern)
 }
 
 func newTestRedisClient(t testing.TB) *redis.Client {
+	t.Helper()
 	return testredis.NewClient(t)
 }

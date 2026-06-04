@@ -6,6 +6,7 @@ import (
 )
 
 func TestCursorFrom(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		value any
@@ -35,6 +36,7 @@ func TestCursorFrom(t *testing.T) {
 }
 
 func TestCursorTo(t *testing.T) {
+	t.Parallel()
 	t.Run("int", func(t *testing.T) {
 		cursor := CursorFrom(42)
 		got, err := CursorTo[int](cursor)
@@ -84,6 +86,7 @@ func TestCursorTo(t *testing.T) {
 }
 
 func TestSliceIterator(t *testing.T) {
+	t.Parallel()
 	items := []string{"a", "b", "c", "d", "e"}
 	ctx := context.Background()
 
@@ -159,6 +162,7 @@ func TestSliceIterator(t *testing.T) {
 }
 
 func TestRangeIterator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("ascending range", func(t *testing.T) {
@@ -224,6 +228,7 @@ func TestRangeIterator(t *testing.T) {
 }
 
 func TestIterableFunc(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	job := NewJob("test_job", nil)
 
@@ -267,6 +272,7 @@ func TestIterableFunc(t *testing.T) {
 }
 
 func TestInterrupted(t *testing.T) {
+	t.Parallel()
 	t.Run("not interrupted", func(t *testing.T) {
 		ctx := context.Background()
 		if Interrupted(ctx) {
@@ -285,6 +291,7 @@ func TestInterrupted(t *testing.T) {
 }
 
 func TestSkipItemError(t *testing.T) {
+	t.Parallel()
 	err := &SkipItemError{Reason: "invalid format"}
 	expected := "skipping item: invalid format"
 	if err.Error() != expected {
@@ -293,6 +300,7 @@ func TestSkipItemError(t *testing.T) {
 }
 
 func TestStopIterationError(t *testing.T) {
+	t.Parallel()
 	err := &StopIterationError{Reason: "found target"}
 	expected := "stopping iteration: found target"
 	if err.Error() != expected {
@@ -301,6 +309,7 @@ func TestStopIterationError(t *testing.T) {
 }
 
 func TestInterruptedError(t *testing.T) {
+	t.Parallel()
 	err := &InterruptedError{}
 	expected := "job interrupted"
 	if err.Error() != expected {

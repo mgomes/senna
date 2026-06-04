@@ -11,6 +11,7 @@ import (
 )
 
 func TestChain(t *testing.T) {
+	t.Parallel()
 	var order []string
 
 	m1 := func(next Handler) Handler {
@@ -51,6 +52,7 @@ func TestChain(t *testing.T) {
 }
 
 func TestChain_Empty(t *testing.T) {
+	t.Parallel()
 	called := false
 	handler := func(ctx context.Context, job *Job) error {
 		called = true
@@ -66,6 +68,7 @@ func TestChain_Empty(t *testing.T) {
 }
 
 func TestLoggingMiddleware(t *testing.T) {
+	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	middleware := LoggingMiddleware(logger)
 
@@ -85,6 +88,7 @@ func TestLoggingMiddleware(t *testing.T) {
 }
 
 func TestLoggingMiddleware_Error(t *testing.T) {
+	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	middleware := LoggingMiddleware(logger)
 
@@ -100,6 +104,7 @@ func TestLoggingMiddleware_Error(t *testing.T) {
 }
 
 func TestRecoveryMiddleware(t *testing.T) {
+	t.Parallel()
 	middleware := RecoveryMiddleware()
 
 	handler := middleware(func(ctx context.Context, job *Job) error {
@@ -116,6 +121,7 @@ func TestRecoveryMiddleware(t *testing.T) {
 }
 
 func TestRecoveryMiddleware_NoPanic(t *testing.T) {
+	t.Parallel()
 	middleware := RecoveryMiddleware()
 
 	called := false
@@ -134,6 +140,7 @@ func TestRecoveryMiddleware_NoPanic(t *testing.T) {
 }
 
 func TestTimeoutMiddleware(t *testing.T) {
+	t.Parallel()
 	middleware := TimeoutMiddleware(100 * time.Millisecond)
 
 	handler := middleware(func(ctx context.Context, job *Job) error {
@@ -148,6 +155,7 @@ func TestTimeoutMiddleware(t *testing.T) {
 }
 
 func TestTimeoutMiddleware_CompletesInTime(t *testing.T) {
+	t.Parallel()
 	middleware := TimeoutMiddleware(500 * time.Millisecond)
 
 	handler := middleware(func(ctx context.Context, job *Job) error {
@@ -162,6 +170,7 @@ func TestTimeoutMiddleware_CompletesInTime(t *testing.T) {
 }
 
 func TestTimeoutMiddleware_PropagatesError(t *testing.T) {
+	t.Parallel()
 	middleware := TimeoutMiddleware(500 * time.Millisecond)
 
 	expectedErr := errors.New("handler error")
@@ -176,6 +185,7 @@ func TestTimeoutMiddleware_PropagatesError(t *testing.T) {
 }
 
 func TestRetryMiddleware(t *testing.T) {
+	t.Parallel()
 	backoff := func(attempt int) time.Duration {
 		return time.Duration(attempt) * time.Second
 	}
@@ -201,6 +211,7 @@ func TestRetryMiddleware(t *testing.T) {
 }
 
 func TestRetryMiddleware_MaxRetriesExceeded(t *testing.T) {
+	t.Parallel()
 	backoff := func(attempt int) time.Duration {
 		return time.Second
 	}
@@ -223,6 +234,7 @@ func TestRetryMiddleware_MaxRetriesExceeded(t *testing.T) {
 }
 
 func TestRetryMiddleware_Success(t *testing.T) {
+	t.Parallel()
 	backoff := func(attempt int) time.Duration {
 		return time.Second
 	}
@@ -241,6 +253,7 @@ func TestRetryMiddleware_Success(t *testing.T) {
 }
 
 func TestExponentialBackoff(t *testing.T) {
+	t.Parallel()
 	backoff := ExponentialBackoff(time.Second, time.Minute)
 
 	tests := []struct {
@@ -266,6 +279,7 @@ func TestExponentialBackoff(t *testing.T) {
 }
 
 func TestDefaultBackoff(t *testing.T) {
+	t.Parallel()
 	backoff := DefaultBackoff()
 
 	result := backoff(0)
@@ -280,6 +294,7 @@ func TestDefaultBackoff(t *testing.T) {
 }
 
 func TestMiddlewareChain_Concurrent(t *testing.T) {
+	t.Parallel()
 	var count atomic.Int32
 
 	m := func(next Handler) Handler {

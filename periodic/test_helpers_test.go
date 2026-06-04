@@ -8,9 +8,11 @@ import (
 )
 
 func newRedisClient(t testing.TB) *redis.Client {
+	t.Helper()
 	return testredis.NewClient(t)
 }
 
 func cleanupKeys(t testing.TB, client *redis.Client, pattern string) {
+	t.Helper()
 	testredis.FlushKeys(t, client, pattern)
 }

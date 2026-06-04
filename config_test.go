@@ -6,6 +6,7 @@ import (
 )
 
 func TestRedisConfig_Options_Defaults(t *testing.T) {
+	t.Parallel()
 	cfg := RedisConfig{
 		Addr: "localhost:6379",
 	}
@@ -24,6 +25,7 @@ func TestRedisConfig_Options_Defaults(t *testing.T) {
 }
 
 func TestRedisConfig_Options_AllFields(t *testing.T) {
+	t.Parallel()
 	cfg := RedisConfig{
 		Addr:         "redis.example.com:6380",
 		Password:     "secret123",
@@ -64,6 +66,7 @@ func TestRedisConfig_Options_AllFields(t *testing.T) {
 }
 
 func TestRedisConfig_Options_PartialFields(t *testing.T) {
+	t.Parallel()
 	cfg := RedisConfig{
 		Addr:     "localhost:6379",
 		PoolSize: 50,
@@ -80,6 +83,7 @@ func TestRedisConfig_Options_PartialFields(t *testing.T) {
 }
 
 func TestDefaultWorkerSettings(t *testing.T) {
+	t.Parallel()
 	settings := DefaultWorkerSettings()
 
 	if settings.Concurrency != 10 {
@@ -106,6 +110,7 @@ func TestDefaultWorkerSettings(t *testing.T) {
 }
 
 func TestDefaultClientSettings(t *testing.T) {
+	t.Parallel()
 	settings := DefaultClientSettings()
 
 	if settings.DefaultQueue != "default" {
@@ -117,6 +122,7 @@ func TestDefaultClientSettings(t *testing.T) {
 }
 
 func TestOption_WithNamespace(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	opt := WithNamespace("myapp")
 	opt(cfg)
@@ -127,6 +133,7 @@ func TestOption_WithNamespace(t *testing.T) {
 }
 
 func TestOption_WithConcurrency(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	opt := WithConcurrency(20)
 	opt(cfg)
@@ -137,6 +144,7 @@ func TestOption_WithConcurrency(t *testing.T) {
 }
 
 func TestOption_WithQueues(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	queues := []QueueConfig{
 		{Name: "critical", Priority: 10},
@@ -158,6 +166,7 @@ func TestOption_WithQueues(t *testing.T) {
 }
 
 func TestOption_WithShutdownTimeout(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	opt := WithShutdownTimeout(time.Minute)
 	opt(cfg)
@@ -168,6 +177,7 @@ func TestOption_WithShutdownTimeout(t *testing.T) {
 }
 
 func TestOption_WithEncryptionConfig(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	key := make([]byte, 32)
 	for i := range key {
@@ -185,6 +195,7 @@ func TestOption_WithEncryptionConfig(t *testing.T) {
 }
 
 func TestOption_WithMetrics(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	opt := WithMetrics("localhost:8125", "senna")
 	opt(cfg)
@@ -201,6 +212,7 @@ func TestOption_WithMetrics(t *testing.T) {
 }
 
 func TestQueueConfig_Defaults(t *testing.T) {
+	t.Parallel()
 	q := QueueConfig{Name: "test"}
 
 	if q.Priority != 0 {
@@ -212,6 +224,7 @@ func TestQueueConfig_Defaults(t *testing.T) {
 }
 
 func TestConfig_MultipleOptions(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	options := []Option{
 		WithNamespace("myapp"),
