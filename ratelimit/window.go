@@ -66,7 +66,7 @@ func (l *WindowLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 	if waitTime > 0 {
 		return &OverLimitError{
 			LimiterName: l.name,
-			LimiterType: "window",
+			LimiterType: TypeWindow,
 			Limit:       l.limit,
 			RetryIn:     waitTime,
 		}
@@ -120,7 +120,7 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 		if time.Now().Add(retryIn).After(deadline) {
 			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
-				LimiterType: "window",
+				LimiterType: TypeWindow,
 				Limit:       l.limit,
 				Current:     int(arr[1].(int64)),
 				RetryIn:     retryIn,

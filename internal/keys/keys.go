@@ -1,7 +1,5 @@
 package keys
 
-import "fmt"
-
 type Keys struct {
 	namespace string
 }
@@ -105,40 +103,10 @@ func (k *Keys) Leader() string {
 	return k.prefix("leader")
 }
 
-func (k *Keys) RateLimit(limiterType, name string) string {
-	return k.prefix("ratelimit", limiterType, name)
-}
-
-func (k *Keys) RateLimitBucket(name string, bucket int64) string {
-	return k.prefix("ratelimit", "bucket", name, fmt.Sprintf("%d", bucket))
-}
-
-func (k *Keys) RateLimitWindow(name string) string {
-	return k.prefix("ratelimit", "window", name)
-}
-
-func (k *Keys) RateLimitConcurrent(name string) string {
-	return k.prefix("ratelimit", "concurrent", name)
-}
-
-func (k *Keys) RateLimitConcurrentSlots(name string) string {
-	return k.prefix("ratelimit", "concurrent", name, "slots")
-}
-
-func (k *Keys) RateLimitConcurrentLocks(name string) string {
-	return k.prefix("ratelimit", "concurrent", name, "locks")
-}
-
-func (k *Keys) RateLimitConcurrentInit(name string) string {
-	return k.prefix("ratelimit", "concurrent", name, "init")
-}
-
-func (k *Keys) RateLimitLeaky(name string) string {
-	return k.prefix("ratelimit", "leaky", name)
-}
-
-func (k *Keys) RateLimitPoints(name string) string {
-	return k.prefix("ratelimit", "points", name)
+// RateLimit builds a rate-limiter key of the form
+// <namespace>:ratelimit:<limiterType>[:parts...].
+func (k *Keys) RateLimit(limiterType string, parts ...string) string {
+	return k.prefix(append([]string{"ratelimit", limiterType}, parts...)...)
 }
 
 func (k *Keys) IterationState(jobID string) string {

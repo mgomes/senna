@@ -9,8 +9,22 @@ import (
 
 const BatchTTL = 30 * 24 * time.Hour
 
-// ResultEmptySuccess completes an empty batch through the completion script.
-const ResultEmptySuccess = "empty_success"
+// Result identifies how a job or child batch completed. The string values are
+// part of the batch completion Lua script protocol and must not be changed.
+type Result string
+
+const (
+	// ResultSuccess marks a successful completion.
+	ResultSuccess Result = "success"
+	// ResultFailure marks a failed (but not yet dead) completion.
+	ResultFailure Result = "failure"
+	// ResultDeath marks a job that exhausted its retries.
+	ResultDeath Result = "death"
+	// ResultInvalidated marks a batch that was invalidated.
+	ResultInvalidated Result = "invalidated"
+	// ResultEmptySuccess completes an empty batch through the completion script.
+	ResultEmptySuccess Result = "empty_success"
+)
 
 // CompletionKeys returns the Redis keys used by the batch completion script.
 func CompletionKeys(k *keys.Keys, batchID string) []string {
@@ -25,26 +39,28 @@ func CompletionKeys(k *keys.Keys, batchID string) []string {
 }
 
 // CompletionArgs returns the Redis arguments used by the batch completion script.
-func CompletionArgs(k *keys.Keys, jobID, result string) []any {
+func CompletionArgs(k *keys.Keys, jobID string, result Result) []any {
 	now := time.Now().Format(time.RFC3339Nano)
 	return []any{
 		jobID,
-		result,
+		string(result),
 		senna.DefaultRetryCount,
 		now,
 		k.Queue(""),
 	}
 }
 
-func ParentResultType(result *CompleteResult) (string, bool) {
+// ParentResultType maps a completion result to the result a parent batch should
+// record, returning false when there is no parent to propagate to.
+func ParentResultType(result *CompleteResult) (Result, bool) {
 	if !result.CompletedNow || result.ParentID == "" {
 		return "", false
 	}
 	if result.Dead {
-		return "death", true
+		return ResultDeath, true
 	}
 	if result.Invalidated {
-		return "invalidated", true
+		return ResultInvalidated, true
 	}
-	return "success", true
+	return ResultSuccess, true
 }

@@ -65,7 +65,7 @@ func (l *BucketLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 	if waitTime > 0 {
 		return &OverLimitError{
 			LimiterName: l.name,
-			LimiterType: "bucket",
+			LimiterType: TypeBucket,
 			Limit:       l.limit,
 			RetryIn:     waitTime,
 		}
@@ -118,7 +118,7 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 		if time.Now().Add(retryIn).After(deadline) {
 			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
-				LimiterType: "bucket",
+				LimiterType: TypeBucket,
 				Limit:       l.limit,
 				Current:     int(arr[1].(int64)),
 				RetryIn:     retryIn,

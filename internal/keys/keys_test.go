@@ -180,7 +180,7 @@ func TestKeys_RateLimit(t *testing.T) {
 func TestKeys_RateLimitBucket(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitBucket("api", 1704067200)
+	result := k.RateLimit("bucket", "api", "1704067200")
 	if result != "app:ratelimit:bucket:api:1704067200" {
 		t.Errorf("expected 'app:ratelimit:bucket:api:1704067200', got '%s'", result)
 	}
@@ -189,7 +189,7 @@ func TestKeys_RateLimitBucket(t *testing.T) {
 func TestKeys_RateLimitWindow(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitWindow("api")
+	result := k.RateLimit("window", "api")
 	if result != "app:ratelimit:window:api" {
 		t.Errorf("expected 'app:ratelimit:window:api', got '%s'", result)
 	}
@@ -198,7 +198,7 @@ func TestKeys_RateLimitWindow(t *testing.T) {
 func TestKeys_RateLimitConcurrent(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitConcurrent("api")
+	result := k.RateLimit("concurrent", "api")
 	if result != "app:ratelimit:concurrent:api" {
 		t.Errorf("expected 'app:ratelimit:concurrent:api', got '%s'", result)
 	}
@@ -207,7 +207,7 @@ func TestKeys_RateLimitConcurrent(t *testing.T) {
 func TestKeys_RateLimitConcurrentSlots(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitConcurrentSlots("api")
+	result := k.RateLimit("concurrent", "api", "slots")
 	if result != "app:ratelimit:concurrent:api:slots" {
 		t.Errorf("expected 'app:ratelimit:concurrent:api:slots', got '%s'", result)
 	}
@@ -216,7 +216,7 @@ func TestKeys_RateLimitConcurrentSlots(t *testing.T) {
 func TestKeys_RateLimitConcurrentLocks(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitConcurrentLocks("api")
+	result := k.RateLimit("concurrent", "api", "locks")
 	if result != "app:ratelimit:concurrent:api:locks" {
 		t.Errorf("expected 'app:ratelimit:concurrent:api:locks', got '%s'", result)
 	}
@@ -225,7 +225,7 @@ func TestKeys_RateLimitConcurrentLocks(t *testing.T) {
 func TestKeys_RateLimitConcurrentInit(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitConcurrentInit("api")
+	result := k.RateLimit("concurrent", "api", "init")
 	if result != "app:ratelimit:concurrent:api:init" {
 		t.Errorf("expected 'app:ratelimit:concurrent:api:init', got '%s'", result)
 	}
@@ -234,7 +234,7 @@ func TestKeys_RateLimitConcurrentInit(t *testing.T) {
 func TestKeys_RateLimitLeaky(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitLeaky("api")
+	result := k.RateLimit("leaky", "api")
 	if result != "app:ratelimit:leaky:api" {
 		t.Errorf("expected 'app:ratelimit:leaky:api', got '%s'", result)
 	}
@@ -243,7 +243,7 @@ func TestKeys_RateLimitLeaky(t *testing.T) {
 func TestKeys_RateLimitPoints(t *testing.T) {
 	k := New("app")
 
-	result := k.RateLimitPoints("api")
+	result := k.RateLimit("points", "api")
 	if result != "app:ratelimit:points:api" {
 		t.Errorf("expected 'app:ratelimit:points:api', got '%s'", result)
 	}

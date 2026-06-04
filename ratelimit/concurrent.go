@@ -136,7 +136,7 @@ func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) (e
 	if waitTime > 0 {
 		return &OverLimitError{
 			LimiterName: l.name,
-			LimiterType: "concurrent",
+			LimiterType: TypeConcurrent,
 			Limit:       l.limit,
 			RetryIn:     waitTime,
 		}
@@ -191,7 +191,7 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (Lease, time.Duration, 
 		if time.Now().After(deadline) {
 			return nil, l.waitTimeout, &OverLimitError{
 				LimiterName: l.name,
-				LimiterType: "concurrent",
+				LimiterType: TypeConcurrent,
 				Limit:       l.limit,
 				Current:     l.limit,
 				RetryIn:     l.waitTimeout,
