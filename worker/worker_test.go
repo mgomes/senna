@@ -1610,3 +1610,229 @@ func TestWorker_RequeueOrphanedJobs_ActiveWorkerNotAffected(t *testing.T) {
 		t.Error("expected active worker to remain in workers hash")
 	}
 }
+
+// seedBatchJobInFlight registers a single-job batch in Redis and places the job
+// on the worker's in-flight list, returning the job. The batch jobs set is left
+// corrupted (wrong Redis type) so the batch completion script fails, simulating
+// an inability to record batch progress at the moment of completion.
+func seedBatchJobInFlight(t *testing.T, w *Worker, redisClient *redis.Client, bid string) *senna.Job {
+	t.Helper()
+	ctx := context.Background()
+
+	job := senna.NewJob("batch_job", map[string]any{"n": 1})
+	job.Queue = "default"
+	job.BatchID = bid
+
+	state := senna.BatchState{ID: bid, Total: 1, Pending: 1}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal batch state: %v", err)
+	}
+	if err := redisClient.Set(ctx, w.keys.Batch(bid), string(stateData), 0).Err(); err != nil {
+		t.Fatalf("set batch state: %v", err)
+	}
+
+	jobData, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("marshal job: %v", err)
+	}
+	// Mirror a fetched job: Raw holds the exact in-flight payload, so the ack /
+	// move-to-dead LREM matches it regardless of later field mutations.
+	job.SetRaw(string(jobData))
+	if err := redisClient.LPush(ctx, w.keys.InFlight(w.id), string(jobData)).Err(); err != nil {
+		t.Fatalf("seed in-flight: %v", err)
+	}
+
+	// Corrupt the batch jobs set: a string where the script expects a set. The
+	// completion script returns an error before mutating any state.
+	if err := redisClient.Set(ctx, w.keys.BatchJobs(bid), "corrupt", 0).Err(); err != nil {
+		t.Fatalf("corrupt batch jobs set: %v", err)
+	}
+
+	return job
+}
+
+// TestWorker_CompleteJob_LeavesJobInFlightWhenBatchProgressFails verifies that a
+// successful batch job is not removed from the in-flight list until its batch
+// progress has been durably recorded. Otherwise a crash or Redis error between
+// the ack and the batch update would strand the batch (the job is gone, but its
+// pending count is never decremented, so the batch never completes).
+func TestWorker_CompleteJob_LeavesJobInFlightWhenBatchProgressFails(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-complete-ack:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-complete-ack",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	job := seedBatchJobInFlight(t, w, redisClient, "batch-complete")
+
+	w.completeJob(ctx, job)
+
+	inFlight, err := redisClient.LLen(ctx, w.keys.InFlight(w.id)).Result()
+	if err != nil {
+		t.Fatalf("llen in-flight: %v", err)
+	}
+	if inFlight != 1 {
+		t.Errorf("expected job to remain in-flight when batch progress fails, got %d in-flight", inFlight)
+	}
+}
+
+// TestWorker_KillJob_LeavesJobInFlightWhenBatchProgressFails verifies that a
+// dying job is not moved to the dead set until its batch death has been durably
+// recorded. Otherwise a crash or Redis error between the move-to-dead and the
+// batch update would strand the batch.
+func TestWorker_KillJob_LeavesJobInFlightWhenBatchProgressFails(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-kill-ack:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-kill-ack",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	job := seedBatchJobInFlight(t, w, redisClient, "batch-kill")
+
+	w.killJob(ctx, job, errors.New("boom"))
+
+	inFlight, err := redisClient.LLen(ctx, w.keys.InFlight(w.id)).Result()
+	if err != nil {
+		t.Fatalf("llen in-flight: %v", err)
+	}
+	if inFlight != 1 {
+		t.Errorf("expected job to remain in-flight when batch progress fails, got %d in-flight", inFlight)
+	}
+
+	dead, err := redisClient.ZCard(ctx, w.keys.Dead()).Result()
+	if err != nil {
+		t.Fatalf("zcard dead: %v", err)
+	}
+	if dead != 0 {
+		t.Errorf("expected job not to be moved to dead set when batch progress fails, got %d dead", dead)
+	}
+}
+
+// TestWorker_OrphanedBatchJobRecoversAndCompletesBatch exercises the full
+// recovery loop for a batch member whose worker crashed mid-flight: the reaper
+// requeues it, a live worker processes it, and the batch completes with correct
+// counts. This is the end-to-end guarantee that the complete/kill ordering
+// upholds — a recovered batch job still drives its batch to completion.
+func TestWorker_OrphanedBatchJobRecoversAndCompletesBatch(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-orphan:*")
+
+	ctx := context.Background()
+	ns := "test-batch-orphan"
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: ns,
+		Settings: senna.WorkerSettings{
+			Concurrency:   1,
+			Queues:        []senna.QueueConfig{{Name: "default"}},
+			HeartbeatRate: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	var processed atomic.Int32
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return nil
+	})
+
+	bid := "batch-orphan"
+	job := senna.NewJob("batch_job", map[string]any{"n": 1})
+	job.Queue = "default"
+	job.BatchID = bid
+
+	// Batch with one pending member, registered in the jobs set.
+	state := senna.BatchState{ID: bid, Total: 1, Pending: 1}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal batch state: %v", err)
+	}
+	if err := redisClient.Set(ctx, w.keys.Batch(bid), string(stateData), 0).Err(); err != nil {
+		t.Fatalf("set batch state: %v", err)
+	}
+	if err := redisClient.SAdd(ctx, w.keys.BatchJobs(bid), job.ID).Err(); err != nil {
+		t.Fatalf("seed batch jobs set: %v", err)
+	}
+
+	// Simulate a crashed worker that had the job in-flight.
+	jobData, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("marshal job: %v", err)
+	}
+	crashedWorkerID := "crashed-batch-worker"
+	staleTime := time.Now().Add(-2 * workerHeartbeatTimeout).Unix()
+	workerInfo := map[string]any{"hostname": "crashed", "pid": 1, "beat_at": staleTime, "started_at": staleTime}
+	workerData, err := json.Marshal(workerInfo)
+	if err != nil {
+		t.Fatalf("marshal worker info: %v", err)
+	}
+	if err := redisClient.HSet(ctx, w.keys.Workers(), crashedWorkerID, string(workerData)).Err(); err != nil {
+		t.Fatalf("set crashed worker heartbeat: %v", err)
+	}
+	if err := redisClient.LPush(ctx, w.keys.InFlight(crashedWorkerID), string(jobData)).Err(); err != nil {
+		t.Fatalf("seed crashed in-flight: %v", err)
+	}
+
+	// Reaper requeues the orphaned job to its queue.
+	w.requeueOrphanedJobs(ctx)
+
+	// A live worker fetches and processes it to completion.
+	fetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("fetch requeued job: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected to fetch the requeued orphaned job, got nil")
+	}
+	w.processJob(ctx, fetched)
+
+	if got := processed.Load(); got < 1 {
+		t.Errorf("expected handler to run at least once, ran %d times", got)
+	}
+
+	status := senna.NewBatchStatus(redisClient, ns, bid)
+	if err := status.Refresh(ctx); err != nil {
+		t.Fatalf("refresh batch status: %v", err)
+	}
+	if status.Pending() != 0 {
+		t.Errorf("expected batch pending 0 after recovery, got %d", status.Pending())
+	}
+	if status.Successes() != 1 {
+		t.Errorf("expected batch successes 1 after recovery, got %d", status.Successes())
+	}
+
+	inFlight, err := redisClient.LLen(ctx, w.keys.InFlight(w.id)).Result()
+	if err != nil {
+		t.Fatalf("llen in-flight: %v", err)
+	}
+	if inFlight != 0 {
+		t.Errorf("expected job acked out of in-flight after completion, got %d", inFlight)
+	}
+}

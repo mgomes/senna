@@ -288,28 +288,51 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	w.handleJobResult(ctx, job, err, opts, nil)
 }
 
+// completeJob records batch progress and then removes the job from the
+// in-flight list. The ordering is deliberate: the in-flight entry is the
+// recovery anchor, so it is removed only once the outcome is durably recorded.
+// If recording fails, the job is left in-flight for the reaper to recover; the
+// completion script is idempotent, so a re-run cannot double-count the batch.
 func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
+	if err := w.updateBatchProgress(ctx, job, batch.ResultSuccess); err != nil {
+		slog.ErrorContext(ctx, "leaving job in-flight after batch progress failure", "job_id", job.ID, "error", err)
+		return
+	}
+	if err := w.handleBatchCallbackComplete(ctx, job); err != nil {
+		slog.ErrorContext(ctx, "leaving job in-flight after batch callback completion failure", "job_id", job.ID, "error", err)
+		return
+	}
 	if err := w.fetcher.Ack(ctx, w.id, job); err != nil {
 		slog.ErrorContext(ctx, "failed to ack job", "job_id", job.ID, "error", err)
 	}
-	w.updateBatchProgress(ctx, job, batch.ResultSuccess)
-	w.handleBatchCallbackComplete(ctx, job)
 }
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
-	w.updateBatchProgress(ctx, job, batch.ResultFailure)
+	if err := w.updateBatchProgress(ctx, job, batch.ResultFailure); err != nil {
+		slog.ErrorContext(ctx, "leaving job in-flight after batch progress failure", "job_id", job.ID, "error", err)
+		return
+	}
 	if err := w.fetcher.Nack(ctx, w.id, job, retryIn); err != nil {
 		slog.ErrorContext(ctx, "failed to nack job for retry", "job_id", job.ID, "retry_in", retryIn, "error", err)
 	}
 }
 
+// killJob records batch progress and then moves the job to the dead set. As in
+// completeJob, the in-flight entry is the recovery anchor and is removed only
+// after the outcome is durably recorded.
 func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
 	job.Error = err.Error()
+	if uerr := w.updateBatchProgress(ctx, job, batch.ResultDeath); uerr != nil {
+		slog.ErrorContext(ctx, "leaving job in-flight after batch progress failure", "job_id", job.ID, "error", uerr)
+		return
+	}
+	if cerr := w.handleBatchCallbackComplete(ctx, job); cerr != nil {
+		slog.ErrorContext(ctx, "leaving job in-flight after batch callback completion failure", "job_id", job.ID, "error", cerr)
+		return
+	}
 	if moveErr := w.fetcher.MoveToDead(ctx, w.id, job); moveErr != nil {
 		slog.ErrorContext(ctx, "failed to move job to dead queue", "job_id", job.ID, "error", moveErr)
 	}
-	w.updateBatchProgress(ctx, job, batch.ResultDeath)
-	w.handleBatchCallbackComplete(ctx, job)
 }
 
 func (w *Worker) calculateRetryBackoff(job *senna.Job, opts *JobOptions) (time.Duration, bool) {
@@ -402,9 +425,16 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 	})
 }
 
-func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batch.Result) {
+// updateBatchProgress records the outcome of a batch member in its batch's
+// completion counters. It returns an error only when the counter update for
+// this job could not be recorded, signaling the caller to leave the job
+// in-flight so the reaper can recover it. Propagation to a parent batch is
+// best-effort: a failure there is logged but does not gate the caller, because
+// re-running this job cannot re-drive propagation (the completion script is
+// idempotent and short-circuits on the second delivery).
+func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batch.Result) error {
 	if job.BatchID == "" {
-		return
+		return nil
 	}
 
 	scriptKeys := batch.CompletionKeys(w.keys, job.BatchID)
@@ -412,12 +442,15 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 
 	var callbackResult batch.CompleteResult
 	if err := batchCompleteScript.RunJSON(ctx, w.redis, &callbackResult, scriptKeys, scriptArgs...); err != nil {
-		slog.ErrorContext(ctx, "batch script failed", "error", err, "batch_id", job.BatchID)
-		return
+		return fmt.Errorf("record batch progress for %s: %w", job.BatchID, err)
 	}
 
-	if callbackResult.Error != "" || callbackResult.AlreadyProcessed {
-		return
+	if callbackResult.Error != "" {
+		slog.ErrorContext(ctx, "batch completion returned error", "error", callbackResult.Error, "batch_id", job.BatchID)
+		return nil
+	}
+	if callbackResult.AlreadyProcessed {
+		return nil
 	}
 
 	parentResultType, ok := batch.ParentResultType(&callbackResult)
@@ -426,8 +459,12 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 			ID:      job.BatchID,
 			BatchID: callbackResult.ParentID,
 		}
-		w.updateBatchProgress(ctx, parentJob, parentResultType)
+		if err := w.updateBatchProgress(ctx, parentJob, parentResultType); err != nil {
+			slog.ErrorContext(ctx, "failed to propagate batch completion to parent", "error", err, "batch_id", job.BatchID, "parent_id", callbackResult.ParentID)
+		}
 	}
+
+	return nil
 }
 
 // batchCallbackCompleteResult is the response from the batch_callback_complete Lua script.
@@ -444,9 +481,9 @@ type batchCallbackCompleteResult struct {
 
 // handleBatchCallbackComplete is called after a callback job finishes.
 // It decrements the callbacks_pending counter and propagates to parent if ready.
-func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job) {
+func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job) error {
 	if job.CallbackBatchID == "" {
-		return
+		return nil
 	}
 
 	keys := []string{
@@ -456,20 +493,20 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 
 	var result batchCallbackCompleteResult
 	if err := batchCallbackCompleteScript.RunJSON(ctx, w.redis, &result, keys, job.ID); err != nil {
-		slog.ErrorContext(ctx, "batch callback complete script failed", "error", err, "batch_id", job.CallbackBatchID)
-		return
+		return fmt.Errorf("record batch callback completion for %s: %w", job.CallbackBatchID, err)
 	}
 
 	if result.Error != "" {
 		slog.ErrorContext(ctx, "batch callback complete error", "error", result.Error, "batch_id", job.CallbackBatchID)
-		return
+		return nil
 	}
 
 	if result.AlreadyProcessed {
-		return
+		return nil
 	}
 
-	// If all jobs AND all callbacks are done, propagate to parent
+	// If all jobs AND all callbacks are done, propagate to parent. Propagation
+	// is best-effort for the same reason as updateBatchProgress.
 	if result.ShouldPropagate && result.ParentID != "" {
 		parentResult := batch.ResultSuccess
 		if result.Dead {
@@ -481,8 +518,12 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 			ID:      job.CallbackBatchID,
 			BatchID: result.ParentID,
 		}
-		w.updateBatchProgress(ctx, parentJob, parentResult)
+		if err := w.updateBatchProgress(ctx, parentJob, parentResult); err != nil {
+			slog.ErrorContext(ctx, "failed to propagate batch callback completion to parent", "error", err, "batch_id", job.CallbackBatchID, "parent_id", result.ParentID)
+		}
 	}
+
+	return nil
 }
 
 type workerHeartbeatInfo struct {
