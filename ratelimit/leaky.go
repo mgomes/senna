@@ -61,19 +61,7 @@ func (l *LeakyLimiter) Name() string {
 
 // WithinLimit runs fn when the bucket level allows it.
 func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
-	_, waitTime, err := l.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	if waitTime > 0 {
-		return &OverLimitError{
-			LimiterName: l.name,
-			LimiterType: TypeLeaky,
-			Limit:       l.capacity,
-			RetryIn:     waitTime,
-		}
-	}
-	return fn()
+	return runWithinLimit(ctx, l, TypeLeaky, l.capacity, fn)
 }
 
 // Acquire waits for or reports capacity in the leaky bucket.

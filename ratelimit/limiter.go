@@ -2,21 +2,63 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
-// Limiter defines the interface implemented by Senna rate limiters.
-type Limiter interface {
-	WithinLimit(ctx context.Context, fn func() error) error
+// Acquirer acquires capacity for a single unit of work. It is the minimal
+// interface needed to gate work, used by callers that schedule their own retry
+// (e.g. the reschedule middleware) rather than blocking inside WithinLimit.
+type Acquirer interface {
 	// Acquire returns a non-nil lease when capacity is acquired with waitTime == 0.
 	Acquire(ctx context.Context) (lease Lease, waitTime time.Duration, err error)
 	Name() string
 }
 
+// Limiter is an Acquirer that can also run a function within its limit.
+type Limiter interface {
+	Acquirer
+	WithinLimit(ctx context.Context, fn func() error) error
+}
+
 // Lease releases capacity acquired from a limiter.
 type Lease interface {
 	Release(ctx context.Context) error
+}
+
+// runWithinLimit acquires capacity from a, runs fn when capacity is available,
+// and releases the lease afterward. It returns an OverLimitError when the
+// limiter is over budget under PolicySkip; under PolicyRaise the over-limit
+// error is surfaced by Acquire itself. This centralizes the logic every
+// limiter's WithinLimit would otherwise duplicate.
+func runWithinLimit(ctx context.Context, a Acquirer, typ LimiterType, limit int, fn func() error) (err error) {
+	lease, waitTime, err := a.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if waitTime > 0 {
+		return &OverLimitError{
+			LimiterName: a.Name(),
+			LimiterType: typ,
+			Limit:       limit,
+			RetryIn:     waitTime,
+		}
+	}
+	if lease != nil {
+		defer func() {
+			releaseErr := lease.Release(ctx)
+			if releaseErr == nil {
+				return
+			}
+			if err == nil {
+				err = releaseErr
+				return
+			}
+			err = errors.Join(err, releaseErr)
+		}()
+	}
+	return fn()
 }
 
 type noopLease struct{}

@@ -59,19 +59,7 @@ func (l *BucketLimiter) Name() string {
 
 // WithinLimit runs fn when capacity is available.
 func (l *BucketLimiter) WithinLimit(ctx context.Context, fn func() error) error {
-	_, waitTime, err := l.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	if waitTime > 0 {
-		return &OverLimitError{
-			LimiterName: l.name,
-			LimiterType: TypeBucket,
-			Limit:       l.limit,
-			RetryIn:     waitTime,
-		}
-	}
-	return fn()
+	return runWithinLimit(ctx, l, TypeBucket, l.limit, fn)
 }
 
 // Acquire waits for or reports bucket capacity for a single unit of work.

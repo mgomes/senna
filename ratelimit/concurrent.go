@@ -132,30 +132,8 @@ func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
 }
 
 // WithinLimit runs fn after acquiring a concurrency slot and releases it afterward.
-func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) (err error) {
-	lease, waitTime, err := l.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	if waitTime > 0 {
-		return &OverLimitError{
-			LimiterName: l.name,
-			LimiterType: TypeConcurrent,
-			Limit:       l.limit,
-			RetryIn:     waitTime,
-		}
-	}
-	defer func() {
-		if releaseErr := lease.Release(ctx); releaseErr != nil {
-			if err == nil {
-				err = releaseErr
-				return
-			}
-			err = errors.Join(err, releaseErr)
-		}
-	}()
-
-	return fn()
+func (l *ConcurrentLimiter) WithinLimit(ctx context.Context, fn func() error) error {
+	return runWithinLimit(ctx, l, TypeConcurrent, l.limit, fn)
 }
 
 // Acquire waits for or reports availability of a concurrency slot.
