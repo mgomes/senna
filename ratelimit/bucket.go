@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -96,16 +97,12 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 			return nil, 0, err
 		}
 
-		arr := result.([]any)
-		allowed := arr[0].(int64) == 1
-		var retryUs int64
-		switch v := arr[2].(type) {
-		case int64:
-			retryUs = v
-		case float64:
-			retryUs = int64(v)
+		vals, err := script.Ints(result, 3)
+		if err != nil {
+			return nil, 0, fmt.Errorf("bucket limiter %s: %w", l.name, err)
 		}
-		retryIn := time.Duration(retryUs) * time.Microsecond
+		allowed := vals[0] == 1
+		retryIn := time.Duration(vals[2]) * time.Microsecond
 
 		if allowed {
 			return noopLease{}, 0, nil
@@ -120,7 +117,7 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 				LimiterName: l.name,
 				LimiterType: "bucket",
 				Limit:       l.limit,
-				Current:     int(arr[1].(int64)),
+				Current:     int(vals[1]),
 				RetryIn:     retryIn,
 			}
 		}
@@ -144,7 +141,7 @@ func (l *BucketLimiter) Remaining(ctx context.Context) (int, error) {
 
 	key := fmt.Sprintf("%s:%s:%d", l.keyPrefix, l.name, bucketTs)
 	val, err := l.client.Get(ctx, key).Int()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return l.limit, nil
 	}
 	if err != nil {

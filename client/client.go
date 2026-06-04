@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -13,6 +14,17 @@ import (
 	"github.com/mgomes/senna/internal/iteration"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
+)
+
+// Validation errors returned by enqueue and batch operations. They are exported
+// so callers can match them with errors.Is rather than comparing message text.
+var (
+	// ErrUniqueTTLRequired indicates a unique key was supplied without a positive TTL.
+	ErrUniqueTTLRequired = errors.New("unique TTL must be > 0 when using a unique key")
+	// ErrUniqueKeyInBulk indicates a unique key was supplied to a bulk enqueue, which is unsupported.
+	ErrUniqueKeyInBulk = errors.New("unique keys are not supported in bulk enqueue")
+	// ErrBatchSelfParent indicates a batch was configured as its own parent.
+	ErrBatchSelfParent = errors.New("batch cannot be its own parent")
 )
 
 // Client enqueues jobs and exposes batch and iteration helpers.
@@ -187,13 +199,13 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 
 	if cfg.uniqueKey != "" {
 		if cfg.uniqueTTL <= 0 {
-			return nil, fmt.Errorf("unique TTL must be > 0 when using a unique key")
+			return nil, ErrUniqueTTLRequired
 		}
 		status, err := c.redis.SetArgs(ctx, c.keys.Unique(cfg.uniqueKey), job.ID, redis.SetArgs{
 			Mode: "NX",
 			TTL:  cfg.uniqueTTL,
 		}).Result()
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, &senna.DuplicateJobError{UniqueKey: cfg.uniqueKey}
 		}
 		if err != nil {
@@ -251,7 +263,7 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 
 	// Unique keys are not supported in bulk operations
 	if cfg.uniqueKey != "" {
-		return nil, fmt.Errorf("unique keys are not supported in bulk enqueue")
+		return nil, ErrUniqueKeyInBulk
 	}
 
 	// Build and marshal all jobs upfront, only keeping those that succeed
@@ -329,7 +341,7 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("enqueue %d bulk jobs of type %s: %w", len(enqueued), jobType, err)
 	}
 
 	// Extract only the successfully enqueued jobs
@@ -356,15 +368,15 @@ func (c *Client) EnqueueBulkAt(ctx context.Context, t time.Time, jobType string,
 func (c *Client) enqueueNow(ctx context.Context, job *senna.Job) (*senna.Job, error) {
 	data, err := job.Marshal()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal job %s: %w", job.ID, err)
 	}
 
 	if err := c.redis.SAdd(ctx, c.keys.Queues(), job.Queue).Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("register queue %s: %w", job.Queue, err)
 	}
 
 	if err := c.redis.LPush(ctx, c.keys.Queue(job.Queue), string(data)).Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("enqueue job %s to queue %s: %w", job.ID, job.Queue, err)
 	}
 
 	return job, nil
@@ -373,14 +385,14 @@ func (c *Client) enqueueNow(ctx context.Context, job *senna.Job) (*senna.Job, er
 func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*senna.Job, error) {
 	data, err := job.Marshal()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal job %s: %w", job.ID, err)
 	}
 
 	if err := c.redis.ZAdd(ctx, c.keys.Scheduled(), redis.Z{
 		Score:  float64(t.Unix()),
 		Member: string(data),
 	}).Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("schedule job %s: %w", job.ID, err)
 	}
 
 	return job, nil
@@ -393,11 +405,11 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 		return b.err
 	}
 	if b.ParentID != "" && b.ParentID == b.ID {
-		return fmt.Errorf("batch cannot be its own parent")
+		return ErrBatchSelfParent
 	}
 	if b.ParentID != "" {
 		if _, err := c.redis.Get(ctx, c.keys.Batch(b.ParentID)).Result(); err != nil {
-			if err == redis.Nil {
+			if errors.Is(err, redis.Nil) {
 				return &senna.BatchNotFoundError{BatchID: b.ParentID}
 			}
 			return err
@@ -577,15 +589,17 @@ func (c *Client) buildBatchState(b *Batch, callbackQueue string) *senna.BatchSta
 func (c *Client) storeBatchState(ctx context.Context, batchID string, state *senna.BatchState) error {
 	batchData, err := json.Marshal(state)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal batch state %s: %w", batchID, err)
 	}
 
 	pipe := c.redis.Pipeline()
 	pipe.Set(ctx, c.keys.Batch(batchID), string(batchData), batch.BatchTTL)
 	pipe.SAdd(ctx, c.keys.Batches(), batchID)
 
-	_, err = pipe.Exec(ctx)
-	return err
+	if _, err = pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("store batch state %s: %w", batchID, err)
+	}
+	return nil
 }
 
 // linkBatchToParent links a child batch to its parent (Step 2).

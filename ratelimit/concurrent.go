@@ -124,7 +124,11 @@ func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	return int(result.(int64)), nil
+	reclaimed, err := script.Int(result)
+	if err != nil {
+		return 0, fmt.Errorf("concurrent limiter %s reclaim: %w", l.name, err)
+	}
+	return int(reclaimed), nil
 }
 
 // WithinLimit runs fn after acquiring a concurrency slot and releases it afterward.
@@ -177,8 +181,11 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (Lease, time.Duration, 
 			return nil, 0, err
 		}
 
-		arr := result.([]any)
-		acquired := arr[0].(int64) == 1
+		vals, err := script.Ints(result, 1)
+		if err != nil {
+			return nil, 0, fmt.Errorf("concurrent limiter %s: %w", l.name, err)
+		}
+		acquired := vals[0] == 1
 
 		if acquired {
 			return &concurrentLease{limiter: l, lockID: tempLockID}, 0, nil
@@ -235,7 +242,7 @@ func (l *ConcurrentLimiter) release(ctx context.Context, lockID string) error {
 // Held returns the number of currently held slots.
 func (l *ConcurrentLimiter) Held(ctx context.Context) (int, error) {
 	count, err := l.client.HLen(ctx, l.locksKey()).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return 0, nil
 	}
 	return int(count), err

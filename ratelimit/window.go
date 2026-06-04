@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -98,16 +99,12 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 			return nil, 0, err
 		}
 
-		arr := result.([]any)
-		allowed := arr[0].(int64) == 1
-		var retryUs int64
-		switch v := arr[2].(type) {
-		case int64:
-			retryUs = v
-		case float64:
-			retryUs = int64(v)
+		vals, err := script.Ints(result, 3)
+		if err != nil {
+			return nil, 0, fmt.Errorf("window limiter %s: %w", l.name, err)
 		}
-		retryIn := time.Duration(retryUs) * time.Microsecond
+		allowed := vals[0] == 1
+		retryIn := time.Duration(vals[2]) * time.Microsecond
 
 		if allowed {
 			return noopLease{}, 0, nil
@@ -122,7 +119,7 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 				LimiterName: l.name,
 				LimiterType: "window",
 				Limit:       l.limit,
-				Current:     int(arr[1].(int64)),
+				Current:     int(vals[1]),
 				RetryIn:     retryIn,
 			}
 		}
@@ -154,7 +151,7 @@ func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
 	}
 
 	count, err := l.client.ZCount(ctx, key, "-inf", "+inf").Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return l.limit, nil
 	}
 	if err != nil {

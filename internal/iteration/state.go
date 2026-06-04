@@ -3,6 +3,7 @@ package iteration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/mgomes/senna"
@@ -14,7 +15,7 @@ const StateTTL = 30 * 24 * time.Hour
 func Load(ctx context.Context, client redis.Cmdable, key string) (*senna.IterationState, error) {
 	data, err := client.Get(ctx, key).Result()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, nil
 		}
 		return nil, err
