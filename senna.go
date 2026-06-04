@@ -29,7 +29,8 @@ func RateLimitMiddleware(limiter ratelimit.Limiter) Middleware {
 }
 
 // RateLimitMiddlewareWithReschedule retries over-limit jobs after the limiter's wait time.
-func RateLimitMiddlewareWithReschedule(limiter ratelimit.Limiter) Middleware {
+// It only needs to acquire capacity, so it accepts the narrower ratelimit.Acquirer.
+func RateLimitMiddlewareWithReschedule(limiter ratelimit.Acquirer) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) (err error) {
 			lease, waitTime, err := limiter.Acquire(ctx)

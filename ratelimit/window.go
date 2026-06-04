@@ -60,19 +60,7 @@ func (l *WindowLimiter) Name() string {
 
 // WithinLimit runs fn when capacity is available.
 func (l *WindowLimiter) WithinLimit(ctx context.Context, fn func() error) error {
-	_, waitTime, err := l.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	if waitTime > 0 {
-		return &OverLimitError{
-			LimiterName: l.name,
-			LimiterType: TypeWindow,
-			Limit:       l.limit,
-			RetryIn:     waitTime,
-		}
-	}
-	return fn()
+	return runWithinLimit(ctx, l, TypeWindow, l.limit, fn)
 }
 
 // Acquire waits for or reports capacity in the sliding window.
