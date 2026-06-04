@@ -43,19 +43,13 @@ type Config struct {
 	Encryption *senna.EncryptionSettings
 }
 
-// Settings configures enqueue defaults for a Client.
-type Settings struct {
-	DefaultQueue string
-	DefaultRetry int
-}
+// Settings configures enqueue defaults for a Client. It aliases
+// senna.ClientSettings so the two stay in lockstep.
+type Settings = senna.ClientSettings
 
 // DefaultSettings returns the default client settings.
 func DefaultSettings() Settings {
-	defaults := senna.DefaultClientSettings()
-	return Settings{
-		DefaultQueue: defaults.DefaultQueue,
-		DefaultRetry: defaults.DefaultRetry,
-	}
+	return senna.DefaultClientSettings()
 }
 
 func normalizeSettings(settings Settings) Settings {
@@ -463,8 +457,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 }
 
 // propagateBatchCompletion notifies a parent batch that a child has completed.
-// The resultType should be "success", "death", or "invalidated".
-func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, parentID, resultType string) error {
+func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, parentID string, resultType batch.Result) error {
 	scriptKeys := batch.CompletionKeys(c.keys, parentID)
 	scriptArgs := batch.CompletionArgs(c.keys, childBatchID, resultType)
 
@@ -477,7 +470,7 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 		if result.Error == "" {
 			return nil
 		}
-		if result.Error == "batch_not_found" {
+		if result.Error == batch.ErrCodeNotFound {
 			return &senna.BatchNotFoundError{BatchID: parentID}
 		}
 		return fmt.Errorf("parent batch %s completion failed: %s", parentID, result.Error)
@@ -622,11 +615,11 @@ func (c *Client) linkBatchToParent(ctx context.Context, b *Batch) error {
 		c.cleanupOrphanedBatch(ctx, b.ID)
 
 		switch addResult.Error {
-		case "batch_not_found":
+		case batch.ErrCodeNotFound:
 			return &senna.BatchNotFoundError{BatchID: b.ParentID}
-		case "batch_invalidated":
+		case batch.ErrCodeInvalidated:
 			return fmt.Errorf("parent batch %s has been invalidated", b.ParentID)
-		case "batch_complete":
+		case batch.ErrCodeComplete:
 			return fmt.Errorf("parent batch %s has already completed", b.ParentID)
 		default:
 			return fmt.Errorf("parent batch error: %s", addResult.Error)

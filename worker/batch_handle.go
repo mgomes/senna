@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/batch"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -93,11 +94,11 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 
 	if addResult.Error != "" {
 		switch addResult.Error {
-		case "batch_not_found":
+		case batch.ErrCodeNotFound:
 			return &senna.BatchNotFoundError{BatchID: bh.bid}
-		case "batch_invalidated":
+		case batch.ErrCodeInvalidated:
 			return fmt.Errorf("batch %s has been invalidated", bh.bid)
-		case "batch_complete":
+		case batch.ErrCodeComplete:
 			return fmt.Errorf("batch %s has already completed", bh.bid)
 		default:
 			return fmt.Errorf("batch error: %s", addResult.Error)
@@ -130,7 +131,7 @@ func (bh *BatchHandle) Invalidate(ctx context.Context) error {
 	}
 
 	if invalidateResult.Error != "" {
-		if invalidateResult.Error == "batch_not_found" {
+		if invalidateResult.Error == batch.ErrCodeNotFound {
 			return &senna.BatchNotFoundError{BatchID: bh.bid}
 		}
 		return fmt.Errorf("batch error: %s", invalidateResult.Error)

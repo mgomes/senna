@@ -68,7 +68,7 @@ func (l *LeakyLimiter) WithinLimit(ctx context.Context, fn func() error) error {
 	if waitTime > 0 {
 		return &OverLimitError{
 			LimiterName: l.name,
-			LimiterType: "leaky",
+			LimiterType: TypeLeaky,
 			Limit:       l.capacity,
 			RetryIn:     waitTime,
 		}
@@ -117,7 +117,7 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error
 		if time.Now().Add(retryIn).After(deadline) {
 			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
-				LimiterType: "leaky",
+				LimiterType: TypeLeaky,
 				Limit:       l.capacity,
 				Current:     int(vals[1]),
 				RetryIn:     retryIn,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/batch"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -721,7 +722,7 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 	redisClient.Set(context.Background(), w.keys.Batch(job.BatchID), string(data), 0)
 	redisClient.SAdd(context.Background(), w.keys.BatchJobs(job.BatchID), job.ID)
 
-	w.updateBatchProgress(context.Background(), job, batchResultFailure)
+	w.updateBatchProgress(context.Background(), job, batch.ResultFailure)
 
 	stateJSON, _ := redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
 	var updated senna.BatchState
@@ -730,14 +731,14 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 		t.Fatalf("expected failures=1 pending=1 after first failure, got failures=%d pending=%d", updated.Failures, updated.Pending)
 	}
 
-	w.updateBatchProgress(context.Background(), job, batchResultFailure)
+	w.updateBatchProgress(context.Background(), job, batch.ResultFailure)
 	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
 	_ = json.Unmarshal([]byte(stateJSON), &updated)
 	if updated.Failures != 1 || updated.Pending != 1 {
 		t.Fatalf("expected failures to remain 1, got failures=%d pending=%d", updated.Failures, updated.Pending)
 	}
 
-	w.updateBatchProgress(context.Background(), job, batchResultSuccess)
+	w.updateBatchProgress(context.Background(), job, batch.ResultSuccess)
 	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
 	_ = json.Unmarshal([]byte(stateJSON), &updated)
 	if updated.Failures != 1 || updated.Pending != 0 || updated.Successes != 1 {

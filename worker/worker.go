@@ -292,12 +292,12 @@ func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
 	if err := w.fetcher.Ack(ctx, w.id, job); err != nil {
 		slog.ErrorContext(ctx, "failed to ack job", "job_id", job.ID, "error", err)
 	}
-	w.updateBatchProgress(ctx, job, batchResultSuccess)
+	w.updateBatchProgress(ctx, job, batch.ResultSuccess)
 	w.handleBatchCallbackComplete(ctx, job)
 }
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
-	w.updateBatchProgress(ctx, job, batchResultFailure)
+	w.updateBatchProgress(ctx, job, batch.ResultFailure)
 	if err := w.fetcher.Nack(ctx, w.id, job, retryIn); err != nil {
 		slog.ErrorContext(ctx, "failed to nack job for retry", "job_id", job.ID, "retry_in", retryIn, "error", err)
 	}
@@ -308,7 +308,7 @@ func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
 	if moveErr := w.fetcher.MoveToDead(ctx, w.id, job); moveErr != nil {
 		slog.ErrorContext(ctx, "failed to move job to dead queue", "job_id", job.ID, "error", moveErr)
 	}
-	w.updateBatchProgress(ctx, job, batchResultDeath)
+	w.updateBatchProgress(ctx, job, batch.ResultDeath)
 	w.handleBatchCallbackComplete(ctx, job)
 }
 
@@ -402,34 +402,13 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 	})
 }
 
-// batchResult represents the result of a job completion.
-type batchResult string
-
-const (
-	batchResultSuccess     batchResult = "success"
-	batchResultFailure     batchResult = "failure"
-	batchResultDeath       batchResult = "death"
-	batchResultInvalidated batchResult = "invalidated"
-)
-
-func batchResultFromString(resultType string) batchResult {
-	switch resultType {
-	case string(batchResultDeath):
-		return batchResultDeath
-	case string(batchResultInvalidated):
-		return batchResultInvalidated
-	default:
-		return batchResultSuccess
-	}
-}
-
-func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batchResult) {
+func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result batch.Result) {
 	if job.BatchID == "" {
 		return
 	}
 
 	scriptKeys := batch.CompletionKeys(w.keys, job.BatchID)
-	scriptArgs := batch.CompletionArgs(w.keys, job.ID, string(result))
+	scriptArgs := batch.CompletionArgs(w.keys, job.ID, result)
 
 	var callbackResult batch.CompleteResult
 	if err := batchCompleteScript.RunJSON(ctx, w.redis, &callbackResult, scriptKeys, scriptArgs...); err != nil {
@@ -447,7 +426,7 @@ func (w *Worker) updateBatchProgress(ctx context.Context, job *senna.Job, result
 			ID:      job.BatchID,
 			BatchID: callbackResult.ParentID,
 		}
-		w.updateBatchProgress(ctx, parentJob, batchResultFromString(parentResultType))
+		w.updateBatchProgress(ctx, parentJob, parentResultType)
 	}
 }
 
@@ -492,11 +471,11 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 
 	// If all jobs AND all callbacks are done, propagate to parent
 	if result.ShouldPropagate && result.ParentID != "" {
-		parentResult := batchResultSuccess
+		parentResult := batch.ResultSuccess
 		if result.Dead {
-			parentResult = batchResultDeath
+			parentResult = batch.ResultDeath
 		} else if result.Invalidated {
-			parentResult = batchResultInvalidated
+			parentResult = batch.ResultInvalidated
 		}
 		parentJob := &senna.Job{
 			ID:      job.CallbackBatchID,

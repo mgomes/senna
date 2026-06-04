@@ -33,10 +33,26 @@ type Result struct {
 	RetryIn   time.Duration
 }
 
+// LimiterType identifies which limiter algorithm produced a result.
+type LimiterType string
+
+const (
+	// TypeBucket is the fixed-window bucket limiter.
+	TypeBucket LimiterType = "bucket"
+	// TypeWindow is the sliding-window limiter.
+	TypeWindow LimiterType = "window"
+	// TypeLeaky is the leaky-bucket limiter.
+	TypeLeaky LimiterType = "leaky"
+	// TypePoints is the points (variable-cost token bucket) limiter.
+	TypePoints LimiterType = "points"
+	// TypeConcurrent is the concurrency limiter.
+	TypeConcurrent LimiterType = "concurrent"
+)
+
 // OverLimitError reports that a limiter denied work.
 type OverLimitError struct {
 	LimiterName string
-	LimiterType string
+	LimiterType LimiterType
 	Limit       int
 	Current     int
 	RetryIn     time.Duration

@@ -75,7 +75,7 @@ func (l *PointsLimiter) WithinLimitCost(ctx context.Context, cost int, fn func()
 	if waitTime > 0 {
 		return &OverLimitError{
 			LimiterName: l.name,
-			LimiterType: "points",
+			LimiterType: TypePoints,
 			Limit:       l.capacity,
 			RetryIn:     waitTime,
 		}
@@ -108,7 +108,7 @@ func (l *PointsLimiter) WithinLimitEstimate(ctx context.Context, estimate int, f
 	if waitTime > 0 {
 		return &OverLimitError{
 			LimiterName: l.name,
-			LimiterType: "points",
+			LimiterType: TypePoints,
 			Limit:       l.capacity,
 			RetryIn:     waitTime,
 		}
@@ -168,7 +168,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, tim
 		if time.Now().Add(retryIn).After(deadline) {
 			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
-				LimiterType: "points",
+				LimiterType: TypePoints,
 				Limit:       l.capacity,
 				Current:     int(vals[1]),
 				RetryIn:     retryIn,
