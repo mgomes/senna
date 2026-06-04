@@ -70,7 +70,7 @@ func (s *Script) Run(ctx context.Context, client redis.Scripter, keys []string, 
 func (s *Script) RunJSON(ctx context.Context, client redis.Scripter, target any, keys []string, args ...any) error {
 	result, err := s.Run(ctx, client, keys, args...)
 	if err != nil {
-		return err
+		return fmt.Errorf("script %s: %w", s.Name, err)
 	}
 
 	resultStr, ok := result.(string)
@@ -99,4 +99,40 @@ func (s *Script) Load(ctx context.Context, client redis.Scripter) error {
 
 func isNoScriptError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "NOSCRIPT")
+}
+
+// Int coerces a numeric Lua reply into an int64, accepting both int64 and
+// float64 since Redis replies vary by server version and value encoding.
+func Int(result any) (int64, error) {
+	switch n := result.(type) {
+	case int64:
+		return n, nil
+	case float64:
+		return int64(n), nil
+	default:
+		return 0, fmt.Errorf("expected numeric reply, got %T", result)
+	}
+}
+
+// Ints coerces an array Lua reply into a slice of int64 values, accepting both
+// int64 and float64 elements. It returns an error if result is not an array,
+// has fewer than n elements, or contains a non-numeric element. This guards the
+// limiters against panicking on an unexpected reply shape.
+func Ints(result any, n int) ([]int64, error) {
+	arr, ok := result.([]any)
+	if !ok {
+		return nil, fmt.Errorf("expected array reply, got %T", result)
+	}
+	if len(arr) < n {
+		return nil, fmt.Errorf("expected at least %d elements, got %d", n, len(arr))
+	}
+	out := make([]int64, len(arr))
+	for i, v := range arr {
+		val, err := Int(v)
+		if err != nil {
+			return nil, fmt.Errorf("element %d: %w", i, err)
+		}
+		out[i] = val
+	}
+	return out, nil
 }

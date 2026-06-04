@@ -74,7 +74,7 @@ func (bs *BatchStatus) batchFailedKey() string {
 func (bs *BatchStatus) Refresh(ctx context.Context) error {
 	data, err := bs.redis.Get(ctx, bs.batchKey()).Result()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return &BatchNotFoundError{BatchID: bs.bid}
 		}
 		return err

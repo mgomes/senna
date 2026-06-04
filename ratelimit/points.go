@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -149,16 +150,12 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, tim
 			return nil, 0, err
 		}
 
-		arr := result.([]any)
-		allowed := arr[0].(int64) == 1
-		var retryUs int64
-		switch v := arr[2].(type) {
-		case int64:
-			retryUs = v
-		case float64:
-			retryUs = int64(v)
+		vals, err := script.Ints(result, 3)
+		if err != nil {
+			return nil, 0, fmt.Errorf("points limiter %s: %w", l.name, err)
 		}
-		retryIn := time.Duration(retryUs) * time.Microsecond
+		allowed := vals[0] == 1
+		retryIn := time.Duration(vals[2]) * time.Microsecond
 
 		if allowed {
 			return noopLease{}, 0, nil
@@ -169,18 +166,11 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, tim
 		}
 
 		if time.Now().Add(retryIn).After(deadline) {
-			var points float64
-			switch v := arr[1].(type) {
-			case int64:
-				points = float64(v)
-			case float64:
-				points = v
-			}
 			return nil, retryIn, &OverLimitError{
 				LimiterName: l.name,
 				LimiterType: "points",
 				Limit:       l.capacity,
-				Current:     int(points),
+				Current:     int(vals[1]),
 				RetryIn:     retryIn,
 			}
 		}
@@ -223,7 +213,7 @@ func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
 	}
 
 	state, err := l.client.HMGet(ctx, l.keyPrefix+":"+l.name, "points", "last_refill").Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return float64(l.capacity), nil
 	}
 	if err != nil {

@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/rand"
 	"sort"
 	"sync"
@@ -145,7 +147,7 @@ func (f *fetcher) canProcessQueue(ctx context.Context, workerID string, q senna.
 
 	// Check who holds the lock (if anyone)
 	holder, err := f.client.Get(ctx, lockKey).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		// No one holds the lock - we can try to fetch
 		return true
 	}
@@ -225,7 +227,7 @@ func (f *fetcher) fetchFromQueue(ctx context.Context, workerID, queueName string
 	inFlightKey := f.keys.InFlight(workerID)
 
 	result, err := f.client.LMove(ctx, queueKey, inFlightKey, "RIGHT", "LEFT").Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -290,7 +292,7 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 		[]string{queueKey, inFlightKey, lockKey},
 		workerID, int(sequentialLockTTL.Seconds()),
 	)
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		// Script returned nil - queue empty or lock held by another worker
 		<-sema // Release local semaphore
 		return nil, nil
@@ -482,7 +484,7 @@ func (f *fetcher) blockingFetchFromQueue(ctx context.Context, workerID, queueNam
 	inFlightKey := f.keys.InFlight(workerID)
 
 	result, err := f.client.BLMove(ctx, queueKey, inFlightKey, "RIGHT", "LEFT", timeout).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
 	if err != nil {
@@ -511,8 +513,10 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) erro
 	if job.UniqueKey != "" {
 		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
-	_, err = ackJobScript.Run(ctx, f.client, keys, payload)
-	return err
+	if _, err = ackJobScript.Run(ctx, f.client, keys, payload); err != nil {
+		return fmt.Errorf("ack job %s: %w", job.ID, err)
+	}
+	return nil
 }
 
 func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, retryIn time.Duration) error {
@@ -528,15 +532,19 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, ret
 		if err != nil {
 			return err
 		}
-		_, err = retryJobScript.Run(ctx, f.client,
+		if _, err = retryJobScript.Run(ctx, f.client,
 			[]string{f.keys.InFlight(workerID), f.keys.Retry()},
 			payload, retryAt.Unix(), string(newData),
-		)
-		return err
+		); err != nil {
+			return fmt.Errorf("nack job %s for retry: %w", job.ID, err)
+		}
+		return nil
 	}
 
-	_, err = ackJobScript.Run(ctx, f.client, []string{f.keys.InFlight(workerID)}, payload)
-	return err
+	if _, err = ackJobScript.Run(ctx, f.client, []string{f.keys.InFlight(workerID)}, payload); err != nil {
+		return fmt.Errorf("nack job %s: %w", job.ID, err)
+	}
+	return nil
 }
 
 func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Job) error {
@@ -556,8 +564,10 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 	if job.UniqueKey != "" {
 		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
-	_, err = moveToDeadJobScript.Run(ctx, f.client, keys, payload, now.Unix(), string(newData))
-	return err
+	if _, err = moveToDeadJobScript.Run(ctx, f.client, keys, payload, now.Unix(), string(newData)); err != nil {
+		return fmt.Errorf("move job %s to dead queue: %w", job.ID, err)
+	}
+	return nil
 }
 
 func (f *fetcher) requeue(ctx context.Context, workerID string, job *senna.Job) error {
@@ -569,11 +579,13 @@ func (f *fetcher) requeue(ctx context.Context, workerID string, job *senna.Job) 
 	if err != nil {
 		return err
 	}
-	_, err = requeueJobScript.Run(ctx, f.client,
+	if _, err = requeueJobScript.Run(ctx, f.client,
 		[]string{f.keys.InFlight(workerID), f.keys.Queue(job.Queue)},
 		payload, string(data),
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("requeue job %s to queue %s: %w", job.ID, job.Queue, err)
+	}
+	return nil
 }
 
 func jobPayload(job *senna.Job) (string, error) {

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/mgomes/senna"
@@ -142,7 +143,7 @@ func (bh *BatchHandle) Invalidate(ctx context.Context) error {
 func (bh *BatchHandle) Valid(ctx context.Context) (bool, error) {
 	data, err := bh.redis.Get(ctx, bh.keys.Batch(bh.bid)).Result()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return false, nil
 		}
 		return false, err
