@@ -5,6 +5,7 @@ import (
 )
 
 func TestKeys_New_DefaultNamespace(t *testing.T) {
+	t.Parallel()
 	k := New("")
 
 	queue := k.Queue("test")
@@ -14,6 +15,7 @@ func TestKeys_New_DefaultNamespace(t *testing.T) {
 }
 
 func TestKeys_New_CustomNamespace(t *testing.T) {
+	t.Parallel()
 	k := New("myapp")
 
 	queue := k.Queue("test")
@@ -23,6 +25,7 @@ func TestKeys_New_CustomNamespace(t *testing.T) {
 }
 
 func TestKeys_Queue(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	tests := []struct {
@@ -43,6 +46,7 @@ func TestKeys_Queue(t *testing.T) {
 }
 
 func TestKeys_Scheduled(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Scheduled()
@@ -52,6 +56,7 @@ func TestKeys_Scheduled(t *testing.T) {
 }
 
 func TestKeys_Retry(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Retry()
@@ -61,6 +66,7 @@ func TestKeys_Retry(t *testing.T) {
 }
 
 func TestKeys_Dead(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Dead()
@@ -70,6 +76,7 @@ func TestKeys_Dead(t *testing.T) {
 }
 
 func TestKeys_InFlight(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.InFlight("worker-123")
@@ -79,6 +86,7 @@ func TestKeys_InFlight(t *testing.T) {
 }
 
 func TestKeys_Workers(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Workers()
@@ -88,6 +96,7 @@ func TestKeys_Workers(t *testing.T) {
 }
 
 func TestKeys_Worker(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Worker("worker-abc")
@@ -97,6 +106,7 @@ func TestKeys_Worker(t *testing.T) {
 }
 
 func TestKeys_Stats(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Stats()
@@ -106,6 +116,7 @@ func TestKeys_Stats(t *testing.T) {
 }
 
 func TestKeys_Queues(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Queues()
@@ -115,6 +126,7 @@ func TestKeys_Queues(t *testing.T) {
 }
 
 func TestKeys_Batch(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Batch("batch-123")
@@ -124,6 +136,7 @@ func TestKeys_Batch(t *testing.T) {
 }
 
 func TestKeys_BatchJobs(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.BatchJobs("batch-123")
@@ -133,6 +146,7 @@ func TestKeys_BatchJobs(t *testing.T) {
 }
 
 func TestKeys_Unique(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Unique("user:123:sync")
@@ -142,6 +156,7 @@ func TestKeys_Unique(t *testing.T) {
 }
 
 func TestKeys_Periodic(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Periodic()
@@ -151,6 +166,7 @@ func TestKeys_Periodic(t *testing.T) {
 }
 
 func TestKeys_PeriodicLock(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.PeriodicLock("daily_report")
@@ -160,6 +176,7 @@ func TestKeys_PeriodicLock(t *testing.T) {
 }
 
 func TestKeys_Leader(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.Leader()
@@ -169,6 +186,7 @@ func TestKeys_Leader(t *testing.T) {
 }
 
 func TestKeys_RateLimit(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimit("bucket", "api")
@@ -178,6 +196,7 @@ func TestKeys_RateLimit(t *testing.T) {
 }
 
 func TestKeys_RateLimitBucket(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitBucket("api", 1704067200)
@@ -187,6 +206,7 @@ func TestKeys_RateLimitBucket(t *testing.T) {
 }
 
 func TestKeys_RateLimitWindow(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitWindow("api")
@@ -196,6 +216,7 @@ func TestKeys_RateLimitWindow(t *testing.T) {
 }
 
 func TestKeys_RateLimitConcurrent(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitConcurrent("api")
@@ -205,6 +226,7 @@ func TestKeys_RateLimitConcurrent(t *testing.T) {
 }
 
 func TestKeys_RateLimitConcurrentSlots(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitConcurrentSlots("api")
@@ -214,6 +236,7 @@ func TestKeys_RateLimitConcurrentSlots(t *testing.T) {
 }
 
 func TestKeys_RateLimitConcurrentLocks(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitConcurrentLocks("api")
@@ -223,6 +246,7 @@ func TestKeys_RateLimitConcurrentLocks(t *testing.T) {
 }
 
 func TestKeys_RateLimitConcurrentInit(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitConcurrentInit("api")
@@ -232,6 +256,7 @@ func TestKeys_RateLimitConcurrentInit(t *testing.T) {
 }
 
 func TestKeys_RateLimitLeaky(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitLeaky("api")
@@ -241,6 +266,7 @@ func TestKeys_RateLimitLeaky(t *testing.T) {
 }
 
 func TestKeys_RateLimitPoints(t *testing.T) {
+	t.Parallel()
 	k := New("app")
 
 	result := k.RateLimitPoints("api")
@@ -250,6 +276,7 @@ func TestKeys_RateLimitPoints(t *testing.T) {
 }
 
 func TestKeys_SpecialCharacters(t *testing.T) {
+	t.Parallel()
 	k := New("my-app")
 
 	result := k.Queue("high-priority")

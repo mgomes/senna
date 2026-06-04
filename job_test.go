@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 func TestNewJob(t *testing.T) {
+	t.Parallel()
 	args := map[string]any{
 		"user_id": 123,
 		"email":   "test@example.com",
@@ -44,6 +48,7 @@ func TestNewJob(t *testing.T) {
 }
 
 func TestNewJob_UniqueIDs(t *testing.T) {
+	t.Parallel()
 	ids := make(map[string]bool)
 
 	for range 1000 {
@@ -56,6 +61,7 @@ func TestNewJob_UniqueIDs(t *testing.T) {
 }
 
 func TestJob_Marshal(t *testing.T) {
+	t.Parallel()
 	job := NewJob("process_data", map[string]any{
 		"data_id": 456,
 		"options": map[string]any{
@@ -95,6 +101,7 @@ func TestJob_Marshal(t *testing.T) {
 }
 
 func TestUnmarshalJob(t *testing.T) {
+	t.Parallel()
 	original := NewJob("test_job", map[string]any{
 		"key": "value",
 	})
@@ -113,27 +120,16 @@ func TestUnmarshalJob(t *testing.T) {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 
-	if parsed.ID != original.ID {
-		t.Errorf("expected ID '%s', got '%s'", original.ID, parsed.ID)
-	}
-	if parsed.Type != original.Type {
-		t.Errorf("expected Type '%s', got '%s'", original.Type, parsed.Type)
-	}
-	if parsed.Queue != original.Queue {
-		t.Errorf("expected Queue '%s', got '%s'", original.Queue, parsed.Queue)
-	}
-	if parsed.Retry != original.Retry {
-		t.Errorf("expected Retry %d, got %d", original.Retry, parsed.Retry)
-	}
-	if parsed.RetryCount != original.RetryCount {
-		t.Errorf("expected RetryCount %d, got %d", original.RetryCount, parsed.RetryCount)
-	}
-	if parsed.BatchID != original.BatchID {
-		t.Errorf("expected BatchID '%s', got '%s'", original.BatchID, parsed.BatchID)
+	if diff := cmp.Diff(original, parsed,
+		cmpopts.IgnoreUnexported(Job{}),
+		cmpopts.EquateApproxTime(time.Second),
+	); diff != "" {
+		t.Errorf("round-trip mismatch (-original +parsed):\n%s", diff)
 	}
 }
 
 func TestUnmarshalJob_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	_, err := UnmarshalJob([]byte("not valid json"))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
@@ -141,6 +137,7 @@ func TestUnmarshalJob_InvalidJSON(t *testing.T) {
 }
 
 func TestJob_MarshalWithTimestamps(t *testing.T) {
+	t.Parallel()
 	job := NewJob("test", nil)
 
 	now := time.Now()
@@ -170,6 +167,7 @@ func TestJob_MarshalWithTimestamps(t *testing.T) {
 }
 
 func TestJob_MarshalEncrypted(t *testing.T) {
+	t.Parallel()
 	job := NewJob("sensitive_job", map[string]any{
 		"_encrypted": "base64encodeddata",
 	})
@@ -194,6 +192,7 @@ func TestJob_MarshalEncrypted(t *testing.T) {
 }
 
 func TestJob_MarshalNilArgs(t *testing.T) {
+	t.Parallel()
 	job := NewJob("no_args_job", nil)
 
 	data, err := job.Marshal()
@@ -212,6 +211,7 @@ func TestJob_MarshalNilArgs(t *testing.T) {
 }
 
 func TestJob_MarshalComplexArgs(t *testing.T) {
+	t.Parallel()
 	job := NewJob("complex_job", map[string]any{
 		"string": "value",
 		"number": 42,

@@ -12,6 +12,7 @@ func generateTestKey() []byte {
 }
 
 func TestEncryptor_EncryptDecrypt(t *testing.T) {
+	t.Parallel()
 	key := generateTestKey()
 	enc, err := New(key)
 	if err != nil {
@@ -54,6 +55,7 @@ func TestEncryptor_EncryptDecrypt(t *testing.T) {
 }
 
 func TestEncryptor_DecryptNonEncrypted(t *testing.T) {
+	t.Parallel()
 	key := generateTestKey()
 	enc, err := New(key)
 	if err != nil {
@@ -75,6 +77,7 @@ func TestEncryptor_DecryptNonEncrypted(t *testing.T) {
 }
 
 func TestEncryptor_DifferentKeys(t *testing.T) {
+	t.Parallel()
 	key1 := generateTestKey()
 	key2 := generateTestKey()
 
@@ -95,6 +98,7 @@ func TestEncryptor_DifferentKeys(t *testing.T) {
 }
 
 func TestEncryptor_UniqueNonces(t *testing.T) {
+	t.Parallel()
 	key := generateTestKey()
 	enc, _ := New(key)
 
@@ -109,6 +113,7 @@ func TestEncryptor_UniqueNonces(t *testing.T) {
 }
 
 func TestEncryptor_EmptyArgs(t *testing.T) {
+	t.Parallel()
 	key := generateTestKey()
 	enc, _ := New(key)
 
@@ -130,6 +135,7 @@ func TestEncryptor_EmptyArgs(t *testing.T) {
 }
 
 func TestEncryptor_ComplexData(t *testing.T) {
+	t.Parallel()
 	key := generateTestKey()
 	enc, _ := New(key)
 
@@ -175,6 +181,7 @@ func TestEncryptor_ComplexData(t *testing.T) {
 }
 
 func TestEncryptor_InvalidKey(t *testing.T) {
+	t.Parallel()
 	shortKey := []byte("tooshort")
 	_, err := New(shortKey)
 	if err == nil {
@@ -183,6 +190,7 @@ func TestEncryptor_InvalidKey(t *testing.T) {
 }
 
 func TestEncryptor_TamperedData(t *testing.T) {
+	t.Parallel()
 	key := generateTestKey()
 	enc, _ := New(key)
 
