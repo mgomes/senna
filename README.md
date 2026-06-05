@@ -98,6 +98,7 @@ w.Run(ctx) // Blocks until shutdown signal
 
 For detailed documentation, see the [Wiki](../../wiki):
 
+- **[Architecture Decisions](docs/adr)** - Durable design commitments and tradeoffs
 - **[Getting Started](../../wiki/Getting-Started)** - Installation and setup
 - **[Enqueuing Jobs](../../wiki/Enqueuing-Jobs)** - Client API, scheduling, bulk enqueue
 - **[Workers](../../wiki/Workers)** - Configuration, handlers, graceful shutdown
