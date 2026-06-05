@@ -210,14 +210,21 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 		}
 	}
 
+	var enqueued *senna.Job
+	var err error
 	if !cfg.at.IsZero() {
-		return c.enqueueAt(ctx, cfg.at, job)
+		enqueued, err = c.enqueueAt(ctx, cfg.at, job)
+	} else if cfg.delay > 0 {
+		enqueued, err = c.enqueueAt(ctx, time.Now().Add(cfg.delay), job)
+	} else {
+		enqueued, err = c.enqueueNow(ctx, job)
 	}
-	if cfg.delay > 0 {
-		return c.enqueueAt(ctx, time.Now().Add(cfg.delay), job)
+	if err != nil {
+		c.releaseUniqueLock(ctx, cfg.uniqueKey, job.ID)
+		return nil, err
 	}
 
-	return c.enqueueNow(ctx, job)
+	return enqueued, nil
 }
 
 // EnqueueIn schedules a job to run after the provided delay.
@@ -390,6 +397,15 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 	}
 
 	return job, nil
+}
+
+func (c *Client) releaseUniqueLock(ctx context.Context, uniqueKey, jobID string) {
+	if uniqueKey == "" {
+		return
+	}
+	if _, err := releaseUniqueScript.Run(ctx, c.redis, []string{c.keys.Unique(uniqueKey)}, jobID); err != nil {
+		slog.WarnContext(ctx, "failed to release unique job lock", "unique_key", uniqueKey, "job_id", jobID, "error", err)
+	}
 }
 
 // EnqueueBatch stores batch state and enqueues the batch's jobs.

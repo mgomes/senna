@@ -242,6 +242,50 @@ func TestClient_UniqueJobDifferentKeys(t *testing.T) {
 	}
 }
 
+func TestClient_UniqueJobReleasesLockWhenEnqueueFails(t *testing.T) {
+	const namespace = "test-unique-cleanup"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	uniqueKey := "user:123:sync"
+	if err := redisClient.Set(ctx, namespace+":queue:default", "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("failed to poison default queue: %v", err)
+	}
+
+	_, err = client.Enqueue(ctx, "unique_job", nil, WithUniqueKey(uniqueKey, time.Hour))
+	if err == nil {
+		t.Fatal("expected enqueue to fail")
+	}
+
+	exists, err := redisClient.Exists(ctx, namespace+":unique:"+uniqueKey).Result()
+	if err != nil {
+		t.Fatalf("failed to check unique key: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("unique lock exists = %d, want 0", exists)
+	}
+
+	if err := redisClient.Del(ctx, namespace+":queue:default").Err(); err != nil {
+		t.Fatalf("failed to repair default queue: %v", err)
+	}
+
+	_, err = client.Enqueue(ctx, "unique_job", nil, WithUniqueKey(uniqueKey, time.Hour))
+	if err != nil {
+		t.Fatalf("enqueue after unique lock cleanup failed: %v", err)
+	}
+}
+
 func TestClient_Batch(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
