@@ -244,8 +244,8 @@ func TestClient_UniqueJobDifferentKeys(t *testing.T) {
 	}
 }
 
-func TestClient_UniqueJobReleasesLockWhenEnqueueFails(t *testing.T) {
-	const namespace = "test-unique-cleanup"
+func TestClient_UniqueJobDoesNotClaimLockWhenImmediateEnqueueFails(t *testing.T) {
+	const namespace = "test-unique-immediate-failure"
 
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, namespace+":*")
@@ -288,8 +288,8 @@ func TestClient_UniqueJobReleasesLockWhenEnqueueFails(t *testing.T) {
 	}
 }
 
-func TestClient_ReleaseUniqueLockUsesUncanceledCleanupContext(t *testing.T) {
-	const namespace = "test-unique-canceled-cleanup"
+func TestClient_UniqueJobDoesNotClaimLockWhenScheduledEnqueueFails(t *testing.T) {
+	const namespace = "test-unique-scheduled-failure"
 
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, namespace+":*")
@@ -305,15 +305,14 @@ func TestClient_ReleaseUniqueLockUsesUncanceledCleanupContext(t *testing.T) {
 
 	ctx := context.Background()
 	uniqueKey := "user:123:sync"
-	jobID := "job-123"
-	if err := redisClient.Set(ctx, namespace+":unique:"+uniqueKey, jobID, time.Hour).Err(); err != nil {
-		t.Fatalf("failed to create unique lock: %v", err)
+	if err := redisClient.Set(ctx, namespace+":scheduled", "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("failed to poison scheduled key: %v", err)
 	}
 
-	canceledCtx, cancel := context.WithCancel(ctx)
-	cancel()
-
-	client.releaseUniqueLock(canceledCtx, uniqueKey, jobID)
+	_, err = client.EnqueueAt(ctx, time.Now().Add(time.Hour), "unique_job", nil, WithUniqueKey(uniqueKey, time.Hour))
+	if err == nil {
+		t.Fatal("expected scheduled enqueue to fail")
+	}
 
 	exists, err := redisClient.Exists(ctx, namespace+":unique:"+uniqueKey).Result()
 	if err != nil {
@@ -321,6 +320,23 @@ func TestClient_ReleaseUniqueLockUsesUncanceledCleanupContext(t *testing.T) {
 	}
 	if exists != 0 {
 		t.Fatalf("unique lock exists = %d, want 0", exists)
+	}
+
+	if err := redisClient.Del(ctx, namespace+":scheduled").Err(); err != nil {
+		t.Fatalf("failed to repair scheduled key: %v", err)
+	}
+
+	_, err = client.EnqueueAt(ctx, time.Now().Add(time.Hour), "unique_job", nil, WithUniqueKey(uniqueKey, time.Hour))
+	if err != nil {
+		t.Fatalf("scheduled enqueue after failed unique claim failed: %v", err)
+	}
+
+	scheduledCount, err := redisClient.ZCard(ctx, namespace+":scheduled").Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled count: %v", err)
+	}
+	if scheduledCount != 1 {
+		t.Errorf("scheduled count = %d, want 1", scheduledCount)
 	}
 }
 

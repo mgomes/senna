@@ -13,6 +13,7 @@ import (
 	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/iteration"
 	"github.com/mgomes/senna/internal/keys"
+	"github.com/mgomes/senna/internal/script"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -26,8 +27,6 @@ var (
 	// ErrBatchSelfParent indicates a batch was configured as its own parent.
 	ErrBatchSelfParent = errors.New("batch cannot be its own parent")
 )
-
-const uniqueLockCleanupTimeout = 5 * time.Second
 
 // Client enqueues jobs and exposes batch and iteration helpers.
 type Client struct {
@@ -199,36 +198,23 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 		if cfg.uniqueTTL <= 0 {
 			return nil, ErrUniqueTTLRequired
 		}
-		status, err := c.redis.SetArgs(ctx, c.keys.Unique(cfg.uniqueKey), job.ID, redis.SetArgs{
-			Mode: "NX",
-			TTL:  cfg.uniqueTTL,
-		}).Result()
-		if errors.Is(err, redis.Nil) {
-			return nil, &senna.DuplicateJobError{UniqueKey: cfg.uniqueKey}
+		if !cfg.at.IsZero() {
+			return c.enqueueUniqueAt(ctx, cfg.at, job)
 		}
-		if err != nil {
-			return nil, err
+		if cfg.delay > 0 {
+			return c.enqueueUniqueAt(ctx, time.Now().Add(cfg.delay), job)
 		}
-		if status != "OK" {
-			return nil, fmt.Errorf("unexpected unique job lock status: %q", status)
-		}
+		return c.enqueueUniqueNow(ctx, job)
 	}
 
-	var enqueued *senna.Job
-	var err error
 	if !cfg.at.IsZero() {
-		enqueued, err = c.enqueueAt(ctx, cfg.at, job)
-	} else if cfg.delay > 0 {
-		enqueued, err = c.enqueueAt(ctx, time.Now().Add(cfg.delay), job)
-	} else {
-		enqueued, err = c.enqueueNow(ctx, job)
+		return c.enqueueAt(ctx, cfg.at, job)
 	}
-	if err != nil {
-		c.releaseUniqueLock(ctx, cfg.uniqueKey, job.ID)
-		return nil, err
+	if cfg.delay > 0 {
+		return c.enqueueAt(ctx, time.Now().Add(cfg.delay), job)
 	}
 
-	return enqueued, nil
+	return c.enqueueNow(ctx, job)
 }
 
 // EnqueueIn schedules a job to run after the provided delay.
@@ -402,17 +388,82 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 	return job, nil
 }
 
-func (c *Client) releaseUniqueLock(ctx context.Context, uniqueKey, jobID string) {
-	if uniqueKey == "" {
-		return
+func (c *Client) enqueueUniqueNow(ctx context.Context, job *senna.Job) (*senna.Job, error) {
+	data, err := job.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshal job %s: %w", job.ID, err)
 	}
 
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uniqueLockCleanupTimeout)
-	defer cancel()
-
-	if _, err := releaseUniqueScript.Run(cleanupCtx, c.redis, []string{c.keys.Unique(uniqueKey)}, jobID); err != nil {
-		slog.WarnContext(ctx, "failed to release unique job lock", "unique_key", uniqueKey, "job_id", jobID, "error", err)
+	result, err := enqueueUniqueNowScript.Run(
+		ctx,
+		c.redis,
+		[]string{
+			c.keys.Unique(job.UniqueKey),
+			c.keys.Queues(),
+			c.keys.Queue(job.Queue),
+		},
+		job.ID,
+		uniqueTTLMillis(job.UniqueTTL),
+		job.Queue,
+		string(data),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("enqueue unique job %s to queue %s: %w", job.ID, job.Queue, err)
 	}
+
+	enqueued, err := script.Int(result)
+	if err != nil {
+		return nil, fmt.Errorf("decode unique enqueue result: %w", err)
+	}
+	if enqueued == 0 {
+		return nil, &senna.DuplicateJobError{UniqueKey: job.UniqueKey}
+	}
+
+	return job, nil
+}
+
+func (c *Client) enqueueUniqueAt(ctx context.Context, t time.Time, job *senna.Job) (*senna.Job, error) {
+	data, err := job.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("marshal job %s: %w", job.ID, err)
+	}
+
+	result, err := enqueueUniqueAtScript.Run(
+		ctx,
+		c.redis,
+		[]string{
+			c.keys.Unique(job.UniqueKey),
+			c.keys.Scheduled(),
+		},
+		job.ID,
+		uniqueTTLMillis(job.UniqueTTL),
+		float64(t.Unix()),
+		string(data),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("schedule unique job %s: %w", job.ID, err)
+	}
+
+	enqueued, err := script.Int(result)
+	if err != nil {
+		return nil, fmt.Errorf("decode unique schedule result: %w", err)
+	}
+	if enqueued == 0 {
+		return nil, &senna.DuplicateJobError{UniqueKey: job.UniqueKey}
+	}
+
+	return job, nil
+}
+
+func uniqueTTLMillis(ttl time.Duration) int64 {
+	ms := ttl / time.Millisecond
+	if ttl%time.Millisecond != 0 {
+		ms++
+	}
+	if ms < 1 {
+		return 1
+	}
+	return int64(ms)
 }
 
 // EnqueueBatch stores batch state and enqueues the batch's jobs.
