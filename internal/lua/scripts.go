@@ -24,6 +24,12 @@ var batchAddJobsLua string
 //go:embed batch_invalidate.lua
 var batchInvalidateLua string
 
+//go:embed enqueue_unique_now.lua
+var enqueueUniqueNowLua string
+
+//go:embed enqueue_unique_at.lua
+var enqueueUniqueAtLua string
+
 //go:embed batch_enqueue_jobs.lua
 var batchEnqueueJobsLua string
 
@@ -37,6 +43,8 @@ var (
 	BatchCallbackCompleteScript = script.New("batch_callback_complete", batchCallbackCompleteLua)
 	BatchAddJobsScript          = script.New("batch_add_jobs", batchAddJobsLua)
 	BatchInvalidateScript       = script.New("batch_invalidate", batchInvalidateLua)
+	EnqueueUniqueNowScript      = script.New("enqueue_unique_now", enqueueUniqueNowLua)
+	EnqueueUniqueAtScript       = script.New("enqueue_unique_at", enqueueUniqueAtLua)
 	BatchEnqueueJobsScript      = script.New("batch_enqueue_jobs", batchEnqueueJobsLua)
 	PeriodicEnqueueScript       = script.New("periodic_enqueue", periodicEnqueueLua)
 )
