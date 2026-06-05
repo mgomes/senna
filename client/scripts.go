@@ -8,4 +8,5 @@ var (
 	batchCompleteScript    = lua.BatchCompleteScript
 	batchAddChildScript    = lua.BatchAddChildScript
 	batchRemoveChildScript = lua.BatchRemoveChildScript
+	batchEnqueueJobsScript = lua.BatchEnqueueJobsScript
 )

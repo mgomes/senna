@@ -636,20 +636,23 @@ func (c *Client) enqueueBatchJobs(ctx context.Context, b *Batch, jobs []marshale
 		return nil
 	}
 
-	pipe := c.redis.Pipeline()
+	keys := []string{c.keys.BatchJobs(b.ID)}
+	args := make([]any, 0, 2+len(jobs)*3)
+	args = append(args, len(jobs), int64(batch.BatchTTL/time.Second))
 	for _, mj := range jobs {
-		pipe.LPush(ctx, c.keys.Queue(mj.job.Queue), string(mj.data))
-		pipe.SAdd(ctx, c.keys.BatchJobs(b.ID), mj.job.ID)
+		args = append(args, mj.job.ID, c.keys.Queue(mj.job.Queue), string(mj.data))
 	}
-	pipe.Expire(ctx, c.keys.BatchJobs(b.ID), batch.BatchTTL)
 
-	if _, err := pipe.Exec(ctx); err != nil {
+	var enqueueResult struct {
+		Success bool `json:"success"`
+	}
+	if err := batchEnqueueJobsScript.RunJSON(ctx, c.redis, &enqueueResult, keys, args...); err != nil {
 		// Rollback: undo parent link and clean up batch state
 		if b.ParentID != "" {
 			c.rollbackParentLink(ctx, b.ParentID, b.ID)
 		}
 		c.cleanupOrphanedBatch(ctx, b.ID)
-		return err
+		return fmt.Errorf("enqueue batch %s jobs: %w", b.ID, err)
 	}
 	return nil
 }
