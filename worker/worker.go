@@ -288,33 +288,36 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	w.handleJobResult(ctx, job, err, opts, nil)
 }
 
+const jobFinalizationRetryInterval = 250 * time.Millisecond
+
 // completeJob records batch progress and then removes the job from the
 // in-flight list. The ordering is deliberate: the in-flight entry is the
 // recovery anchor, so it is removed only once the outcome is durably recorded.
-// If recording fails, the job is left in-flight for the reaper to recover; the
-// completion script is idempotent, so a re-run cannot double-count the batch.
 func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
-	if err := w.updateBatchProgress(ctx, job, batch.ResultSuccess); err != nil {
-		slog.ErrorContext(ctx, "leaving job in-flight after batch progress failure", "job_id", job.ID, "error", err)
-		return
-	}
-	if err := w.handleBatchCallbackComplete(ctx, job); err != nil {
-		slog.ErrorContext(ctx, "leaving job in-flight after batch callback completion failure", "job_id", job.ID, "error", err)
-		return
-	}
-	if err := w.fetcher.Ack(ctx, w.id, job); err != nil {
-		slog.ErrorContext(ctx, "failed to ack job", "job_id", job.ID, "error", err)
-	}
+	w.finalizeJob(ctx, job, "complete", func(ctx context.Context) error {
+		if err := w.updateBatchProgress(ctx, job, batch.ResultSuccess); err != nil {
+			return err
+		}
+		if err := w.handleBatchCallbackComplete(ctx, job); err != nil {
+			return err
+		}
+		if err := w.fetcher.Ack(ctx, w.id, job); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
-	if err := w.updateBatchProgress(ctx, job, batch.ResultFailure); err != nil {
-		slog.ErrorContext(ctx, "leaving job in-flight after batch progress failure", "job_id", job.ID, "error", err)
-		return
-	}
-	if err := w.fetcher.Nack(ctx, w.id, job, retryIn); err != nil {
-		slog.ErrorContext(ctx, "failed to nack job for retry", "job_id", job.ID, "retry_in", retryIn, "error", err)
-	}
+	w.finalizeJob(ctx, job, "retry", func(ctx context.Context) error {
+		if err := w.updateBatchProgress(ctx, job, batch.ResultFailure); err != nil {
+			return err
+		}
+		if err := w.fetcher.Nack(ctx, w.id, job, retryIn); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // killJob records batch progress and then moves the job to the dead set. As in
@@ -322,16 +325,47 @@ func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Dura
 // after the outcome is durably recorded.
 func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
 	job.Error = err.Error()
-	if uerr := w.updateBatchProgress(ctx, job, batch.ResultDeath); uerr != nil {
-		slog.ErrorContext(ctx, "leaving job in-flight after batch progress failure", "job_id", job.ID, "error", uerr)
-		return
-	}
-	if cerr := w.handleBatchCallbackComplete(ctx, job); cerr != nil {
-		slog.ErrorContext(ctx, "leaving job in-flight after batch callback completion failure", "job_id", job.ID, "error", cerr)
-		return
-	}
-	if moveErr := w.fetcher.MoveToDead(ctx, w.id, job); moveErr != nil {
-		slog.ErrorContext(ctx, "failed to move job to dead queue", "job_id", job.ID, "error", moveErr)
+	w.finalizeJob(ctx, job, "kill", func(ctx context.Context) error {
+		if err := w.updateBatchProgress(ctx, job, batch.ResultDeath); err != nil {
+			return err
+		}
+		if err := w.handleBatchCallbackComplete(ctx, job); err != nil {
+			return err
+		}
+		if err := w.fetcher.MoveToDead(ctx, w.id, job); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (w *Worker) finalizeJob(ctx context.Context, job *senna.Job, operation string, fn func(context.Context) error) {
+	for {
+		err := fn(ctx)
+		if err == nil {
+			return
+		}
+
+		slog.ErrorContext(ctx,
+			"job finalization failed; retrying while worker is active",
+			"job_id", job.ID,
+			"operation", operation,
+			"error", err,
+		)
+
+		timer := time.NewTimer(jobFinalizationRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			slog.ErrorContext(context.Background(),
+				"leaving job in-flight after finalization failure during shutdown",
+				"job_id", job.ID,
+				"operation", operation,
+				"error", err,
+			)
+			return
+		case <-timer.C:
+		}
 	}
 }
 
@@ -427,8 +461,8 @@ func (w *Worker) processIterableJob(ctx context.Context, job *senna.Job, handler
 
 // updateBatchProgress records the outcome of a batch member in its batch's
 // completion counters. It returns an error only when the counter update for
-// this job could not be recorded, signaling the caller to leave the job
-// in-flight so the reaper can recover it. Propagation to a parent batch is
+// this job could not be recorded, signaling the caller to keep the job
+// in-flight while retrying finalization. Propagation to a parent batch is
 // best-effort: a failure there is logged but does not gate the caller, because
 // re-running this job cannot re-drive propagation (the completion script is
 // idempotent and short-circuits on the second delivery).

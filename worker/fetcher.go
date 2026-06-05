@@ -526,9 +526,10 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, ret
 	}
 
 	if retryIn > 0 {
-		job.RetryCount++
+		nextJob := *job
+		nextJob.RetryCount++
 		retryAt := time.Now().Add(retryIn)
-		newData, err := job.Marshal()
+		newData, err := nextJob.Marshal()
 		if err != nil {
 			return err
 		}
@@ -538,6 +539,7 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, ret
 		); err != nil {
 			return fmt.Errorf("nack job %s for retry: %w", job.ID, err)
 		}
+		job.RetryCount = nextJob.RetryCount
 		return nil
 	}
 

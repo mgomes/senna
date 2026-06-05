@@ -315,6 +315,9 @@ func TestFetcher_Nack_KeepsInFlightWhenRetryWriteFails(t *testing.T) {
 	if inFlightLen != 1 {
 		t.Errorf("LLen(%q) = %d, want %d", k.InFlight("worker-1"), inFlightLen, 1)
 	}
+	if fetched.RetryCount != 0 {
+		t.Errorf("RetryCount = %d after failed retry write, want 0", fetched.RetryCount)
+	}
 }
 
 func TestFetcher_Nack_IncrementsRetryCount(t *testing.T) {

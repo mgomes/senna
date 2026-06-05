@@ -719,10 +719,16 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 	data, _ := json.Marshal(state)
-	redisClient.Set(context.Background(), w.keys.Batch(job.BatchID), string(data), 0)
-	redisClient.SAdd(context.Background(), w.keys.BatchJobs(job.BatchID), job.ID)
+	if err := redisClient.Set(context.Background(), w.keys.Batch(job.BatchID), string(data), 0).Err(); err != nil {
+		t.Fatalf("set batch state: %v", err)
+	}
+	if err := redisClient.SAdd(context.Background(), w.keys.BatchJobs(job.BatchID), job.ID).Err(); err != nil {
+		t.Fatalf("seed batch jobs set: %v", err)
+	}
 
-	w.updateBatchProgress(context.Background(), job, batch.ResultFailure)
+	if err := w.updateBatchProgress(context.Background(), job, batch.ResultFailure); err != nil {
+		t.Fatalf("update batch progress failure: %v", err)
+	}
 
 	stateJSON, _ := redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
 	var updated senna.BatchState
@@ -731,14 +737,18 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 		t.Fatalf("expected failures=1 pending=1 after first failure, got failures=%d pending=%d", updated.Failures, updated.Pending)
 	}
 
-	w.updateBatchProgress(context.Background(), job, batch.ResultFailure)
+	if err := w.updateBatchProgress(context.Background(), job, batch.ResultFailure); err != nil {
+		t.Fatalf("update batch progress failure: %v", err)
+	}
 	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
 	_ = json.Unmarshal([]byte(stateJSON), &updated)
 	if updated.Failures != 1 || updated.Pending != 1 {
 		t.Fatalf("expected failures to remain 1, got failures=%d pending=%d", updated.Failures, updated.Pending)
 	}
 
-	w.updateBatchProgress(context.Background(), job, batch.ResultSuccess)
+	if err := w.updateBatchProgress(context.Background(), job, batch.ResultSuccess); err != nil {
+		t.Fatalf("update batch progress success: %v", err)
+	}
 	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
 	_ = json.Unmarshal([]byte(stateJSON), &updated)
 	if updated.Failures != 1 || updated.Pending != 0 || updated.Successes != 1 {
@@ -1652,16 +1662,46 @@ func seedBatchJobInFlight(t *testing.T, w *Worker, redisClient *redis.Client, bi
 	return job
 }
 
-// TestWorker_CompleteJob_LeavesJobInFlightWhenBatchProgressFails verifies that a
+func repairBatchJobSet(t *testing.T, w *Worker, redisClient *redis.Client, bid, jobID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	if err := redisClient.Del(ctx, w.keys.BatchJobs(bid)).Err(); err != nil {
+		t.Fatalf("clear corrupt batch jobs set: %v", err)
+	}
+	if err := redisClient.SAdd(ctx, w.keys.BatchJobs(bid), jobID).Err(); err != nil {
+		t.Fatalf("repair batch jobs set: %v", err)
+	}
+}
+
+func assertFinalizationStillPending(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+
+	select {
+	case <-done:
+		t.Fatal("job finalization completed before batch progress could be recorded")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func waitForFinalization(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for job finalization")
+	}
+}
+
+// TestWorker_CompleteJob_RetriesUntilBatchProgressRecorded verifies that a
 // successful batch job is not removed from the in-flight list until its batch
-// progress has been durably recorded. Otherwise a crash or Redis error between
-// the ack and the batch update would strand the batch (the job is gone, but its
-// pending count is never decremented, so the batch never completes).
-func TestWorker_CompleteJob_LeavesJobInFlightWhenBatchProgressFails(t *testing.T) {
+// progress has been durably recorded. An active worker must retry finalization
+// itself; the stale-worker reaper intentionally skips active worker IDs.
+func TestWorker_CompleteJob_RetriesUntilBatchProgressRecorded(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-batch-complete-ack:*")
 
-	ctx := context.Background()
 	w, err := New(&Config{
 		Redis:     getTestRedisConfig(),
 		Namespace: "test-batch-complete-ack",
@@ -1675,28 +1715,118 @@ func TestWorker_CompleteJob_LeavesJobInFlightWhenBatchProgressFails(t *testing.T
 	}
 	defer func() { _ = w.redis.Close() }()
 
-	job := seedBatchJobInFlight(t, w, redisClient, "batch-complete")
+	bid := "batch-complete"
+	job := seedBatchJobInFlight(t, w, redisClient, bid)
 
-	w.completeJob(ctx, job)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		w.completeJob(ctx, job)
+		close(done)
+	}()
 
-	inFlight, err := redisClient.LLen(ctx, w.keys.InFlight(w.id)).Result()
+	assertFinalizationStillPending(t, done)
+	repairBatchJobSet(t, w, redisClient, bid, job.ID)
+	waitForFinalization(t, done)
+
+	status := senna.NewBatchStatus(redisClient, w.keys.Namespace(), bid)
+	if err := status.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh batch status: %v", err)
+	}
+	if status.Pending() != 0 {
+		t.Errorf("expected batch pending 0 after finalization retry, got %d", status.Pending())
+	}
+	if status.Successes() != 1 {
+		t.Errorf("expected batch successes 1 after finalization retry, got %d", status.Successes())
+	}
+
+	inFlight, err := redisClient.LLen(context.Background(), w.keys.InFlight(w.id)).Result()
 	if err != nil {
 		t.Fatalf("llen in-flight: %v", err)
 	}
-	if inFlight != 1 {
-		t.Errorf("expected job to remain in-flight when batch progress fails, got %d in-flight", inFlight)
+	if inFlight != 0 {
+		t.Errorf("expected job acked after batch progress retry, got %d in-flight", inFlight)
 	}
 }
 
-// TestWorker_KillJob_LeavesJobInFlightWhenBatchProgressFails verifies that a
-// dying job is not moved to the dead set until its batch death has been durably
-// recorded. Otherwise a crash or Redis error between the move-to-dead and the
-// batch update would strand the batch.
-func TestWorker_KillJob_LeavesJobInFlightWhenBatchProgressFails(t *testing.T) {
+// TestWorker_RetryJob_RetriesUntilBatchFailureRecorded verifies that retry
+// scheduling also waits for batch failure bookkeeping before removing the job
+// from in-flight.
+func TestWorker_RetryJob_RetriesUntilBatchFailureRecorded(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-retry-ack:*")
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-retry-ack",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	bid := "batch-retry"
+	job := seedBatchJobInFlight(t, w, redisClient, bid)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		w.retryJob(ctx, job, 5*time.Second)
+		close(done)
+	}()
+
+	assertFinalizationStillPending(t, done)
+	repairBatchJobSet(t, w, redisClient, bid, job.ID)
+	waitForFinalization(t, done)
+
+	status := senna.NewBatchStatus(redisClient, w.keys.Namespace(), bid)
+	if err := status.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh batch status: %v", err)
+	}
+	if status.Pending() != 1 {
+		t.Errorf("expected batch pending 1 after retry finalization, got %d", status.Pending())
+	}
+	if status.Failures() != 1 {
+		t.Errorf("expected batch failures 1 after retry finalization, got %d", status.Failures())
+	}
+
+	inFlight, err := redisClient.LLen(context.Background(), w.keys.InFlight(w.id)).Result()
+	if err != nil {
+		t.Fatalf("llen in-flight: %v", err)
+	}
+	if inFlight != 0 {
+		t.Errorf("expected retry job removed from in-flight after finalization, got %d", inFlight)
+	}
+
+	retryItems, err := redisClient.ZRange(context.Background(), w.keys.Retry(), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("zrange retry: %v", err)
+	}
+	if len(retryItems) != 1 {
+		t.Fatalf("expected 1 scheduled retry, got %d", len(retryItems))
+	}
+	retryJob, err := senna.UnmarshalJob([]byte(retryItems[0]))
+	if err != nil {
+		t.Fatalf("unmarshal retry job: %v", err)
+	}
+	if retryJob.RetryCount != 1 {
+		t.Errorf("retry job RetryCount = %d, want 1", retryJob.RetryCount)
+	}
+}
+
+// TestWorker_KillJob_RetriesUntilBatchProgressRecorded verifies that a dying
+// job is not moved to the dead set until its batch death has been durably
+// recorded, and that an active worker retries the finalization internally.
+func TestWorker_KillJob_RetriesUntilBatchProgressRecorded(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-batch-kill-ack:*")
 
-	ctx := context.Background()
 	w, err := New(&Config{
 		Redis:     getTestRedisConfig(),
 		Namespace: "test-batch-kill-ack",
@@ -1710,24 +1840,49 @@ func TestWorker_KillJob_LeavesJobInFlightWhenBatchProgressFails(t *testing.T) {
 	}
 	defer func() { _ = w.redis.Close() }()
 
-	job := seedBatchJobInFlight(t, w, redisClient, "batch-kill")
+	bid := "batch-kill"
+	job := seedBatchJobInFlight(t, w, redisClient, bid)
 
-	w.killJob(ctx, job, errors.New("boom"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		w.killJob(ctx, job, errors.New("boom"))
+		close(done)
+	}()
 
-	inFlight, err := redisClient.LLen(ctx, w.keys.InFlight(w.id)).Result()
+	assertFinalizationStillPending(t, done)
+	repairBatchJobSet(t, w, redisClient, bid, job.ID)
+	waitForFinalization(t, done)
+
+	status := senna.NewBatchStatus(redisClient, w.keys.Namespace(), bid)
+	if err := status.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh batch status: %v", err)
+	}
+	if status.Pending() != 0 {
+		t.Errorf("expected batch pending 0 after death finalization retry, got %d", status.Pending())
+	}
+	if status.Failures() != 1 {
+		t.Errorf("expected batch failures 1 after death finalization retry, got %d", status.Failures())
+	}
+	if !status.Dead() {
+		t.Error("expected batch marked dead after death finalization retry")
+	}
+
+	inFlight, err := redisClient.LLen(context.Background(), w.keys.InFlight(w.id)).Result()
 	if err != nil {
 		t.Fatalf("llen in-flight: %v", err)
 	}
-	if inFlight != 1 {
-		t.Errorf("expected job to remain in-flight when batch progress fails, got %d in-flight", inFlight)
+	if inFlight != 0 {
+		t.Errorf("expected job removed from in-flight after death finalization retry, got %d", inFlight)
 	}
 
-	dead, err := redisClient.ZCard(ctx, w.keys.Dead()).Result()
+	dead, err := redisClient.ZCard(context.Background(), w.keys.Dead()).Result()
 	if err != nil {
 		t.Fatalf("zcard dead: %v", err)
 	}
-	if dead != 0 {
-		t.Errorf("expected job not to be moved to dead set when batch progress fails, got %d dead", dead)
+	if dead != 1 {
+		t.Errorf("expected job moved to dead set after batch progress retry, got %d dead", dead)
 	}
 }
 
