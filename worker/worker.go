@@ -278,6 +278,11 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	// Use a non-canceled context so shutdown doesn't strand the lock.
 	defer w.fetcher.ReleaseSequentialLock(context.WithoutCancel(ctx), w.id, job.Queue)
 
+	if job.Finalization() != nil {
+		w.resumeFinalizedJob(ctx, job)
+		return
+	}
+
 	// Check for iterable handler first
 	if iterHandler, iterOpts, ok := w.handlers.GetIterable(job.Type); ok {
 		w.processIterableJob(ctx, job, iterHandler, iterOpts)
@@ -288,13 +293,19 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	w.handleJobResult(ctx, job, err, opts, nil)
 }
 
-const jobFinalizationRetryInterval = 250 * time.Millisecond
+const (
+	jobFinalizationRetryInterval = 250 * time.Millisecond
+	jobFinalizationComplete      = "complete"
+	jobFinalizationRetry         = "retry"
+	jobFinalizationKill          = "kill"
+)
 
 // completeJob records batch progress and then removes the job from the
 // in-flight list. The ordering is deliberate: the in-flight entry is the
 // recovery anchor, so it is removed only once the outcome is durably recorded.
 func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
-	w.finalizeJob(ctx, job, "complete", func(ctx context.Context) error {
+	finalization := senna.JobFinalization{Operation: jobFinalizationComplete}
+	w.finalizeJob(ctx, job, finalization, func(ctx context.Context) error {
 		if err := w.updateBatchProgress(ctx, job, batch.ResultSuccess); err != nil {
 			return err
 		}
@@ -309,9 +320,30 @@ func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
 }
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
-	w.finalizeJob(ctx, job, "retry", func(ctx context.Context) error {
+	if retryIn > 0 {
+		w.retryJobAt(ctx, job, time.Now().Add(retryIn))
+		return
+	}
+	w.finalizeRetryJob(ctx, job, senna.JobFinalization{Operation: jobFinalizationRetry}, retryIn)
+}
+
+func (w *Worker) retryJobAt(ctx context.Context, job *senna.Job, retryAt time.Time) {
+	w.finalizeRetryJob(ctx, job, senna.JobFinalization{
+		Operation: jobFinalizationRetry,
+		RetryAt:   retryAt,
+	}, 0)
+}
+
+func (w *Worker) finalizeRetryJob(ctx context.Context, job *senna.Job, finalization senna.JobFinalization, retryIn time.Duration) {
+	w.finalizeJob(ctx, job, finalization, func(ctx context.Context) error {
 		if err := w.updateBatchProgress(ctx, job, batch.ResultFailure); err != nil {
 			return err
+		}
+		if !finalization.RetryAt.IsZero() {
+			if err := w.fetcher.NackAt(ctx, w.id, job, finalization.RetryAt); err != nil {
+				return err
+			}
+			return nil
 		}
 		if err := w.fetcher.Nack(ctx, w.id, job, retryIn); err != nil {
 			return err
@@ -325,7 +357,11 @@ func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Dura
 // after the outcome is durably recorded.
 func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
 	job.Error = err.Error()
-	w.finalizeJob(ctx, job, "kill", func(ctx context.Context) error {
+	finalization := senna.JobFinalization{
+		Operation: jobFinalizationKill,
+		Error:     job.Error,
+	}
+	w.finalizeJob(ctx, job, finalization, func(ctx context.Context) error {
 		if err := w.updateBatchProgress(ctx, job, batch.ResultDeath); err != nil {
 			return err
 		}
@@ -339,33 +375,81 @@ func (w *Worker) killJob(ctx context.Context, job *senna.Job, err error) {
 	})
 }
 
-func (w *Worker) finalizeJob(ctx context.Context, job *senna.Job, operation string, fn func(context.Context) error) {
+func (w *Worker) resumeFinalizedJob(ctx context.Context, job *senna.Job) {
+	finalization := job.Finalization()
+	if finalization == nil {
+		return
+	}
+
+	switch finalization.Operation {
+	case jobFinalizationComplete:
+		w.completeJob(ctx, job)
+	case jobFinalizationRetry:
+		if !finalization.RetryAt.IsZero() {
+			w.retryJobAt(ctx, job, finalization.RetryAt)
+			return
+		}
+		w.retryJob(ctx, job, 0)
+	case jobFinalizationKill:
+		w.killJob(ctx, job, errors.New(finalization.Error))
+	default:
+		slog.ErrorContext(ctx,
+			"unknown job finalization operation",
+			"job_id", job.ID,
+			"operation", finalization.Operation,
+		)
+		job.ClearFinalization()
+		w.killJob(ctx, job, fmt.Errorf("unknown job finalization operation %q", finalization.Operation))
+	}
+}
+
+func (w *Worker) finalizeJob(ctx context.Context, job *senna.Job, finalization senna.JobFinalization, fn func(context.Context) error) {
 	for {
+		if job.Finalization() == nil {
+			if err := w.fetcher.MarkFinalization(ctx, w.id, job, finalization); err != nil {
+				w.logFinalizationRetry(ctx, job, finalization.Operation, err)
+				if w.waitToRetryFinalization(ctx, job, finalization.Operation, err) {
+					continue
+				}
+				return
+			}
+		}
+
 		err := fn(ctx)
 		if err == nil {
 			return
 		}
 
-		slog.ErrorContext(ctx,
-			"job finalization failed; retrying while worker is active",
+		w.logFinalizationRetry(ctx, job, finalization.Operation, err)
+		if !w.waitToRetryFinalization(ctx, job, finalization.Operation, err) {
+			return
+		}
+	}
+}
+
+func (w *Worker) logFinalizationRetry(ctx context.Context, job *senna.Job, operation string, err error) {
+	slog.ErrorContext(ctx,
+		"job finalization failed; retrying while worker is active",
+		"job_id", job.ID,
+		"operation", operation,
+		"error", err,
+	)
+}
+
+func (w *Worker) waitToRetryFinalization(ctx context.Context, job *senna.Job, operation string, err error) bool {
+	timer := time.NewTimer(jobFinalizationRetryInterval)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		slog.ErrorContext(context.Background(),
+			"leaving job in-flight after finalization failure during shutdown",
 			"job_id", job.ID,
 			"operation", operation,
 			"error", err,
 		)
-
-		timer := time.NewTimer(jobFinalizationRetryInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			slog.ErrorContext(context.Background(),
-				"leaving job in-flight after finalization failure during shutdown",
-				"job_id", job.ID,
-				"operation", operation,
-				"error", err,
-			)
-			return
-		case <-timer.C:
-		}
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
