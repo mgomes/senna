@@ -52,6 +52,15 @@ func New(cfg *Config) (*Worker, error) {
 		cfg.Settings = senna.DefaultWorkerSettings()
 	}
 
+	var enc *encryption.Encryptor
+	if cfg.Encryption != nil && cfg.Encryption.Enabled {
+		var err error
+		enc, err = encryption.New(cfg.Encryption.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init encryptor: %w", err)
+		}
+	}
+
 	client := redis.NewClient(cfg.Redis.Options())
 
 	if err := client.Ping(context.Background()).Err(); err != nil {
@@ -71,11 +80,7 @@ func New(cfg *Config) (*Worker, error) {
 		stopCh:   make(chan struct{}),
 	}
 
-	if cfg.Encryption != nil && cfg.Encryption.Enabled {
-		enc, err := encryption.New(cfg.Encryption.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to init encryptor: %w", err)
-		}
+	if enc != nil {
 		w.encryptor = enc
 
 		mw := encryptionMiddleware(enc)
