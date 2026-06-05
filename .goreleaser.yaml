@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: senna
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: senna
+    skip: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: mgomes
+    name: senna
+  name_template: "Senna {{ .Tag }}"
