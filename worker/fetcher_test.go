@@ -376,6 +376,56 @@ func TestFetcher_MarkFinalizationIgnoresBadQueueTypeForInFlightHit(t *testing.T)
 	}
 }
 
+func TestFetcher_MarkFinalizationRecognizesExistingFinalizedPayload(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-mark-finalization-existing:*")
+
+	k := keys.New("test-mark-finalization-existing")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	job := senna.NewJob("test_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+
+	finalization := senna.JobFinalization{Operation: jobFinalizationComplete}
+	finalizedData, err := payloadWithFinalization(string(data), finalization)
+	if err != nil {
+		t.Fatalf("payloadWithFinalization() error = %v, want nil", err)
+	}
+	if err := client.LPush(ctx, k.InFlight("worker-1"), string(finalizedData)).Err(); err != nil {
+		t.Fatalf("seed finalized in-flight: %v", err)
+	}
+
+	err = f.MarkFinalization(ctx, "worker-1", job, finalization)
+	if err != nil {
+		t.Fatalf("MarkFinalization() error = %v, want nil", err)
+	}
+	if job.Finalization() == nil {
+		t.Fatal("job finalization = nil, want complete marker")
+	}
+	if job.Raw() != string(finalizedData) {
+		t.Fatal("job raw payload was not advanced to existing finalized payload")
+	}
+
+	err = f.Ack(ctx, "worker-1", job)
+	if err != nil {
+		t.Fatalf("Ack() error = %v, want nil", err)
+	}
+	inFlightLen, err := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if err != nil {
+		t.Fatalf("LLen() error = %v, want nil", err)
+	}
+	if inFlightLen != 0 {
+		t.Errorf("in-flight length after Ack() = %d, want 0", inFlightLen)
+	}
+}
+
 func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-nack:*")
