@@ -141,16 +141,55 @@ func TestRecoveryMiddleware_NoPanic(t *testing.T) {
 
 func TestTimeoutMiddleware(t *testing.T) {
 	t.Parallel()
-	middleware := TimeoutMiddleware(100 * time.Millisecond)
+	middleware := TimeoutMiddleware(10 * time.Millisecond)
 
 	handler := middleware(func(ctx context.Context, job *Job) error {
-		time.Sleep(500 * time.Millisecond)
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	})
 
 	err := handler(context.Background(), NewJob("test", nil))
-	if err != context.DeadlineExceeded {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestTimeoutMiddleware_WaitsForHandlerReturn(t *testing.T) {
+	t.Parallel()
+	middleware := TimeoutMiddleware(10 * time.Millisecond)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var released atomic.Bool
+
+	releaseHandler := func() {
+		if released.CompareAndSwap(false, true) {
+			close(release)
+		}
+	}
+	t.Cleanup(releaseHandler)
+
+	handler := middleware(func(ctx context.Context, job *Job) error {
+		close(started)
+		<-ctx.Done()
+		<-release
+		return nil
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler(context.Background(), NewJob("test", nil))
+	}()
+
+	<-started
+	select {
+	case err := <-done:
+		t.Fatalf("handler returned before wrapped function completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseHandler()
+	if err := <-done; err != nil {
+		t.Fatalf("handler returned error = %v, want nil", err)
 	}
 }
 
