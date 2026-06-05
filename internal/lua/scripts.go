@@ -30,6 +30,9 @@ var enqueueUniqueNowLua string
 //go:embed enqueue_unique_at.lua
 var enqueueUniqueAtLua string
 
+//go:embed periodic_enqueue.lua
+var periodicEnqueueLua string
+
 var (
 	BatchCompleteScript         = script.New("batch_complete", batchCompleteLua)
 	BatchAddChildScript         = script.New("batch_add_child", batchAddChildLua)
@@ -39,4 +42,5 @@ var (
 	BatchInvalidateScript       = script.New("batch_invalidate", batchInvalidateLua)
 	EnqueueUniqueNowScript      = script.New("enqueue_unique_now", enqueueUniqueNowLua)
 	EnqueueUniqueAtScript       = script.New("enqueue_unique_at", enqueueUniqueAtLua)
+	PeriodicEnqueueScript       = script.New("periodic_enqueue", periodicEnqueueLua)
 )

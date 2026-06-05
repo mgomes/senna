@@ -10,9 +10,13 @@ import (
 
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
+	"github.com/mgomes/senna/internal/lua"
+	"github.com/mgomes/senna/internal/script"
 	"github.com/redis/go-redis/v9"
 	"github.com/robfig/cron/v3"
 )
+
+const periodicSlotTTL = time.Hour
 
 // Job represents a periodic job that runs on a schedule.
 type Job struct {
@@ -185,8 +189,20 @@ func (s *Scheduler) checkAndEnqueue(ctx context.Context) {
 
 	for _, job := range jobs {
 		if s.shouldEnqueue(now, job) {
-			if s.claimSlot(ctx, job, now) {
-				s.enqueueJob(ctx, job)
+			enqueued, err := s.claimAndEnqueue(ctx, job, now)
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to enqueue periodic job",
+					"job", job.Name,
+					"error", err,
+				)
+				continue
+			}
+			if enqueued {
+				s.recordHistory(ctx, job)
+				slog.InfoContext(ctx, "enqueued periodic job",
+					"job", job.Name,
+					"queue", job.Queue,
+				)
 			}
 		}
 	}
@@ -205,12 +221,9 @@ func (s *Scheduler) shouldEnqueue(now time.Time, job *Job) bool {
 // claimSlot uses atomic Redis operations to claim the right to enqueue a job.
 // Returns true if this worker claimed the slot, false if another worker did.
 func (s *Scheduler) claimSlot(ctx context.Context, job *Job, now time.Time) bool {
-	// Key format: periodic:{job_name}:{minute_timestamp}
-	// TTL of 1 hour ensures cleanup even if job runs late
-	minuteTS := now.Truncate(time.Minute).Unix()
-	key := fmt.Sprintf("%s:%d", s.keys.PeriodicLock(job.Name), minuteTS)
+	key := s.periodicSlotKey(job, now)
 
-	ok, err := s.redis.SetNX(ctx, key, "1", time.Hour).Result()
+	ok, err := s.redis.SetNX(ctx, key, "1", periodicSlotTTL).Result()
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to claim periodic slot",
 			"job", job.Name,
@@ -222,44 +235,75 @@ func (s *Scheduler) claimSlot(ctx context.Context, job *Job, now time.Time) bool
 	return ok
 }
 
-func (s *Scheduler) enqueueJob(ctx context.Context, job *Job) {
-	j := senna.NewJob(job.JobType, job.Args)
-	j.Queue = job.Queue
-	j.Retry = job.Retry
-
-	data, err := j.Marshal()
+func (s *Scheduler) claimAndEnqueue(ctx context.Context, job *Job, now time.Time) (bool, error) {
+	data, err := marshalJob(job)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to marshal periodic job",
-			"job", job.Name,
-			"error", err,
-		)
-		return
+		return false, fmt.Errorf("marshal periodic job %s: %w", job.Name, err)
 	}
 
-	// Add queue to known queues set
+	keys := []string{
+		s.periodicSlotKey(job, now),
+		s.keys.Queues(),
+		s.keys.Queue(job.Queue),
+	}
+
+	result, err := lua.PeriodicEnqueueScript.Run(
+		ctx,
+		s.redis,
+		keys,
+		"1",
+		int64(periodicSlotTTL/time.Second),
+		job.Queue,
+		string(data),
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim and enqueue periodic job %s: %w", job.Name, err)
+	}
+
+	enqueued, err := script.Int(result)
+	if err != nil {
+		return false, fmt.Errorf("decode periodic enqueue result: %w", err)
+	}
+
+	return enqueued == 1, nil
+}
+
+func (s *Scheduler) periodicSlotKey(job *Job, now time.Time) string {
+	// Key format: periodic:{job_name}:{minute_timestamp}.
+	minuteTS := now.Truncate(time.Minute).Unix()
+	return fmt.Sprintf("%s:%d", s.keys.PeriodicLock(job.Name), minuteTS)
+}
+
+func (s *Scheduler) enqueueJob(ctx context.Context, job *Job) error {
+	data, err := marshalJob(job)
+	if err != nil {
+		return fmt.Errorf("marshal periodic job %s: %w", job.Name, err)
+	}
+
 	if err := s.redis.SAdd(ctx, s.keys.Queues(), job.Queue).Err(); err != nil {
-		slog.ErrorContext(ctx, "failed to add queue to set",
-			"job", job.Name,
-			"queue", job.Queue,
-			"error", err,
-		)
+		return fmt.Errorf("add queue %q to set: %w", job.Queue, err)
 	}
 
 	if err := s.redis.LPush(ctx, s.keys.Queue(job.Queue), string(data)).Err(); err != nil {
-		slog.ErrorContext(ctx, "failed to enqueue periodic job",
-			"job", job.Name,
-			"error", err,
-		)
-		return
+		return fmt.Errorf("enqueue periodic job %s: %w", job.Name, err)
 	}
 
-	// Record history for observability
 	s.recordHistory(ctx, job)
 
 	slog.InfoContext(ctx, "enqueued periodic job",
 		"job", job.Name,
 		"queue", job.Queue,
 	)
+
+	return nil
+}
+
+func marshalJob(job *Job) ([]byte, error) {
+	j := senna.NewJob(job.JobType, job.Args)
+	j.Queue = job.Queue
+	j.Retry = job.Retry
+
+	return j.Marshal()
 }
 
 // HistoryEntry records when a periodic job was enqueued.

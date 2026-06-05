@@ -200,7 +200,9 @@ func TestScheduler_EnqueueJob(t *testing.T) {
 	job := s.Jobs()[0]
 
 	ctx := context.Background()
-	s.enqueueJob(ctx, job)
+	if err := s.enqueueJob(ctx, job); err != nil {
+		t.Fatalf("enqueueJob failed: %v", err)
+	}
 
 	// Check job was enqueued
 	queueKey := k.Queue("critical")
@@ -235,8 +237,12 @@ func TestScheduler_History(t *testing.T) {
 	ctx := context.Background()
 
 	// Enqueue job (which records history)
-	s.enqueueJob(ctx, job)
-	s.enqueueJob(ctx, job)
+	if err := s.enqueueJob(ctx, job); err != nil {
+		t.Fatalf("first enqueueJob failed: %v", err)
+	}
+	if err := s.enqueueJob(ctx, job); err != nil {
+		t.Fatalf("second enqueueJob failed: %v", err)
+	}
 
 	history, err := s.History(ctx, "test_history_job")
 	if err != nil {
@@ -414,6 +420,63 @@ func TestScheduler_ConcurrentClaim(t *testing.T) {
 
 	if claimed.Load() != 1 {
 		t.Errorf("expected exactly 1 claim, got %d", claimed.Load())
+	}
+}
+
+func TestScheduler_ClaimAndEnqueue_DoesNotClaimSlotWhenQueueRejects(t *testing.T) {
+	client := newRedisClient(t)
+	ns := "test-periodic-" + uuid.NewString()[:8]
+	k := keys.New(ns)
+	t.Cleanup(func() { cleanupKeys(t, client, ns+":*") })
+
+	s := NewScheduler(client, k)
+	if err := s.Register("* * * * *", "retryable_periodic_job", WithQueue("blocked")); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	job := s.Jobs()[0]
+	ctx := context.Background()
+	now := time.Date(2026, 6, 4, 12, 30, 0, 0, time.UTC)
+
+	queueKey := k.Queue("blocked")
+	if err := client.Set(ctx, queueKey, "not a list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison queue key: %v", err)
+	}
+
+	enqueued, err := s.claimAndEnqueue(ctx, job, now)
+	if err == nil {
+		t.Fatal("expected claimAndEnqueue to fail")
+	}
+	if enqueued {
+		t.Error("claimAndEnqueue enqueued job = true, want false")
+	}
+
+	lockKey := s.periodicSlotKey(job, now)
+	lockExists, err := client.Exists(ctx, lockKey).Result()
+	if err != nil {
+		t.Fatalf("failed to check periodic lock: %v", err)
+	}
+	if lockExists != 0 {
+		t.Errorf("periodic lock exists = %d, want 0", lockExists)
+	}
+
+	if err := client.Del(ctx, queueKey).Err(); err != nil {
+		t.Fatalf("failed to repair queue key: %v", err)
+	}
+
+	enqueued, err = s.claimAndEnqueue(ctx, job, now)
+	if err != nil {
+		t.Fatalf("claimAndEnqueue after queue repair failed: %v", err)
+	}
+	if !enqueued {
+		t.Error("claimAndEnqueue after queue repair enqueued job = false, want true")
+	}
+
+	queueLength, err := client.LLen(ctx, queueKey).Result()
+	if err != nil {
+		t.Fatalf("failed to check queue length: %v", err)
+	}
+	if queueLength != 1 {
+		t.Errorf("queue length = %d, want 1", queueLength)
 	}
 }
 
