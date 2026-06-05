@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/aes"
+	"errors"
 	"testing"
 	"time"
 
@@ -348,6 +350,25 @@ func TestClient_EncryptedJob(t *testing.T) {
 	}
 	if job.Args["card_number"] != nil {
 		t.Error("original args should not be present")
+	}
+}
+
+func TestClient_New_InvalidEncryptionKeyBeforeRedis(t *testing.T) {
+	_, err := New(&Config{
+		Redis: senna.RedisConfig{
+			Addr:        "127.0.0.1:0",
+			DialTimeout: time.Millisecond,
+		},
+		Namespace: "test-invalid-encryption-before-redis",
+		Encryption: &senna.EncryptionSettings{
+			Enabled: true,
+			Key:     []byte("tooshort"),
+		},
+	})
+
+	var keySizeErr aes.KeySizeError
+	if !errors.As(err, &keySizeErr) {
+		t.Fatalf("New() error = %v, want aes.KeySizeError", err)
 	}
 }
 

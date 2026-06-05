@@ -68,6 +68,15 @@ func normalizeSettings(settings Settings) Settings {
 func New(cfg *Config) (*Client, error) {
 	cfg.Settings = normalizeSettings(cfg.Settings)
 
+	var enc *encryption.Encryptor
+	if cfg.Encryption != nil && cfg.Encryption.Enabled {
+		var err error
+		enc, err = encryption.New(cfg.Encryption.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init encryptor: %w", err)
+		}
+	}
+
 	client := redis.NewClient(cfg.Redis.Options())
 
 	if err := client.Ping(context.Background()).Err(); err != nil {
@@ -75,17 +84,10 @@ func New(cfg *Config) (*Client, error) {
 	}
 
 	c := &Client{
-		redis:    client,
-		keys:     keys.New(cfg.Namespace),
-		settings: cfg.Settings,
-	}
-
-	if cfg.Encryption != nil && cfg.Encryption.Enabled {
-		enc, err := encryption.New(cfg.Encryption.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to init encryptor: %w", err)
-		}
-		c.encryptor = enc
+		redis:     client,
+		keys:      keys.New(cfg.Namespace),
+		settings:  cfg.Settings,
+		encryptor: enc,
 	}
 
 	return c, nil
