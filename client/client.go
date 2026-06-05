@@ -27,6 +27,8 @@ var (
 	ErrBatchSelfParent = errors.New("batch cannot be its own parent")
 )
 
+const uniqueLockCleanupTimeout = 5 * time.Second
+
 // Client enqueues jobs and exposes batch and iteration helpers.
 type Client struct {
 	redis     *redis.Client
@@ -403,7 +405,11 @@ func (c *Client) releaseUniqueLock(ctx context.Context, uniqueKey, jobID string)
 	if uniqueKey == "" {
 		return
 	}
-	if _, err := releaseUniqueScript.Run(ctx, c.redis, []string{c.keys.Unique(uniqueKey)}, jobID); err != nil {
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uniqueLockCleanupTimeout)
+	defer cancel()
+
+	if _, err := releaseUniqueScript.Run(cleanupCtx, c.redis, []string{c.keys.Unique(uniqueKey)}, jobID); err != nil {
 		slog.WarnContext(ctx, "failed to release unique job lock", "unique_key", uniqueKey, "job_id", jobID, "error", err)
 	}
 }

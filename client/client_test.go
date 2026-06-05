@@ -286,6 +286,42 @@ func TestClient_UniqueJobReleasesLockWhenEnqueueFails(t *testing.T) {
 	}
 }
 
+func TestClient_ReleaseUniqueLockUsesUncanceledCleanupContext(t *testing.T) {
+	const namespace = "test-unique-canceled-cleanup"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	uniqueKey := "user:123:sync"
+	jobID := "job-123"
+	if err := redisClient.Set(ctx, namespace+":unique:"+uniqueKey, jobID, time.Hour).Err(); err != nil {
+		t.Fatalf("failed to create unique lock: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	client.releaseUniqueLock(canceledCtx, uniqueKey, jobID)
+
+	exists, err := redisClient.Exists(ctx, namespace+":unique:"+uniqueKey).Result()
+	if err != nil {
+		t.Fatalf("failed to check unique key: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("unique lock exists = %d, want 0", exists)
+	}
+}
+
 func TestClient_Batch(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
