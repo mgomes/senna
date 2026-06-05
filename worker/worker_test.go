@@ -2,12 +2,14 @@ package worker
 
 import (
 	"context"
+	"crypto/aes"
 	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/batch"
 	"github.com/redis/go-redis/v9"
@@ -59,6 +61,45 @@ func TestWorker_New_WithSettings(t *testing.T) {
 	}
 }
 
+func TestWorker_New_PartialSettings(t *testing.T) {
+	defaults := senna.DefaultWorkerSettings()
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-worker-partial-settings",
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			PeriodicEnabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	if w.config.Settings.Concurrency != 1 {
+		t.Errorf("expected Concurrency 1, got %d", w.config.Settings.Concurrency)
+	}
+	if diff := cmp.Diff(defaults.Queues, w.config.Settings.Queues); diff != "" {
+		t.Errorf("Queues mismatch (-want +got):\n%s", diff)
+	}
+	if w.config.Settings.ShutdownTimeout != defaults.ShutdownTimeout {
+		t.Errorf("expected ShutdownTimeout %v, got %v", defaults.ShutdownTimeout, w.config.Settings.ShutdownTimeout)
+	}
+	if w.config.Settings.PollInterval != defaults.PollInterval {
+		t.Errorf("expected PollInterval %v, got %v", defaults.PollInterval, w.config.Settings.PollInterval)
+	}
+	if w.config.Settings.ScheduledPollInterval != defaults.ScheduledPollInterval {
+		t.Errorf("expected ScheduledPollInterval %v, got %v", defaults.ScheduledPollInterval, w.config.Settings.ScheduledPollInterval)
+	}
+	if w.config.Settings.HeartbeatRate != defaults.HeartbeatRate {
+		t.Errorf("expected HeartbeatRate %v, got %v", defaults.HeartbeatRate, w.config.Settings.HeartbeatRate)
+	}
+	if !w.config.Settings.PeriodicEnabled {
+		t.Error("expected PeriodicEnabled to remain true")
+	}
+}
+
 func TestWorker_New_EncryptionEnabled(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
@@ -89,7 +130,10 @@ func TestWorker_New_EncryptionEnabled(t *testing.T) {
 
 func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 	_, err := New(&Config{
-		Redis:     getTestRedisConfig(),
+		Redis: senna.RedisConfig{
+			Addr:        "127.0.0.1:0",
+			DialTimeout: time.Millisecond,
+		},
 		Namespace: "test-worker-invalid-enc",
 		Settings:  senna.DefaultWorkerSettings(),
 		Encryption: &senna.EncryptionSettings{
@@ -99,6 +143,10 @@ func TestWorker_New_InvalidEncryptionKey(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for invalid encryption key")
+	}
+	var keySizeErr aes.KeySizeError
+	if !errors.As(err, &keySizeErr) {
+		t.Fatalf("New() error = %v, want aes.KeySizeError", err)
 	}
 }
 

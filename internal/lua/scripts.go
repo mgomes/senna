@@ -27,6 +27,9 @@ var batchInvalidateLua string
 //go:embed batch_enqueue_jobs.lua
 var batchEnqueueJobsLua string
 
+//go:embed periodic_enqueue.lua
+var periodicEnqueueLua string
+
 var (
 	BatchCompleteScript         = script.New("batch_complete", batchCompleteLua)
 	BatchAddChildScript         = script.New("batch_add_child", batchAddChildLua)
@@ -35,4 +38,5 @@ var (
 	BatchAddJobsScript          = script.New("batch_add_jobs", batchAddJobsLua)
 	BatchInvalidateScript       = script.New("batch_invalidate", batchInvalidateLua)
 	BatchEnqueueJobsScript      = script.New("batch_enqueue_jobs", batchEnqueueJobsLua)
+	PeriodicEnqueueScript       = script.New("periodic_enqueue", periodicEnqueueLua)
 )
