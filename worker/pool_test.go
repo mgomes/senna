@@ -131,14 +131,14 @@ func TestHandlerRegistry_Process_WithTimeout(t *testing.T) {
 	}
 
 	registry.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
-		time.Sleep(500 * time.Millisecond)
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	}, opts)
 
 	job := senna.NewJob("slow_job", nil)
 	_, err := registry.process(context.Background(), job)
 
-	if err != context.DeadlineExceeded {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 	}
 }

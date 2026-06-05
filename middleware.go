@@ -64,24 +64,15 @@ func RecoveryMiddleware() Middleware {
 	}
 }
 
-// TimeoutMiddleware cancels job execution after the provided duration.
+// TimeoutMiddleware runs the job handler with a context deadline.
+// Handlers must observe ctx cancellation to stop work when the deadline expires.
 func TimeoutMiddleware(d time.Duration) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, job *Job) error {
 			ctx, cancel := context.WithTimeout(ctx, d)
 			defer cancel()
 
-			done := make(chan error, 1)
-			go func() {
-				done <- next(ctx, job)
-			}()
-
-			select {
-			case err := <-done:
-				return err
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+			return next(ctx, job)
 		}
 	}
 }

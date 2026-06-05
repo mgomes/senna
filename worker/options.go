@@ -16,7 +16,7 @@ func WithMaxRetries(n int) JobOption {
 	}
 }
 
-// WithJobTimeout sets the handler timeout for a registered job type.
+// WithJobTimeout sets the handler context deadline for a registered job type.
 func WithJobTimeout(d time.Duration) JobOption {
 	return func(o *JobOptions) {
 		o.Timeout = d
