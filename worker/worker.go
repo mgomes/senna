@@ -48,8 +48,15 @@ type Config struct {
 
 // New creates a Worker and verifies the Redis connection.
 func New(cfg *Config) (*Worker, error) {
-	if cfg.Settings.Concurrency == 0 {
-		cfg.Settings = senna.DefaultWorkerSettings()
+	cfg.Settings = normalizeWorkerSettings(cfg.Settings)
+
+	var enc *encryption.Encryptor
+	if cfg.Encryption != nil && cfg.Encryption.Enabled {
+		var err error
+		enc, err = encryption.New(cfg.Encryption.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init encryptor: %w", err)
+		}
 	}
 
 	client := redis.NewClient(cfg.Redis.Options())
@@ -71,11 +78,7 @@ func New(cfg *Config) (*Worker, error) {
 		stopCh:   make(chan struct{}),
 	}
 
-	if cfg.Encryption != nil && cfg.Encryption.Enabled {
-		enc, err := encryption.New(cfg.Encryption.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to init encryptor: %w", err)
-		}
+	if enc != nil {
 		w.encryptor = enc
 
 		mw := encryptionMiddleware(enc)
@@ -89,6 +92,33 @@ func New(cfg *Config) (*Worker, error) {
 	}
 
 	return w, nil
+}
+
+func normalizeWorkerSettings(settings senna.WorkerSettings) senna.WorkerSettings {
+	defaults := senna.DefaultWorkerSettings()
+
+	if settings.Concurrency <= 0 {
+		settings.Concurrency = defaults.Concurrency
+	}
+	if len(settings.Queues) == 0 {
+		settings.Queues = append([]senna.QueueConfig(nil), defaults.Queues...)
+	} else {
+		settings.Queues = append([]senna.QueueConfig(nil), settings.Queues...)
+	}
+	if settings.ShutdownTimeout <= 0 {
+		settings.ShutdownTimeout = defaults.ShutdownTimeout
+	}
+	if settings.PollInterval <= 0 {
+		settings.PollInterval = defaults.PollInterval
+	}
+	if settings.ScheduledPollInterval <= 0 {
+		settings.ScheduledPollInterval = defaults.ScheduledPollInterval
+	}
+	if settings.HeartbeatRate <= 0 {
+		settings.HeartbeatRate = defaults.HeartbeatRate
+	}
+
+	return settings
 }
 
 func hostname() string {

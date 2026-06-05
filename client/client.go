@@ -70,6 +70,15 @@ func normalizeSettings(settings Settings) Settings {
 func New(cfg *Config) (*Client, error) {
 	cfg.Settings = normalizeSettings(cfg.Settings)
 
+	var enc *encryption.Encryptor
+	if cfg.Encryption != nil && cfg.Encryption.Enabled {
+		var err error
+		enc, err = encryption.New(cfg.Encryption.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init encryptor: %w", err)
+		}
+	}
+
 	client := redis.NewClient(cfg.Redis.Options())
 
 	if err := client.Ping(context.Background()).Err(); err != nil {
@@ -77,17 +86,10 @@ func New(cfg *Config) (*Client, error) {
 	}
 
 	c := &Client{
-		redis:    client,
-		keys:     keys.New(cfg.Namespace),
-		settings: cfg.Settings,
-	}
-
-	if cfg.Encryption != nil && cfg.Encryption.Enabled {
-		enc, err := encryption.New(cfg.Encryption.Key)
-		if err != nil {
-			return nil, fmt.Errorf("failed to init encryptor: %w", err)
-		}
-		c.encryptor = enc
+		redis:     client,
+		keys:      keys.New(cfg.Namespace),
+		settings:  cfg.Settings,
+		encryptor: enc,
 	}
 
 	return c, nil
@@ -249,8 +251,7 @@ type enqueuedJob struct {
 
 // EnqueueBulk enqueues multiple jobs of the same type in a single Redis round trip.
 // All jobs share the same options (queue, retry, etc.) but have different arguments.
-// Returns only the jobs that were successfully enqueued. Jobs that fail to marshal
-// or encrypt are silently skipped.
+// If any job fails to marshal or encrypt, no jobs are enqueued.
 func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
 	if len(argsList) == 0 {
 		return nil, nil
@@ -269,9 +270,9 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 		return nil, ErrUniqueKeyInBulk
 	}
 
-	// Build and marshal all jobs upfront, only keeping those that succeed
+	// Build and marshal all jobs upfront to fail before any Redis changes.
 	enqueued := make([]enqueuedJob, 0, len(argsList))
-	for _, args := range argsList {
+	for i, args := range argsList {
 		job := senna.NewJob(jobType, args)
 		job.Queue = cfg.queue
 		job.Retry = cfg.retry
@@ -280,7 +281,7 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 		if cfg.encrypt && c.encryptor != nil {
 			encryptedArgs, err := c.encryptor.Encrypt(args)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("encrypt bulk job %d of type %s: %w", i, jobType, err)
 			}
 			job.Args = encryptedArgs
 			job.Encrypted = true
@@ -288,7 +289,7 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 
 		data, err := job.Marshal()
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("marshal bulk job %d of type %s: %w", i, jobType, err)
 		}
 
 		enqueued = append(enqueued, enqueuedJob{job: job, data: data})

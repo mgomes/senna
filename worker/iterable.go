@@ -66,7 +66,7 @@ func WithIterableMaxRetries(n int) IterableJobOption {
 	}
 }
 
-// WithIterableTimeout sets the timeout for the entire iterable job execution.
+// WithIterableTimeout sets the context deadline for the entire iterable job execution.
 func WithIterableTimeout(d time.Duration) IterableJobOption {
 	return func(o *IterableJobOptions) {
 		o.Timeout = d
