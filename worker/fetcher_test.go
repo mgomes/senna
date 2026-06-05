@@ -2,10 +2,12 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -247,6 +249,82 @@ func TestFetcher_Ack_CleansUniqueKey(t *testing.T) {
 	exists, _ := client.Exists(ctx, k.Unique(job.UniqueKey)).Result()
 	if exists != 0 {
 		t.Error("unique key should be deleted after ack")
+	}
+}
+
+func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-mark-finalization-encrypted:*")
+
+	k := keys.New("test-mark-finalization-encrypted")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	enc, err := encryption.New(key)
+	if err != nil {
+		t.Fatalf("encryption.New() error = %v, want nil", err)
+	}
+
+	plainArgs := map[string]any{"secret": "plaintext"}
+	encryptedArgs, err := enc.Encrypt(plainArgs)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v, want nil", err)
+	}
+
+	ctx := context.Background()
+	job := senna.NewJob("test_job", encryptedArgs)
+	job.Encrypted = true
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+	if err := client.LPush(ctx, k.InFlight("worker-1"), string(data)).Err(); err != nil {
+		t.Fatalf("seed in-flight: %v", err)
+	}
+
+	job.Args = plainArgs
+	job.Encrypted = false
+	if err := f.MarkFinalization(ctx, "worker-1", job, senna.JobFinalization{Operation: jobFinalizationComplete}); err != nil {
+		t.Fatalf("MarkFinalization() error = %v, want nil", err)
+	}
+
+	items, err := client.LRange(ctx, k.InFlight("worker-1"), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange() error = %v, want nil", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(items))
+	}
+	if strings.Contains(items[0], "plaintext") {
+		t.Fatalf("finalized payload contains plaintext args: %s", items[0])
+	}
+
+	markedJob, err := senna.UnmarshalJob([]byte(items[0]))
+	if err != nil {
+		t.Fatalf("UnmarshalJob(finalized payload) error = %v, want nil", err)
+	}
+	if !markedJob.Encrypted {
+		t.Fatal("finalized job Encrypted = false, want true")
+	}
+	decrypted, err := enc.Decrypt(markedJob.Args)
+	if err != nil {
+		t.Fatalf("Decrypt(finalized args) error = %v, want nil", err)
+	}
+	if decrypted["secret"] != "plaintext" {
+		t.Errorf("Decrypt(finalized args)[secret] = %v, want plaintext", decrypted["secret"])
+	}
+	finalization := markedJob.Finalization()
+	if finalization == nil {
+		t.Fatal("finalized job finalization = nil, want complete marker")
+	}
+	if finalization.Operation != jobFinalizationComplete {
+		t.Errorf("finalized job operation = %q, want %q", finalization.Operation, jobFinalizationComplete)
 	}
 }
 

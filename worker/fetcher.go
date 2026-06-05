@@ -585,9 +585,7 @@ func (f *fetcher) MarkFinalization(ctx context.Context, workerID string, job *se
 		return err
 	}
 
-	finalizedJob := *job
-	finalizedJob.SetFinalization(finalization)
-	finalizedData, err := finalizedJob.Marshal()
+	finalizedData, err := payloadWithFinalization(payload, finalization)
 	if err != nil {
 		return err
 	}
@@ -645,4 +643,13 @@ func jobPayload(job *senna.Job) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func payloadWithFinalization(payload string, finalization senna.JobFinalization) ([]byte, error) {
+	job, err := senna.UnmarshalJob([]byte(payload))
+	if err != nil {
+		return nil, err
+	}
+	job.SetFinalization(finalization)
+	return job.Marshal()
 }
