@@ -128,6 +128,53 @@ func TestUnmarshalJob(t *testing.T) {
 	}
 }
 
+func TestJob_FinalizationRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	retryAt := time.Date(2026, time.June, 4, 12, 30, 0, 0, time.UTC)
+	finalization := JobFinalization{
+		Operation: "retry",
+		Error:     "temporary failure",
+		RetryAt:   retryAt,
+	}
+	job := NewJob("test_job", nil)
+	job.SetFinalization(finalization)
+
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("json.Unmarshal(Job.Marshal()) error = %v, want nil", err)
+	}
+	if raw["finalization"] == nil {
+		t.Fatal("Job.Marshal() omitted finalization marker")
+	}
+
+	parsed, err := UnmarshalJob(data)
+	if err != nil {
+		t.Fatalf("UnmarshalJob(Job.Marshal()) error = %v, want nil", err)
+	}
+	if diff := cmp.Diff(&finalization, parsed.Finalization()); diff != "" {
+		t.Errorf("Job.Finalization() mismatch (-want +got):\n%s", diff)
+	}
+
+	parsed.ClearFinalization()
+	clearedData, err := parsed.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() after ClearFinalization() error = %v, want nil", err)
+	}
+	raw = nil
+	if err := json.Unmarshal(clearedData, &raw); err != nil {
+		t.Fatalf("json.Unmarshal(Job.Marshal() after ClearFinalization()) error = %v, want nil", err)
+	}
+	if raw["finalization"] != nil {
+		t.Errorf("Job.Marshal() after ClearFinalization() finalization = %v, want nil", raw["finalization"])
+	}
+}
+
 func TestUnmarshalJob_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	_, err := UnmarshalJob([]byte("not valid json"))

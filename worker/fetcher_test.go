@@ -2,10 +2,12 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/mgomes/senna/internal/encryption"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/redis/go-redis/v9"
 )
@@ -250,6 +252,180 @@ func TestFetcher_Ack_CleansUniqueKey(t *testing.T) {
 	}
 }
 
+func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-mark-finalization-encrypted:*")
+
+	k := keys.New("test-mark-finalization-encrypted")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	enc, err := encryption.New(key)
+	if err != nil {
+		t.Fatalf("encryption.New() error = %v, want nil", err)
+	}
+
+	plainArgs := map[string]any{"secret": "plaintext"}
+	encryptedArgs, err := enc.Encrypt(plainArgs)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v, want nil", err)
+	}
+
+	ctx := context.Background()
+	job := senna.NewJob("test_job", encryptedArgs)
+	job.Encrypted = true
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+	if err := client.LPush(ctx, k.InFlight("worker-1"), string(data)).Err(); err != nil {
+		t.Fatalf("seed in-flight: %v", err)
+	}
+
+	job.Args = plainArgs
+	job.Encrypted = false
+	if err := f.MarkFinalization(ctx, "worker-1", job, senna.JobFinalization{Operation: jobFinalizationComplete}); err != nil {
+		t.Fatalf("MarkFinalization() error = %v, want nil", err)
+	}
+
+	items, err := client.LRange(ctx, k.InFlight("worker-1"), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange() error = %v, want nil", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(items))
+	}
+	if strings.Contains(items[0], "plaintext") {
+		t.Fatalf("finalized payload contains plaintext args: %s", items[0])
+	}
+
+	markedJob, err := senna.UnmarshalJob([]byte(items[0]))
+	if err != nil {
+		t.Fatalf("UnmarshalJob(finalized payload) error = %v, want nil", err)
+	}
+	if !markedJob.Encrypted {
+		t.Fatal("finalized job Encrypted = false, want true")
+	}
+	decrypted, err := enc.Decrypt(markedJob.Args)
+	if err != nil {
+		t.Fatalf("Decrypt(finalized args) error = %v, want nil", err)
+	}
+	if decrypted["secret"] != "plaintext" {
+		t.Errorf("Decrypt(finalized args)[secret] = %v, want plaintext", decrypted["secret"])
+	}
+	finalization := markedJob.Finalization()
+	if finalization == nil {
+		t.Fatal("finalized job finalization = nil, want complete marker")
+	}
+	if finalization.Operation != jobFinalizationComplete {
+		t.Errorf("finalized job operation = %q, want %q", finalization.Operation, jobFinalizationComplete)
+	}
+}
+
+func TestFetcher_MarkFinalizationIgnoresBadQueueTypeForInFlightHit(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-mark-finalization-queue-type:*")
+
+	k := keys.New("test-mark-finalization-queue-type")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	job := senna.NewJob("test_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+	if err := client.LPush(ctx, k.InFlight("worker-1"), string(data)).Err(); err != nil {
+		t.Fatalf("seed in-flight: %v", err)
+	}
+	if err := client.Set(ctx, k.Queue("default"), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("set queue wrong type: %v", err)
+	}
+
+	err = f.MarkFinalization(ctx, "worker-1", job, senna.JobFinalization{Operation: jobFinalizationComplete})
+	if err != nil {
+		t.Fatalf("MarkFinalization() error = %v, want nil", err)
+	}
+
+	items, err := client.LRange(ctx, k.InFlight("worker-1"), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange() error = %v, want nil", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(items))
+	}
+	markedJob, err := senna.UnmarshalJob([]byte(items[0]))
+	if err != nil {
+		t.Fatalf("UnmarshalJob(finalized payload) error = %v, want nil", err)
+	}
+	finalization := markedJob.Finalization()
+	if finalization == nil {
+		t.Fatal("finalized job finalization = nil, want complete marker")
+	}
+	if finalization.Operation != jobFinalizationComplete {
+		t.Errorf("finalized job operation = %q, want %q", finalization.Operation, jobFinalizationComplete)
+	}
+}
+
+func TestFetcher_MarkFinalizationRecognizesExistingFinalizedPayload(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-mark-finalization-existing:*")
+
+	k := keys.New("test-mark-finalization-existing")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	job := senna.NewJob("test_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+
+	finalization := senna.JobFinalization{Operation: jobFinalizationComplete}
+	finalizedData, err := payloadWithFinalization(string(data), finalization)
+	if err != nil {
+		t.Fatalf("payloadWithFinalization() error = %v, want nil", err)
+	}
+	if err := client.LPush(ctx, k.InFlight("worker-1"), string(finalizedData)).Err(); err != nil {
+		t.Fatalf("seed finalized in-flight: %v", err)
+	}
+
+	err = f.MarkFinalization(ctx, "worker-1", job, finalization)
+	if err != nil {
+		t.Fatalf("MarkFinalization() error = %v, want nil", err)
+	}
+	if job.Finalization() == nil {
+		t.Fatal("job finalization = nil, want complete marker")
+	}
+	if job.Raw() != string(finalizedData) {
+		t.Fatal("job raw payload was not advanced to existing finalized payload")
+	}
+
+	err = f.Ack(ctx, "worker-1", job)
+	if err != nil {
+		t.Fatalf("Ack() error = %v, want nil", err)
+	}
+	inFlightLen, err := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if err != nil {
+		t.Fatalf("LLen() error = %v, want nil", err)
+	}
+	if inFlightLen != 0 {
+		t.Errorf("in-flight length after Ack() = %d, want 0", inFlightLen)
+	}
+}
+
 func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-nack:*")
@@ -314,6 +490,9 @@ func TestFetcher_Nack_KeepsInFlightWhenRetryWriteFails(t *testing.T) {
 	}
 	if inFlightLen != 1 {
 		t.Errorf("LLen(%q) = %d, want %d", k.InFlight("worker-1"), inFlightLen, 1)
+	}
+	if fetched.RetryCount != 0 {
+		t.Errorf("RetryCount = %d after failed retry write, want 0", fetched.RetryCount)
 	}
 }
 

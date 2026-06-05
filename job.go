@@ -27,6 +27,17 @@ type Job struct {
 	UniqueTTL       time.Duration  `json:"unique_ttl,omitempty"`
 	Encrypted       bool           `json:"encrypted,omitempty"`
 	raw             string         `json:"-"`
+	finalization    *JobFinalization
+}
+
+// JobFinalization records the chosen outcome for an in-flight job whose
+// handler has already returned. Workers persist it before updating batch
+// counters so recovered jobs can resume the same finalization path without
+// running the handler again.
+type JobFinalization struct {
+	Operation string    `json:"operation"`
+	Error     string    `json:"error,omitempty"`
+	RetryAt   time.Time `json:"retry_at,omitempty"`
 }
 
 // NewJob constructs a job with default queue, retry, and timestamp values.
@@ -49,6 +60,34 @@ func (j *Job) Marshal() ([]byte, error) {
 	return json.Marshal(j)
 }
 
+// MarshalJSON encodes the job and its private finalization marker.
+func (j *Job) MarshalJSON() ([]byte, error) {
+	type jobAlias Job
+	return json.Marshal(&struct {
+		*jobAlias
+		Finalization *JobFinalization `json:"finalization,omitempty"`
+	}{
+		jobAlias:     (*jobAlias)(j),
+		Finalization: j.finalization,
+	})
+}
+
+// UnmarshalJSON decodes the job and its private finalization marker.
+func (j *Job) UnmarshalJSON(data []byte) error {
+	type jobAlias Job
+	aux := &struct {
+		*jobAlias
+		Finalization *JobFinalization `json:"finalization,omitempty"`
+	}{
+		jobAlias: (*jobAlias)(j),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	j.finalization = aux.Finalization
+	return nil
+}
+
 // UnmarshalJob decodes a JSON job payload.
 func UnmarshalJob(data []byte) (*Job, error) {
 	var job Job
@@ -66,6 +105,25 @@ func (j *Job) Raw() string {
 // SetRaw stores the raw Redis payload associated with the job.
 func (j *Job) SetRaw(raw string) {
 	j.raw = raw
+}
+
+// Finalization returns the persisted finalization marker, if one exists.
+func (j *Job) Finalization() *JobFinalization {
+	if j.finalization == nil {
+		return nil
+	}
+	finalization := *j.finalization
+	return &finalization
+}
+
+// SetFinalization stores the finalization marker for this job.
+func (j *Job) SetFinalization(finalization JobFinalization) {
+	j.finalization = &finalization
+}
+
+// ClearFinalization removes the finalization marker from this job.
+func (j *Job) ClearFinalization() {
+	j.finalization = nil
 }
 
 // Handler processes a job.

@@ -12,18 +12,10 @@ import (
 
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
-	"github.com/mgomes/senna/internal/script"
 	"github.com/redis/go-redis/v9"
 )
 
 const sequentialLockTTL = 30 * time.Second
-
-var (
-	ackJobScript        = script.New("ack-job", ackJobLua)
-	retryJobScript      = script.New("retry-job", retryJobLua)
-	moveToDeadJobScript = script.New("move-to-dead-job", moveToDeadJobLua)
-	requeueJobScript    = script.New("requeue-job", requeueJobLua)
-)
 
 type fetcher struct {
 	client         *redis.Client
@@ -105,12 +97,7 @@ func (f *fetcher) ReleaseSequentialLock(ctx context.Context, workerID, queueName
 	// This prevents a new local goroutine from acquiring the semaphore and fetching
 	// another job while the old lock is still present, which could then be deleted here.
 	lockKey := f.keys.SequentialLock(queueName)
-	f.client.Eval(ctx, `
-		if redis.call("GET", KEYS[1]) == ARGV[1] then
-			return redis.call("DEL", KEYS[1])
-		end
-		return 0
-	`, []string{lockKey}, workerID)
+	_, _ = releaseSequentialLockScript.Run(ctx, f.client, []string{lockKey}, workerID)
 
 	// Release local semaphore last
 	sema := f.sequentialSema[queueName]
@@ -516,34 +503,48 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) erro
 	if _, err = ackJobScript.Run(ctx, f.client, keys, payload); err != nil {
 		return fmt.Errorf("ack job %s: %w", job.ID, err)
 	}
+	job.ClearFinalization()
 	return nil
 }
 
 func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, retryIn time.Duration) error {
+	if retryIn > 0 {
+		return f.NackAt(ctx, workerID, job, time.Now().Add(retryIn))
+	}
+
 	payload, err := jobPayload(job)
 	if err != nil {
 		return err
 	}
 
-	if retryIn > 0 {
-		job.RetryCount++
-		retryAt := time.Now().Add(retryIn)
-		newData, err := job.Marshal()
-		if err != nil {
-			return err
-		}
-		if _, err = retryJobScript.Run(ctx, f.client,
-			[]string{f.keys.InFlight(workerID), f.keys.Retry()},
-			payload, retryAt.Unix(), string(newData),
-		); err != nil {
-			return fmt.Errorf("nack job %s for retry: %w", job.ID, err)
-		}
-		return nil
-	}
-
 	if _, err = ackJobScript.Run(ctx, f.client, []string{f.keys.InFlight(workerID)}, payload); err != nil {
 		return fmt.Errorf("nack job %s: %w", job.ID, err)
 	}
+	job.ClearFinalization()
+	return nil
+}
+
+func (f *fetcher) NackAt(ctx context.Context, workerID string, job *senna.Job, retryAt time.Time) error {
+	payload, err := jobPayload(job)
+	if err != nil {
+		return err
+	}
+
+	nextJob := *job
+	nextJob.RetryCount++
+	nextJob.ClearFinalization()
+	newData, err := nextJob.Marshal()
+	if err != nil {
+		return err
+	}
+	if _, err = retryJobScript.Run(ctx, f.client,
+		[]string{f.keys.InFlight(workerID), f.keys.Retry()},
+		payload, retryAt.Unix(), string(newData),
+	); err != nil {
+		return fmt.Errorf("nack job %s for retry: %w", job.ID, err)
+	}
+	job.RetryCount = nextJob.RetryCount
+	job.ClearFinalization()
 	return nil
 }
 
@@ -554,8 +555,10 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 	}
 
 	now := time.Now()
-	job.FailedAt = &now
-	newData, err := job.Marshal()
+	deadJob := *job
+	deadJob.FailedAt = &now
+	deadJob.ClearFinalization()
+	newData, err := deadJob.Marshal()
 	if err != nil {
 		return err
 	}
@@ -567,6 +570,47 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 	if _, err = moveToDeadJobScript.Run(ctx, f.client, keys, payload, now.Unix(), string(newData)); err != nil {
 		return fmt.Errorf("move job %s to dead queue: %w", job.ID, err)
 	}
+	job.FailedAt = &now
+	job.ClearFinalization()
+	return nil
+}
+
+func (f *fetcher) MarkFinalization(ctx context.Context, workerID string, job *senna.Job, finalization senna.JobFinalization) error {
+	if job.Finalization() != nil {
+		return nil
+	}
+
+	payload, err := jobPayload(job)
+	if err != nil {
+		return err
+	}
+
+	finalizedData, err := payloadWithFinalization(payload, finalization)
+	if err != nil {
+		return err
+	}
+
+	result, err := markJobFinalizationScript.Run(
+		ctx, f.client,
+		[]string{f.keys.InFlight(workerID), f.keys.Queue(job.Queue)},
+		payload, string(finalizedData),
+	)
+	if err != nil {
+		return fmt.Errorf("mark job %s finalization: %w", job.ID, err)
+	}
+	marked, ok := result.(int64)
+	if !ok {
+		return fmt.Errorf("mark job %s finalization: unexpected script result %T", job.ID, result)
+	}
+	if marked == 0 {
+		return nil
+	}
+	if marked != 1 && marked != 2 {
+		return fmt.Errorf("mark job %s finalization: unexpected script status %d", job.ID, marked)
+	}
+
+	job.SetFinalization(finalization)
+	job.SetRaw(string(finalizedData))
 	return nil
 }
 
@@ -601,72 +645,11 @@ func jobPayload(job *senna.Job) (string, error) {
 	return string(data), nil
 }
 
-const ackJobLua = `
-local in_flight_type = redis.call("TYPE", KEYS[1]).ok
-if in_flight_type ~= "none" and in_flight_type ~= "list" then
-	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
-end
-
-local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
-if removed > 0 and #KEYS >= 2 then
-	redis.call("DEL", KEYS[2])
-end
-return removed
-`
-
-const retryJobLua = `
-local in_flight_type = redis.call("TYPE", KEYS[1]).ok
-if in_flight_type ~= "none" and in_flight_type ~= "list" then
-	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
-end
-
-local retry_type = redis.call("TYPE", KEYS[2]).ok
-if retry_type ~= "none" and retry_type ~= "zset" then
-	return redis.error_reply("retry key has type " .. retry_type .. ", want zset")
-end
-
-local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
-if removed > 0 then
-	redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
-end
-return removed
-`
-
-const requeueJobLua = `
-local in_flight_type = redis.call("TYPE", KEYS[1]).ok
-if in_flight_type ~= "none" and in_flight_type ~= "list" then
-	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
-end
-
-local queue_type = redis.call("TYPE", KEYS[2]).ok
-if queue_type ~= "none" and queue_type ~= "list" then
-	return redis.error_reply("queue key has type " .. queue_type .. ", want list")
-end
-
-local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
-if removed > 0 then
-	redis.call("RPUSH", KEYS[2], ARGV[2])
-end
-return removed
-`
-
-const moveToDeadJobLua = `
-local in_flight_type = redis.call("TYPE", KEYS[1]).ok
-if in_flight_type ~= "none" and in_flight_type ~= "list" then
-	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
-end
-
-local dead_type = redis.call("TYPE", KEYS[2]).ok
-if dead_type ~= "none" and dead_type ~= "zset" then
-	return redis.error_reply("dead key has type " .. dead_type .. ", want zset")
-end
-
-local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
-if removed > 0 then
-	if #KEYS >= 3 then
-		redis.call("DEL", KEYS[3])
-	end
-	redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
-end
-return removed
-`
+func payloadWithFinalization(payload string, finalization senna.JobFinalization) ([]byte, error) {
+	job, err := senna.UnmarshalJob([]byte(payload))
+	if err != nil {
+		return nil, err
+	}
+	job.SetFinalization(finalization)
+	return job.Marshal()
+}
