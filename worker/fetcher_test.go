@@ -328,6 +328,54 @@ func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
 	}
 }
 
+func TestFetcher_MarkFinalizationIgnoresBadQueueTypeForInFlightHit(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-mark-finalization-queue-type:*")
+
+	k := keys.New("test-mark-finalization-queue-type")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	job := senna.NewJob("test_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+	if err := client.LPush(ctx, k.InFlight("worker-1"), string(data)).Err(); err != nil {
+		t.Fatalf("seed in-flight: %v", err)
+	}
+	if err := client.Set(ctx, k.Queue("default"), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("set queue wrong type: %v", err)
+	}
+
+	err = f.MarkFinalization(ctx, "worker-1", job, senna.JobFinalization{Operation: jobFinalizationComplete})
+	if err != nil {
+		t.Fatalf("MarkFinalization() error = %v, want nil", err)
+	}
+
+	items, err := client.LRange(ctx, k.InFlight("worker-1"), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange() error = %v, want nil", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(items))
+	}
+	markedJob, err := senna.UnmarshalJob([]byte(items[0]))
+	if err != nil {
+		t.Fatalf("UnmarshalJob(finalized payload) error = %v, want nil", err)
+	}
+	finalization := markedJob.Finalization()
+	if finalization == nil {
+		t.Fatal("finalized job finalization = nil, want complete marker")
+	}
+	if finalization.Operation != jobFinalizationComplete {
+		t.Errorf("finalized job operation = %q, want %q", finalization.Operation, jobFinalizationComplete)
+	}
+}
+
 func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-nack:*")

@@ -3,13 +3,6 @@ if in_flight_type ~= "none" and in_flight_type ~= "list" then
 	return redis.error_reply("in-flight key has type " .. in_flight_type .. ", want list")
 end
 
-if #KEYS >= 2 then
-	local queue_type = redis.call("TYPE", KEYS[2]).ok
-	if queue_type ~= "none" and queue_type ~= "list" then
-		return redis.error_reply("queue key has type " .. queue_type .. ", want list")
-	end
-end
-
 local function replace_first(key)
 	local jobs = redis.call("LRANGE", key, 0, -1)
 	for index, data in ipairs(jobs) do
@@ -25,8 +18,14 @@ if replace_first(KEYS[1]) then
 	return 1
 end
 
-if #KEYS >= 2 and replace_first(KEYS[2]) then
-	return 2
+if #KEYS >= 2 then
+	local queue_type = redis.call("TYPE", KEYS[2]).ok
+	if queue_type ~= "none" and queue_type ~= "list" then
+		return redis.error_reply("queue key has type " .. queue_type .. ", want list")
+	end
+	if replace_first(KEYS[2]) then
+		return 2
+	end
 end
 
 return 0
