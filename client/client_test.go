@@ -383,6 +383,50 @@ func TestClient_Batch(t *testing.T) {
 	}
 }
 
+func TestClient_EnqueueBatch_RejectsWrongQueueTypeWithoutQueueingPartialJobs(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-atomic:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-atomic",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	batch := NewBatch()
+	batch.Add("first_job", map[string]any{"id": 1})
+	batch.Add("blocked_job", map[string]any{"id": 2}, WithQueue("blocked"))
+
+	if err := redisClient.Set(ctx, client.keys.Queue("blocked"), "not a list", 0).Err(); err != nil {
+		t.Fatalf("failed to poison blocked queue: %v", err)
+	}
+
+	err = client.EnqueueBatch(ctx, batch)
+	if err == nil {
+		t.Fatal("expected EnqueueBatch to fail")
+	}
+
+	queueLength, err := redisClient.LLen(ctx, client.keys.Queue("default")).Result()
+	if err != nil {
+		t.Fatalf("failed to get default queue length: %v", err)
+	}
+	if queueLength != 0 {
+		t.Errorf("default queue length = %d, want 0", queueLength)
+	}
+
+	keysLeft, err := redisClient.Exists(ctx, client.keys.Batch(batch.ID), client.keys.BatchJobs(batch.ID)).Result()
+	if err != nil {
+		t.Fatalf("failed to check batch cleanup: %v", err)
+	}
+	if keysLeft != 0 {
+		t.Errorf("batch keys left after failed enqueue = %d, want 0", keysLeft)
+	}
+}
+
 func TestBatch_Builder(t *testing.T) {
 	batch := NewBatch().
 		Add("job1", nil).

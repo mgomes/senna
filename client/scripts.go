@@ -10,4 +10,5 @@ var (
 	batchRemoveChildScript = lua.BatchRemoveChildScript
 	enqueueUniqueNowScript = lua.EnqueueUniqueNowScript
 	enqueueUniqueAtScript  = lua.EnqueueUniqueAtScript
+	batchEnqueueJobsScript = lua.BatchEnqueueJobsScript
 )
