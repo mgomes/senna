@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/mgomes/senna"
@@ -124,23 +126,30 @@ func TestHandlerRegistry_Process_JobNotFound(t *testing.T) {
 }
 
 func TestHandlerRegistry_Process_WithTimeout(t *testing.T) {
-	registry := newHandlerRegistry()
+	synctest.Test(t, func(t *testing.T) {
+		registry := newHandlerRegistry()
 
-	opts := &JobOptions{
-		Timeout: 50 * time.Millisecond,
-	}
+		opts := &JobOptions{
+			Timeout: time.Minute,
+		}
 
-	registry.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}, opts)
+		registry.Register("slow_job", func(ctx context.Context, job *senna.Job) error {
+			synctest.Wait()
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("ctx.Err() before timeout = %v, want nil", err)
+			}
 
-	job := senna.NewJob("slow_job", nil)
-	_, err := registry.process(context.Background(), job)
+			<-ctx.Done()
+			return ctx.Err()
+		}, opts)
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
-	}
+		job := senna.NewJob("slow_job", nil)
+		_, err := registry.process(context.Background(), job)
+
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("process() error = %v, want %v", err, context.DeadlineExceeded)
+		}
+	})
 }
 
 func TestHandlerRegistry_Process_SetsProcessedAt(t *testing.T) {
@@ -168,46 +177,47 @@ func TestHandlerRegistry_Process_SetsProcessedAt(t *testing.T) {
 }
 
 func TestHandlerRegistry_Process_WithMaxConcurrency(t *testing.T) {
-	registry := newHandlerRegistry()
+	synctest.Test(t, func(t *testing.T) {
+		registry := newHandlerRegistry()
 
-	opts := &JobOptions{
-		MaxConcurrency: 2,
-	}
-
-	var maxConcurrent atomic.Int32
-	var currentConcurrent atomic.Int32
-
-	registry.Register("limited_job", func(ctx context.Context, job *senna.Job) error {
-		current := currentConcurrent.Add(1)
-		defer currentConcurrent.Add(-1)
-
-		for {
-			max := maxConcurrent.Load()
-			if current <= max || maxConcurrent.CompareAndSwap(max, current) {
-				break
-			}
+		opts := &JobOptions{
+			MaxConcurrency: 2,
 		}
 
-		time.Sleep(50 * time.Millisecond)
-		return nil
-	}, opts)
+		var maxConcurrent atomic.Int32
+		var currentConcurrent atomic.Int32
 
-	done := make(chan struct{})
-	for range 10 {
-		go func() {
-			job := senna.NewJob("limited_job", nil)
-			_, _ = registry.process(context.Background(), job)
-			done <- struct{}{}
-		}()
-	}
+		registry.Register("limited_job", func(ctx context.Context, job *senna.Job) error {
+			current := currentConcurrent.Add(1)
+			defer currentConcurrent.Add(-1)
 
-	for range 10 {
-		<-done
-	}
+			for {
+				max := maxConcurrent.Load()
+				if current <= max || maxConcurrent.CompareAndSwap(max, current) {
+					break
+				}
+			}
 
-	if maxConcurrent.Load() > 2 {
-		t.Errorf("max concurrency exceeded limit, got %d", maxConcurrent.Load())
-	}
+			time.Sleep(time.Minute)
+			return nil
+		}, opts)
+
+		var wg sync.WaitGroup
+		for range 10 {
+			wg.Go(func() {
+				job := senna.NewJob("limited_job", nil)
+				_, _ = registry.process(context.Background(), job)
+			})
+		}
+		wg.Wait()
+
+		if maxConcurrent.Load() > 2 {
+			t.Errorf("max concurrency exceeded limit, got %d", maxConcurrent.Load())
+		}
+		if got := maxConcurrent.Load(); got != 2 {
+			t.Errorf("max concurrent handlers = %d, want 2", got)
+		}
+	})
 }
 
 func TestHandlerRegistry_Process_ReturnsError(t *testing.T) {
