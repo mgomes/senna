@@ -1,6 +1,7 @@
 package senna
 
 import (
+	"crypto/tls"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -26,14 +27,16 @@ type RedisConfig struct {
 	DialTimeout  time.Duration
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+	TLSConfig    *tls.Config
 }
 
 // Options converts the RedisConfig into go-redis client options.
 func (c RedisConfig) Options() *redis.Options {
 	opts := &redis.Options{
-		Addr:     c.Addr,
-		Password: c.Password,
-		DB:       c.DB,
+		Addr:      c.Addr,
+		Password:  c.Password,
+		DB:        c.DB,
+		TLSConfig: c.TLSConfig,
 	}
 	if c.PoolSize > 0 {
 		opts.PoolSize = c.PoolSize

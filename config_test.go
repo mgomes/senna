@@ -1,6 +1,7 @@
 package senna
 
 import (
+	"crypto/tls"
 	"testing"
 	"time"
 )
@@ -35,6 +36,7 @@ func TestRedisConfig_Options_AllFields(t *testing.T) {
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
+		TLSConfig:    &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "redis.example.com"},
 	}
 
 	opts := cfg.Options()
@@ -62,6 +64,15 @@ func TestRedisConfig_Options_AllFields(t *testing.T) {
 	}
 	if opts.WriteTimeout != 3*time.Second {
 		t.Errorf("expected WriteTimeout 3s, got %v", opts.WriteTimeout)
+	}
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be set")
+	}
+	if opts.TLSConfig.ServerName != "redis.example.com" {
+		t.Errorf("expected TLSConfig.ServerName redis.example.com, got %q", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected TLSConfig.MinVersion TLS 1.2, got %d", opts.TLSConfig.MinVersion)
 	}
 }
 
