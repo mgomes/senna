@@ -12,9 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/client"
 	"github.com/mgomes/senna/worker"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestBatch_CallbackOptions(t *testing.T) {
@@ -428,6 +431,182 @@ func TestBatchStatusJoinWithInterval(t *testing.T) {
 	if !status.Complete() {
 		t.Fatal("BatchStatus.Complete() = false, want true")
 	}
+}
+
+func TestBatchStatusRefreshDoesNotLoadFailedJIDs(t *testing.T) {
+	const namespace = "batch-refresh-cheap"
+	const bid = "batch-refresh-cheap-bid"
+	flushKeysBatch(t, namespace+":*")
+
+	redisClient := newTestRedisClient(t)
+	ctx := context.Background()
+	batchKey := namespace + ":batch:" + bid
+	failedKey := batchKey + ":failed"
+	state := senna.BatchState{
+		ID:        bid,
+		Total:     3,
+		Pending:   0,
+		Failures:  2,
+		Successes: 1,
+		CreatedAt: time.Now(),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal(BatchState) error = %v, want nil", err)
+	}
+	if err := redisClient.Set(ctx, batchKey, string(data), 0).Err(); err != nil {
+		t.Fatalf("Set(%q, batch state) error = %v, want nil", batchKey, err)
+	}
+	if err := redisClient.SAdd(ctx, failedKey, "jid-1", "jid-2").Err(); err != nil {
+		t.Fatalf("SAdd(%q, failed JIDs) error = %v, want nil", failedKey, err)
+	}
+
+	hook := &batchStatusCommandHook{}
+	redisClient.AddHook(hook)
+	status := senna.NewBatchStatus(redisClient, namespace, bid)
+	if err := status.Refresh(ctx); err != nil {
+		t.Fatalf("BatchStatus.Refresh(ctx) error = %v, want nil", err)
+	}
+
+	if got := hook.pipelines.Load(); got != 0 {
+		t.Errorf("Redis pipelines after Refresh = %d, want 0", got)
+	}
+	wantCommandNames := []string{"get"}
+	if diff := cmp.Diff(wantCommandNames, hook.singleCommandNames(), cmpopts.SortSlices(func(a, b string) bool {
+		return a < b
+	})); diff != "" {
+		t.Errorf("Redis command names after Refresh mismatch (-want +got):\n%s", diff)
+	}
+	if _, ok := status.Data()["failed_jids"]; ok {
+		t.Fatal("BatchStatus.Data()[\"failed_jids\"] exists after Refresh, want absent")
+	}
+}
+
+func TestBatchStatusRefreshFullLoadsFailedJIDsInSinglePipeline(t *testing.T) {
+	const namespace = "batch-full-status"
+	const bid = "batch-full-status-bid"
+	flushKeysBatch(t, namespace+":*")
+
+	redisClient := newTestRedisClient(t)
+	ctx := context.Background()
+	batchKey := namespace + ":batch:" + bid
+	failedKey := batchKey + ":failed"
+	state := senna.BatchState{
+		ID:        bid,
+		Total:     3,
+		Pending:   0,
+		Failures:  2,
+		Successes: 1,
+		CreatedAt: time.Now(),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal(BatchState) error = %v, want nil", err)
+	}
+	if err := redisClient.Set(ctx, batchKey, string(data), 0).Err(); err != nil {
+		t.Fatalf("Set(%q, batch state) error = %v, want nil", batchKey, err)
+	}
+	if err := redisClient.SAdd(ctx, failedKey, "jid-1", "jid-2").Err(); err != nil {
+		t.Fatalf("SAdd(%q, failed JIDs) error = %v, want nil", failedKey, err)
+	}
+
+	hook := &batchStatusCommandHook{}
+	redisClient.AddHook(hook)
+	status := senna.NewBatchStatus(redisClient, namespace, bid)
+	if err := status.RefreshFull(ctx); err != nil {
+		t.Fatalf("BatchStatus.RefreshFull(ctx) error = %v, want nil", err)
+	}
+	failedJIDs, err := status.FailedJIDs(ctx)
+	if err != nil {
+		t.Fatalf("BatchStatus.FailedJIDs(ctx) error = %v, want nil", err)
+	}
+
+	wantFailedJIDs := []string{"jid-1", "jid-2"}
+	if diff := cmp.Diff(wantFailedJIDs, failedJIDs, cmpopts.SortSlices(func(a, b string) bool {
+		return a < b
+	})); diff != "" {
+		t.Errorf("BatchStatus.FailedJIDs(ctx) mismatch (-want +got):\n%s", diff)
+	}
+	dataView := status.Data()
+	gotDataFailedJIDs, ok := dataView["failed_jids"].([]string)
+	if !ok {
+		t.Fatalf("BatchStatus.Data()[%q] = %T, want []string", "failed_jids", dataView["failed_jids"])
+	}
+	if diff := cmp.Diff(wantFailedJIDs, gotDataFailedJIDs, cmpopts.SortSlices(func(a, b string) bool {
+		return a < b
+	})); diff != "" {
+		t.Errorf("BatchStatus.Data()[%q] mismatch (-want +got):\n%s", "failed_jids", diff)
+	}
+
+	if got := hook.singleCommands.Load(); got != 0 {
+		t.Errorf("single Redis commands after hook install = %d, want 0", got)
+	}
+	if got := hook.pipelines.Load(); got != 1 {
+		t.Errorf("Redis pipelines after hook install = %d, want 1", got)
+	}
+	if got := hook.pipelineCommands.Load(); got != 2 {
+		t.Errorf("Redis pipeline command count = %d, want 2", got)
+	}
+	wantCommandNames := []string{"get", "smembers"}
+	if diff := cmp.Diff(wantCommandNames, hook.pipelineCommandNames(), cmpopts.SortSlices(func(a, b string) bool {
+		return a < b
+	})); diff != "" {
+		t.Errorf("Redis pipeline command names mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type batchStatusCommandHook struct {
+	singleCommands   atomic.Int64
+	pipelines        atomic.Int64
+	pipelineCommands atomic.Int64
+	mu               sync.Mutex
+	singleNames      []string
+	pipelineNames    []string
+}
+
+func (h *batchStatusCommandHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *batchStatusCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.singleCommands.Add(1)
+		h.mu.Lock()
+		h.singleNames = append(h.singleNames, cmd.Name())
+		h.mu.Unlock()
+		return next(ctx, cmd)
+	}
+}
+
+func (h *batchStatusCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		h.pipelines.Add(1)
+		h.pipelineCommands.Add(int64(len(cmds)))
+
+		h.mu.Lock()
+		for _, cmd := range cmds {
+			h.pipelineNames = append(h.pipelineNames, cmd.Name())
+		}
+		h.mu.Unlock()
+
+		return next(ctx, cmds)
+	}
+}
+
+func (h *batchStatusCommandHook) singleCommandNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	names := make([]string, len(h.singleNames))
+	copy(names, h.singleNames)
+	return names
+}
+
+func (h *batchStatusCommandHook) pipelineCommandNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	names := make([]string, len(h.pipelineNames))
+	copy(names, h.pipelineNames)
+	return names
 }
 
 func TestBatch_InvalidBatchStatus(t *testing.T) {
