@@ -355,6 +355,7 @@ func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.Iter
 
 // handleIterationInterrupt handles interrupt/requeue - saves state, fires OnStop, returns InterruptedError.
 func (w *Worker) handleIterationInterrupt(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) error {
+	w.preserveCancellation(ctx, state, stateKey)
 	w.updateIterationTiming(state, runStart)
 	if err := w.saveIterationStateFor(ctx, stateKey, state, "on interrupt"); err != nil {
 		return err

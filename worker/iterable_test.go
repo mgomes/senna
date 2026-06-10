@@ -415,19 +415,27 @@ func TestIterable_PeriodicCheckpointAfterCancellationReturnsInterrupted(t *testi
 	flushTestKeys(t, client, "test-iterable-cancelled-checkpoint:*")
 
 	k := keys.New("test-iterable-cancelled-checkpoint")
-	ctx, cancel := context.WithCancel(context.Background())
-	handler := &instrumentedIterableHandler{
-		testIterableHandler: newTestIterableHandler([]any{1, 2}),
-		afterProcess: func() {
-			cancel()
-			time.Sleep(5 * time.Millisecond)
-		},
-	}
-
 	w := &Worker{
 		id:    "worker-1",
 		redis: client,
 		keys:  k,
+	}
+	job := senna.NewJob("test_iterable", nil)
+	stateKey := k.IterationState(job.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1, 2}),
+		afterProcess: func() {
+			cancelledState := &senna.IterationState{
+				JobID:     job.ID,
+				Cancelled: true,
+			}
+			if err := w.saveIterationState(context.Background(), stateKey, cancelledState); err != nil {
+				t.Fatalf("saveIterationState(cancelled) error = %v, want nil", err)
+			}
+			cancel()
+			time.Sleep(5 * time.Millisecond)
+		},
 	}
 
 	var stopCalled atomic.Bool
@@ -442,7 +450,6 @@ func TestIterable_PeriodicCheckpointAfterCancellationReturnsInterrupted(t *testi
 			},
 		},
 	}
-	job := senna.NewJob("test_iterable", nil)
 
 	err := w.processIterable(ctx, job, handler, opts)
 	if !isInterruptedError(err) {
@@ -468,6 +475,9 @@ func TestIterable_PeriodicCheckpointAfterCancellationReturnsInterrupted(t *testi
 	}
 	if state.TotalItems != 1 {
 		t.Errorf("total items = %d, want 1", state.TotalItems)
+	}
+	if !state.Cancelled {
+		t.Error("cancelled = false, want true")
 	}
 }
 
