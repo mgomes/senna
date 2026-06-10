@@ -212,9 +212,17 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		select {
 		case <-saveTicker.C:
 			if needsSave {
+				if ctx.Err() != nil {
+					saveCtx := context.WithoutCancel(ctx)
+					return w.handleIterationInterrupt(saveCtx, state, stateKey, runStart, opts, job)
+				}
 				w.preserveCancellation(ctx, state, stateKey)
 				runStart = w.updateIterationTiming(state, runStart)
 				if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "during cursor checkpoint"); saveErr != nil {
+					if ctx.Err() != nil {
+						saveCtx := context.WithoutCancel(ctx)
+						return w.handleIterationInterrupt(saveCtx, state, stateKey, runStart, opts, job)
+					}
 					return saveErr
 				}
 			}
