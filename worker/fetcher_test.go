@@ -328,6 +328,15 @@ func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
 	}
 }
 
+func TestFetcher_MarkFinalizationScriptUsesDirectListLookup(t *testing.T) {
+	if strings.Contains(markJobFinalizationLua, "LRANGE") {
+		t.Fatal("mark job finalization script contains LRANGE, want direct list lookup")
+	}
+	if !strings.Contains(markJobFinalizationLua, "LPOS") {
+		t.Fatal("mark job finalization script does not contain LPOS")
+	}
+}
+
 func TestFetcher_MarkFinalizationIgnoresBadQueueTypeForInFlightHit(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-mark-finalization-queue-type:*")
