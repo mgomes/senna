@@ -4,24 +4,17 @@ if in_flight_type ~= "none" and in_flight_type ~= "list" then
 end
 
 local function replace_first(key)
-	local jobs = redis.call("LRANGE", key, 0, -1)
-	for index, data in ipairs(jobs) do
-		if data == ARGV[1] then
-			redis.call("LSET", key, index - 1, ARGV[2])
-			return true
-		end
+	local index = redis.call("LPOS", key, ARGV[1])
+	if index ~= false and index ~= nil then
+		redis.call("LSET", key, index, ARGV[2])
+		return true
 	end
 	return false
 end
 
 local function contains_finalized(key)
-	local jobs = redis.call("LRANGE", key, 0, -1)
-	for _, data in ipairs(jobs) do
-		if data == ARGV[2] then
-			return true
-		end
-	end
-	return false
+	local index = redis.call("LPOS", key, ARGV[2])
+	return index ~= false and index ~= nil
 end
 
 if replace_first(KEYS[1]) then
