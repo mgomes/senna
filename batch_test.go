@@ -373,7 +373,13 @@ func TestBatch_Status(t *testing.T) {
 	}
 }
 
-func TestBatchStatusJoin_WithBatchJoinInterval(t *testing.T) {
+func TestBatchStatusJoinPreservesMethodSignature(t *testing.T) {
+	var _ interface {
+		Join(context.Context) error
+	} = (*senna.BatchStatus)(nil)
+}
+
+func TestBatchStatusJoinWithInterval(t *testing.T) {
 	const namespace = "batch-join-interval"
 	const bid = "batch-join-interval-bid"
 	flushKeysBatch(t, namespace+":*")
@@ -412,8 +418,8 @@ func TestBatchStatusJoin_WithBatchJoinInterval(t *testing.T) {
 
 	joinCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	if err := status.Join(joinCtx, senna.WithBatchJoinInterval(10*time.Millisecond)); err != nil {
-		t.Fatalf("BatchStatus.Join(ctx, WithBatchJoinInterval(10ms)) error = %v, want nil", err)
+	if err := status.JoinWithInterval(joinCtx, 10*time.Millisecond); err != nil {
+		t.Fatalf("BatchStatus.JoinWithInterval(ctx, 10ms) error = %v, want nil", err)
 	}
 
 	if err := <-updateErr; err != nil {

@@ -51,20 +51,6 @@ type BatchStatus struct {
 
 const defaultBatchJoinInterval = 500 * time.Millisecond
 
-type batchJoinConfig struct {
-	pollInterval time.Duration
-}
-
-// BatchJoinOption configures BatchStatus.Join.
-type BatchJoinOption func(*batchJoinConfig)
-
-// WithBatchJoinInterval sets how often Join refreshes batch state.
-func WithBatchJoinInterval(d time.Duration) BatchJoinOption {
-	return func(cfg *batchJoinConfig) {
-		cfg.pollInterval = d
-	}
-}
-
 // NewBatchStatus creates a BatchStatus for querying a batch's state.
 func NewBatchStatus(redis redis.Cmdable, namespace, bid string) *BatchStatus {
 	k := keys.New(namespace)
@@ -198,16 +184,21 @@ func (bs *BatchStatus) Data() map[string]any {
 }
 
 // Join blocks until the batch is complete or the context is cancelled.
-func (bs *BatchStatus) Join(ctx context.Context, opts ...BatchJoinOption) error {
-	cfg := batchJoinConfig{pollInterval: defaultBatchJoinInterval}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-	if cfg.pollInterval <= 0 {
-		cfg.pollInterval = defaultBatchJoinInterval
+func (bs *BatchStatus) Join(ctx context.Context) error {
+	return bs.join(ctx, defaultBatchJoinInterval)
+}
+
+// JoinWithInterval blocks until the batch is complete, refreshing at interval.
+func (bs *BatchStatus) JoinWithInterval(ctx context.Context, interval time.Duration) error {
+	return bs.join(ctx, interval)
+}
+
+func (bs *BatchStatus) join(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = defaultBatchJoinInterval
 	}
 
-	ticker := time.NewTicker(cfg.pollInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
