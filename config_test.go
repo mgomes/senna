@@ -23,6 +23,9 @@ func TestRedisConfig_Options_Defaults(t *testing.T) {
 	if opts.DB != 0 {
 		t.Errorf("expected DB 0, got %d", opts.DB)
 	}
+	if !opts.ContextTimeoutEnabled {
+		t.Error("expected ContextTimeoutEnabled to be true")
+	}
 }
 
 func TestRedisConfig_Options_AllFields(t *testing.T) {
@@ -64,6 +67,9 @@ func TestRedisConfig_Options_AllFields(t *testing.T) {
 	}
 	if opts.WriteTimeout != 3*time.Second {
 		t.Errorf("expected WriteTimeout 3s, got %v", opts.WriteTimeout)
+	}
+	if !opts.ContextTimeoutEnabled {
+		t.Error("expected ContextTimeoutEnabled to be true")
 	}
 	if opts.TLSConfig == nil {
 		t.Fatal("expected TLSConfig to be set")

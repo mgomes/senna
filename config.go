@@ -33,10 +33,11 @@ type RedisConfig struct {
 // Options converts the RedisConfig into go-redis client options.
 func (c RedisConfig) Options() *redis.Options {
 	opts := &redis.Options{
-		Addr:      c.Addr,
-		Password:  c.Password,
-		DB:        c.DB,
-		TLSConfig: c.TLSConfig,
+		Addr:                  c.Addr,
+		Password:              c.Password,
+		DB:                    c.DB,
+		TLSConfig:             c.TLSConfig,
+		ContextTimeoutEnabled: true,
 	}
 	if c.PoolSize > 0 {
 		opts.PoolSize = c.PoolSize
