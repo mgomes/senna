@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/mgomes/senna"
@@ -26,6 +27,8 @@ var (
 	ErrUniqueKeyInBulk = errors.New("unique keys are not supported in bulk enqueue")
 	// ErrBatchSelfParent indicates a batch was configured as its own parent.
 	ErrBatchSelfParent = errors.New("batch cannot be its own parent")
+	// ErrInvalidQueueName indicates an enqueue target queue is empty or whitespace.
+	ErrInvalidQueueName = errors.New("queue name must not be empty or whitespace")
 )
 
 // Client enqueues jobs and exposes batch and iteration helpers.
@@ -177,6 +180,9 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	if err := validateQueueName(cfg.queue); err != nil {
+		return nil, err
+	}
 
 	job := senna.NewJob(jobType, args)
 	job.Queue = cfg.queue
@@ -249,6 +255,9 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if err := validateQueueName(cfg.queue); err != nil {
+		return nil, err
 	}
 
 	// Unique keys are not supported in bulk operations
@@ -466,11 +475,26 @@ func uniqueTTLMillis(ttl time.Duration) int64 {
 	return int64(ms)
 }
 
+func validateQueueName(queue string) error {
+	if strings.TrimSpace(queue) == "" {
+		return fmt.Errorf("%w: %q", ErrInvalidQueueName, queue)
+	}
+	return nil
+}
+
 // EnqueueBatch stores batch state and enqueues the batch's jobs.
 func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 	// Validation
 	if b.err != nil {
 		return b.err
+	}
+	emptyBatch := len(b.Jobs) == 0
+	callbackQueue := b.CallbackQueue
+	if callbackQueue == "" {
+		callbackQueue = c.settings.DefaultQueue
+	}
+	if err := c.validateBatchQueueNames(b, callbackQueue); err != nil {
+		return err
 	}
 	if b.ParentID != "" && b.ParentID == b.ID {
 		return ErrBatchSelfParent
@@ -482,12 +506,6 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 			}
 			return err
 		}
-	}
-
-	emptyBatch := len(b.Jobs) == 0
-	callbackQueue := b.CallbackQueue
-	if callbackQueue == "" {
-		callbackQueue = c.settings.DefaultQueue
 	}
 
 	// Pre-marshal jobs to fail fast before any Redis changes
@@ -527,6 +545,21 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 		}
 	}
 
+	return nil
+}
+
+func (c *Client) validateBatchQueueNames(b *Batch, callbackQueue string) error {
+	for _, job := range b.Jobs {
+		if err := validateQueueName(job.Queue); err != nil {
+			return fmt.Errorf("batch job %s queue: %w", job.ID, err)
+		}
+	}
+	if b.OnComplete == nil && b.OnSuccess == nil && b.OnDeath == nil {
+		return nil
+	}
+	if err := validateQueueName(callbackQueue); err != nil {
+		return fmt.Errorf("batch callback queue: %w", err)
+	}
 	return nil
 }
 
