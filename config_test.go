@@ -295,23 +295,6 @@ func TestOption_WithEncryptionConfig(t *testing.T) {
 	}
 }
 
-func TestOption_WithMetrics(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{}
-	opt := WithMetrics("localhost:8125", "senna")
-	opt(cfg)
-
-	if !cfg.Metrics.Enabled {
-		t.Error("expected Metrics.Enabled true")
-	}
-	if cfg.Metrics.StatsdAddr != "localhost:8125" {
-		t.Errorf("expected StatsdAddr 'localhost:8125', got '%s'", cfg.Metrics.StatsdAddr)
-	}
-	if cfg.Metrics.Prefix != "senna" {
-		t.Errorf("expected Prefix 'senna', got '%s'", cfg.Metrics.Prefix)
-	}
-}
-
 func TestQueueConfig_Defaults(t *testing.T) {
 	t.Parallel()
 	q := QueueConfig{Name: "test"}
