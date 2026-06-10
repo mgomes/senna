@@ -18,6 +18,8 @@ import (
 )
 
 func TestWorker_New_DefaultSettings(t *testing.T) {
+	defaults := senna.DefaultWorkerSettings()
+
 	w, err := New(&Config{
 		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-default",
@@ -36,19 +38,46 @@ func TestWorker_New_DefaultSettings(t *testing.T) {
 	if w.config.Settings.Queues[0].Name != "default" {
 		t.Errorf("expected default queue 'default', got '%s'", w.config.Settings.Queues[0].Name)
 	}
+	if w.config.Settings.ReaperInterval != defaults.ReaperInterval {
+		t.Errorf("expected ReaperInterval %v, got %v", defaults.ReaperInterval, w.config.Settings.ReaperInterval)
+	}
+	if w.config.Settings.SequentialLockTTL != defaults.SequentialLockTTL {
+		t.Errorf("expected SequentialLockTTL %v, got %v", defaults.SequentialLockTTL, w.config.Settings.SequentialLockTTL)
+	}
+	if w.fetcher.sequentialLockTTL != defaults.SequentialLockTTL {
+		t.Errorf("expected fetcher sequentialLockTTL %v, got %v", defaults.SequentialLockTTL, w.fetcher.sequentialLockTTL)
+	}
+	if w.sequentialLockRenewEvery != defaults.SequentialLockRenewInterval {
+		t.Errorf("expected sequentialLockRenewEvery %v, got %v", defaults.SequentialLockRenewInterval, w.sequentialLockRenewEvery)
+	}
+	if w.config.Settings.PeriodicPollInterval != defaults.PeriodicPollInterval {
+		t.Errorf("expected PeriodicPollInterval %v, got %v", defaults.PeriodicPollInterval, w.config.Settings.PeriodicPollInterval)
+	}
 }
 
 func TestWorker_New_WithSettings(t *testing.T) {
+	const (
+		reaperInterval              = 45 * time.Second
+		sequentialLockTTL           = 2 * time.Minute
+		sequentialLockRenewInterval = 20 * time.Second
+		periodicPollInterval        = time.Minute
+	)
+
 	w, err := New(&Config{
 		Redis:     getTestRedisConfig(),
 		Namespace: "test-worker-settings",
 		Settings: senna.WorkerSettings{
-			Concurrency:     5,
-			Queues:          []senna.QueueConfig{{Name: "high", Priority: 10}, {Name: "low", Priority: 1}},
-			ShutdownTimeout: time.Minute,
-			PollInterval:    50 * time.Millisecond,
-			BlockTimeout:    3 * time.Second,
-			HeartbeatRate:   time.Second,
+			Concurrency:                 5,
+			Queues:                      []senna.QueueConfig{{Name: "high", Priority: 10}, {Name: "low", Priority: 1}},
+			ShutdownTimeout:             time.Minute,
+			PollInterval:                50 * time.Millisecond,
+			BlockTimeout:                3 * time.Second,
+			HeartbeatRate:               time.Second,
+			ReaperInterval:              reaperInterval,
+			SequentialLockTTL:           sequentialLockTTL,
+			SequentialLockRenewInterval: sequentialLockRenewInterval,
+			PeriodicPollInterval:        periodicPollInterval,
+			PeriodicEnabled:             true,
 		},
 	})
 	if err != nil {
@@ -64,6 +93,27 @@ func TestWorker_New_WithSettings(t *testing.T) {
 	}
 	if w.config.Settings.BlockTimeout != 3*time.Second {
 		t.Errorf("expected BlockTimeout 3s, got %v", w.config.Settings.BlockTimeout)
+	}
+	if w.config.Settings.ReaperInterval != reaperInterval {
+		t.Errorf("expected ReaperInterval %v, got %v", reaperInterval, w.config.Settings.ReaperInterval)
+	}
+	if w.config.Settings.SequentialLockTTL != sequentialLockTTL {
+		t.Errorf("expected SequentialLockTTL %v, got %v", sequentialLockTTL, w.config.Settings.SequentialLockTTL)
+	}
+	if w.fetcher.sequentialLockTTL != sequentialLockTTL {
+		t.Errorf("expected fetcher sequentialLockTTL %v, got %v", sequentialLockTTL, w.fetcher.sequentialLockTTL)
+	}
+	if w.sequentialLockRenewEvery != sequentialLockRenewInterval {
+		t.Errorf("expected sequentialLockRenewEvery %v, got %v", sequentialLockRenewInterval, w.sequentialLockRenewEvery)
+	}
+	if w.config.Settings.PeriodicPollInterval != periodicPollInterval {
+		t.Errorf("expected PeriodicPollInterval %v, got %v", periodicPollInterval, w.config.Settings.PeriodicPollInterval)
+	}
+	if w.periodic == nil {
+		t.Fatal("expected periodic scheduler to be configured")
+	}
+	if w.periodic.PollInterval() != periodicPollInterval {
+		t.Errorf("expected periodic scheduler poll interval %v, got %v", periodicPollInterval, w.periodic.PollInterval())
 	}
 }
 
@@ -106,6 +156,18 @@ func TestWorker_New_PartialSettings(t *testing.T) {
 	}
 	if w.config.Settings.ReaperOperationTimeout != defaults.ReaperOperationTimeout {
 		t.Errorf("expected ReaperOperationTimeout %v, got %v", defaults.ReaperOperationTimeout, w.config.Settings.ReaperOperationTimeout)
+	}
+	if w.config.Settings.ReaperInterval != defaults.ReaperInterval {
+		t.Errorf("expected ReaperInterval %v, got %v", defaults.ReaperInterval, w.config.Settings.ReaperInterval)
+	}
+	if w.config.Settings.SequentialLockTTL != defaults.SequentialLockTTL {
+		t.Errorf("expected SequentialLockTTL %v, got %v", defaults.SequentialLockTTL, w.config.Settings.SequentialLockTTL)
+	}
+	if w.config.Settings.SequentialLockRenewInterval != defaults.SequentialLockRenewInterval {
+		t.Errorf("expected SequentialLockRenewInterval %v, got %v", defaults.SequentialLockRenewInterval, w.config.Settings.SequentialLockRenewInterval)
+	}
+	if w.config.Settings.PeriodicPollInterval != defaults.PeriodicPollInterval {
+		t.Errorf("expected PeriodicPollInterval %v, got %v", defaults.PeriodicPollInterval, w.config.Settings.PeriodicPollInterval)
 	}
 	if !w.config.Settings.PeriodicEnabled {
 		t.Error("expected PeriodicEnabled to remain true")
@@ -156,6 +218,87 @@ func TestWorkerBlockTimeoutLeavesShutdownHeadroom(t *testing.T) {
 			t.Parallel()
 			if got := workerBlockTimeout(tt.settings); got != tt.want {
 				t.Errorf("workerBlockTimeout(%+v) = %v, want %v", tt.settings, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeWorkerSettings_SequentialLockRenewInterval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings senna.WorkerSettings
+		want     time.Duration
+	}{
+		{
+			name:     "default",
+			settings: senna.WorkerSettings{},
+			want:     senna.DefaultWorkerSettings().SequentialLockRenewInterval,
+		},
+		{
+			name: "explicit below ttl",
+			settings: senna.WorkerSettings{
+				SequentialLockTTL:           time.Minute,
+				SequentialLockRenewInterval: 20 * time.Second,
+			},
+			want: 20 * time.Second,
+		},
+		{
+			name: "zero with shorter ttl derives safe interval",
+			settings: senna.WorkerSettings{
+				SequentialLockTTL: 3 * time.Second,
+			},
+			want: time.Second,
+		},
+		{
+			name: "too large derives safe interval",
+			settings: senna.WorkerSettings{
+				SequentialLockTTL:           6 * time.Second,
+				SequentialLockRenewInterval: 6 * time.Second,
+			},
+			want: 2 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeWorkerSettings(tt.settings).SequentialLockRenewInterval
+			if got != tt.want {
+				t.Errorf("normalizeWorkerSettings(%+v).SequentialLockRenewInterval = %v, want %v", tt.settings, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkerReaperInterval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings senna.WorkerSettings
+		want     time.Duration
+	}{
+		{
+			name:     "default",
+			settings: senna.WorkerSettings{},
+			want:     senna.DefaultWorkerSettings().ReaperInterval,
+		},
+		{
+			name: "explicit",
+			settings: senna.WorkerSettings{
+				ReaperInterval: 45 * time.Second,
+			},
+			want: 45 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := workerReaperInterval(tt.settings); got != tt.want {
+				t.Errorf("workerReaperInterval(%+v) = %v, want %v", tt.settings, got, tt.want)
 			}
 		})
 	}

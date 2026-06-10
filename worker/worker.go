@@ -78,10 +78,17 @@ func New(cfg *Config) (*Worker, error) {
 		keys:     k,
 		config:   cfg,
 		handlers: newHandlerRegistry(),
-		fetcher:  newFetcher(client, k, cfg.Settings.Queues, cfg.Settings.PollInterval, cfg.Settings.StrictPriority),
-		stopCh:   make(chan struct{}),
+		fetcher: newFetcherWithSequentialLockTTL(
+			client,
+			k,
+			cfg.Settings.Queues,
+			cfg.Settings.PollInterval,
+			cfg.Settings.StrictPriority,
+			cfg.Settings.SequentialLockTTL,
+		),
+		stopCh: make(chan struct{}),
 
-		sequentialLockRenewEvery: sequentialLockRenewInterval,
+		sequentialLockRenewEvery: cfg.Settings.SequentialLockRenewInterval,
 	}
 
 	if enc != nil {
@@ -94,7 +101,11 @@ func New(cfg *Config) (*Worker, error) {
 	w.Use(senna.RecoveryMiddleware())
 
 	if cfg.Settings.PeriodicEnabled {
-		w.periodic = periodic.NewScheduler(client, k)
+		w.periodic = periodic.NewScheduler(
+			client,
+			k,
+			periodic.WithPollInterval(cfg.Settings.PeriodicPollInterval),
+		)
 	}
 
 	return w, nil
@@ -128,6 +139,24 @@ func normalizeWorkerSettings(settings senna.WorkerSettings) senna.WorkerSettings
 	}
 	if settings.ReaperOperationTimeout <= 0 {
 		settings.ReaperOperationTimeout = defaults.ReaperOperationTimeout
+	}
+	if settings.ReaperInterval <= 0 {
+		settings.ReaperInterval = defaults.ReaperInterval
+	}
+	if settings.SequentialLockTTL <= 0 {
+		settings.SequentialLockTTL = defaults.SequentialLockTTL
+	}
+	if settings.SequentialLockRenewInterval <= 0 {
+		settings.SequentialLockRenewInterval = defaults.SequentialLockRenewInterval
+	}
+	if settings.SequentialLockRenewInterval >= settings.SequentialLockTTL {
+		settings.SequentialLockRenewInterval = settings.SequentialLockTTL / 3
+		if settings.SequentialLockRenewInterval <= 0 {
+			settings.SequentialLockRenewInterval = settings.SequentialLockTTL
+		}
+	}
+	if settings.PeriodicPollInterval <= 0 {
+		settings.PeriodicPollInterval = defaults.PeriodicPollInterval
 	}
 
 	return settings
@@ -759,15 +788,13 @@ func (w *Worker) removeHeartbeat(ctx context.Context) error {
 	return nil
 }
 
-const sequentialLockRenewInterval = sequentialLockTTL / 3
-
 // sequentialLockRenewer keeps sequential locks alive until its context is cancelled.
 // Run gives it a context that survives graceful shutdown but is cancelled once
 // workers finish or ShutdownTimeout expires.
 func (w *Worker) sequentialLockRenewer(ctx context.Context) {
 	interval := w.sequentialLockRenewEvery
 	if interval <= 0 {
-		interval = sequentialLockRenewInterval
+		interval = senna.DefaultWorkerSettings().SequentialLockRenewInterval
 	}
 
 	ticker := time.NewTicker(interval)
@@ -786,7 +813,7 @@ func (w *Worker) sequentialLockRenewer(ctx context.Context) {
 func (w *Worker) scheduler(ctx context.Context) {
 	interval := w.config.Settings.ScheduledPollInterval
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = senna.DefaultWorkerSettings().ScheduledPollInterval
 	}
 
 	ticker := time.NewTicker(interval)
@@ -840,7 +867,7 @@ func (w *Worker) enqueueRetries(ctx context.Context) error {
 }
 
 func (w *Worker) reaper(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(workerReaperInterval(w.config.Settings))
 	defer ticker.Stop()
 
 	for {
@@ -851,6 +878,14 @@ func (w *Worker) reaper(ctx context.Context) {
 			w.requeueOrphanedJobs(ctx)
 		}
 	}
+}
+
+func workerReaperInterval(settings senna.WorkerSettings) time.Duration {
+	interval := settings.ReaperInterval
+	if interval <= 0 {
+		return senna.DefaultWorkerSettings().ReaperInterval
+	}
+	return interval
 }
 
 // workerHeartbeatTimeout defines how long a worker can go without heartbeating

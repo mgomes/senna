@@ -1138,7 +1138,7 @@ func TestFetcher_Sequential_DiscardClaimedPayloadIgnoresCancellation(t *testing.
 	if err := client.LPush(ctx, k.InFlight(workerID), payload).Err(); err != nil {
 		t.Fatalf("LPush(%q) error = %v, want nil", k.InFlight(workerID), err)
 	}
-	if err := client.Set(ctx, k.SequentialLock("transforms"), workerID, sequentialLockTTL).Err(); err != nil {
+	if err := client.Set(ctx, k.SequentialLock("transforms"), workerID, senna.DefaultWorkerSettings().SequentialLockTTL).Err(); err != nil {
 		t.Fatalf("Set(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
 	}
 
@@ -1269,6 +1269,58 @@ func TestFetcher_Sequential_LockRenewal(t *testing.T) {
 
 		// Release lock to allow next fetch (simulates ack/nack completing)
 		f.ReleaseSequentialLock(ctx, "worker-1", "transforms")
+	}
+}
+
+func TestFetcher_SequentialLockTTL_Configurable(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-custom-ttl:*")
+
+	k := keys.New("test-seq-custom-ttl")
+	sequentialLockTTL := 2500 * time.Millisecond
+
+	f := newFetcherWithSequentialLockTTL(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false, sequentialLockTTL)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	if err := client.LPush(ctx, k.Queue("transforms"), string(data)).Err(); err != nil {
+		t.Fatalf("LPush(%q) error = %v, want nil", k.Queue("transforms"), err)
+	}
+
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("Fetch(ctx, worker-1) error = %v, want nil", err)
+	}
+	if fetched == nil {
+		t.Fatal("Fetch(ctx, worker-1) = nil, want job")
+	}
+
+	ttl, err := client.PTTL(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("PTTL(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+	if ttl <= 0 || ttl > sequentialLockTTL {
+		t.Errorf("PTTL(%q) = %v, want positive duration no greater than %v", k.SequentialLock("transforms"), ttl, sequentialLockTTL)
+	}
+
+	if err := client.PExpire(ctx, k.SequentialLock("transforms"), 100*time.Millisecond).Err(); err != nil {
+		t.Fatalf("PExpire(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+	f.RenewSequentialLocks(ctx, "worker-1")
+
+	ttl, err = client.PTTL(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("PTTL(%q) after renewal error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+	if ttl <= time.Second || ttl > sequentialLockTTL {
+		t.Errorf("PTTL(%q) after renewal = %v, want renewed duration no greater than %v", k.SequentialLock("transforms"), ttl, sequentialLockTTL)
 	}
 }
 

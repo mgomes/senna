@@ -130,6 +130,18 @@ func TestDefaultWorkerSettings(t *testing.T) {
 	if settings.ReaperOperationTimeout != 5*time.Second {
 		t.Errorf("expected ReaperOperationTimeout 5s, got %v", settings.ReaperOperationTimeout)
 	}
+	if settings.ReaperInterval != 30*time.Second {
+		t.Errorf("expected ReaperInterval 30s, got %v", settings.ReaperInterval)
+	}
+	if settings.SequentialLockTTL != 30*time.Second {
+		t.Errorf("expected SequentialLockTTL 30s, got %v", settings.SequentialLockTTL)
+	}
+	if settings.SequentialLockRenewInterval != 10*time.Second {
+		t.Errorf("expected SequentialLockRenewInterval 10s, got %v", settings.SequentialLockRenewInterval)
+	}
+	if settings.PeriodicPollInterval != 15*time.Second {
+		t.Errorf("expected PeriodicPollInterval 15s, got %v", settings.PeriodicPollInterval)
+	}
 }
 
 func TestDefaultClientSettings(t *testing.T) {
@@ -207,6 +219,50 @@ func TestOption_WithReaperOperationTimeout(t *testing.T) {
 
 	if cfg.Worker.ReaperOperationTimeout != 2*time.Second {
 		t.Errorf("expected ReaperOperationTimeout 2s, got %v", cfg.Worker.ReaperOperationTimeout)
+	}
+}
+
+func TestOption_WithReaperInterval(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithReaperInterval(45 * time.Second)
+	opt(cfg)
+
+	if cfg.Worker.ReaperInterval != 45*time.Second {
+		t.Errorf("expected ReaperInterval 45s, got %v", cfg.Worker.ReaperInterval)
+	}
+}
+
+func TestOption_WithSequentialLockTTL(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithSequentialLockTTL(2 * time.Minute)
+	opt(cfg)
+
+	if cfg.Worker.SequentialLockTTL != 2*time.Minute {
+		t.Errorf("expected SequentialLockTTL 2m, got %v", cfg.Worker.SequentialLockTTL)
+	}
+}
+
+func TestOption_WithSequentialLockRenewInterval(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithSequentialLockRenewInterval(20 * time.Second)
+	opt(cfg)
+
+	if cfg.Worker.SequentialLockRenewInterval != 20*time.Second {
+		t.Errorf("expected SequentialLockRenewInterval 20s, got %v", cfg.Worker.SequentialLockRenewInterval)
+	}
+}
+
+func TestOption_WithPeriodicPollInterval(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithPeriodicPollInterval(time.Minute)
+	opt(cfg)
+
+	if cfg.Worker.PeriodicPollInterval != time.Minute {
+		t.Errorf("expected PeriodicPollInterval 1m, got %v", cfg.Worker.PeriodicPollInterval)
 	}
 }
 

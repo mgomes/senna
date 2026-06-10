@@ -59,16 +59,20 @@ func (c RedisConfig) Options() *redis.Options {
 
 // WorkerSettings configures worker runtime behavior.
 type WorkerSettings struct {
-	Concurrency            int
-	Queues                 []QueueConfig
-	ShutdownTimeout        time.Duration
-	PollInterval           time.Duration
-	BlockTimeout           time.Duration
-	ScheduledPollInterval  time.Duration
-	HeartbeatRate          time.Duration
-	ReaperOperationTimeout time.Duration
-	PeriodicEnabled        bool
-	StrictPriority         bool // If true, always process higher priority queues first (can starve lower priority)
+	Concurrency                 int
+	Queues                      []QueueConfig
+	ShutdownTimeout             time.Duration
+	PollInterval                time.Duration
+	BlockTimeout                time.Duration
+	ScheduledPollInterval       time.Duration
+	HeartbeatRate               time.Duration
+	ReaperOperationTimeout      time.Duration
+	ReaperInterval              time.Duration
+	SequentialLockTTL           time.Duration
+	SequentialLockRenewInterval time.Duration
+	PeriodicPollInterval        time.Duration
+	PeriodicEnabled             bool
+	StrictPriority              bool // If true, always process higher priority queues first (can starve lower priority)
 }
 
 const (
@@ -81,14 +85,18 @@ const (
 // DefaultWorkerSettings returns the default worker settings.
 func DefaultWorkerSettings() WorkerSettings {
 	return WorkerSettings{
-		Concurrency:            10,
-		Queues:                 []QueueConfig{{Name: DefaultQueueName, Priority: 1}},
-		ShutdownTimeout:        30 * time.Second,
-		PollInterval:           100 * time.Millisecond,
-		BlockTimeout:           2 * time.Second,
-		ScheduledPollInterval:  5 * time.Second,
-		HeartbeatRate:          5 * time.Second,
-		ReaperOperationTimeout: 5 * time.Second,
+		Concurrency:                 10,
+		Queues:                      []QueueConfig{{Name: DefaultQueueName, Priority: 1}},
+		ShutdownTimeout:             30 * time.Second,
+		PollInterval:                100 * time.Millisecond,
+		BlockTimeout:                2 * time.Second,
+		ScheduledPollInterval:       5 * time.Second,
+		HeartbeatRate:               5 * time.Second,
+		ReaperOperationTimeout:      5 * time.Second,
+		ReaperInterval:              30 * time.Second,
+		SequentialLockTTL:           30 * time.Second,
+		SequentialLockRenewInterval: 10 * time.Second,
+		PeriodicPollInterval:        15 * time.Second,
 	}
 }
 
@@ -164,6 +172,34 @@ func WithShutdownTimeout(d time.Duration) Option {
 func WithReaperOperationTimeout(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.ReaperOperationTimeout = d
+	}
+}
+
+// WithReaperInterval sets how often workers scan for orphaned in-flight jobs.
+func WithReaperInterval(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.ReaperInterval = d
+	}
+}
+
+// WithSequentialLockTTL sets how long a sequential queue lock remains valid.
+func WithSequentialLockTTL(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.SequentialLockTTL = d
+	}
+}
+
+// WithSequentialLockRenewInterval sets how often workers renew held sequential queue locks.
+func WithSequentialLockRenewInterval(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.SequentialLockRenewInterval = d
+	}
+}
+
+// WithPeriodicPollInterval sets how often workers check periodic job schedules.
+func WithPeriodicPollInterval(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.PeriodicPollInterval = d
 	}
 }
 
