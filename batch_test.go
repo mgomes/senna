@@ -259,7 +259,7 @@ func TestBatch_DeathCallback(t *testing.T) {
 
 	w.Register("failing_job", func(ctx context.Context, job *senna.Job) error {
 		return errors.New("intentional failure")
-	}, worker.WithMaxRetries(0)) // No retries - immediate death
+	}, worker.WithJobMaxRetries(0)) // No retries - immediate death
 
 	w.Register("on_complete", func(ctx context.Context, job *senna.Job) error {
 		completeCallbackCalled.Store(true)

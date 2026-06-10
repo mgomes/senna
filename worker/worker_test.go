@@ -865,7 +865,7 @@ func TestWorker_Register_WithOptions(t *testing.T) {
 	w.Register("test_job", func(ctx context.Context, job *senna.Job) error {
 		called = true
 		return nil
-	}, WithMaxRetries(3), WithJobTimeout(time.Second))
+	}, WithJobMaxRetries(3), WithJobTimeout(time.Second))
 
 	job := senna.NewJob("test_job", nil)
 	opts, _ := w.handlers.process(context.Background(), job)
@@ -1009,11 +1009,22 @@ func TestWorker_HeartbeatHelpersReturnRedisErrors(t *testing.T) {
 }
 
 func TestWorker_JobOptions(t *testing.T) {
+	limiter := &testRateLimiter{}
+
 	tests := []struct {
 		name     string
 		option   JobOption
 		validate func(*testing.T, *JobOptions)
 	}{
+		{
+			name:   "WithJobMaxRetries",
+			option: WithJobMaxRetries(5),
+			validate: func(t *testing.T, opts *JobOptions) {
+				if opts.MaxRetries != 5 {
+					t.Errorf("expected MaxRetries 5, got %d", opts.MaxRetries)
+				}
+			},
+		},
 		{
 			name:   "WithMaxRetries",
 			option: WithMaxRetries(5),
@@ -1056,11 +1067,78 @@ func TestWorker_JobOptions(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:   "WithJobRateLimiter",
+			option: WithJobRateLimiter(limiter),
+			validate: func(t *testing.T, opts *JobOptions) {
+				if opts.RateLimiter != limiter {
+					t.Errorf("expected RateLimiter %v, got %v", limiter, opts.RateLimiter)
+				}
+			},
+		},
+		{
+			name:   "WithRateLimiter",
+			option: WithRateLimiter(limiter),
+			validate: func(t *testing.T, opts *JobOptions) {
+				if opts.RateLimiter != limiter {
+					t.Errorf("expected RateLimiter %v, got %v", limiter, opts.RateLimiter)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := &JobOptions{
+				MaxRetries:   25,
+				RetryBackoff: senna.DefaultBackoff(),
+			}
+			tt.option(opts)
+			tt.validate(t, opts)
+		})
+	}
+}
+
+func TestWorker_IterableJobOptions(t *testing.T) {
+	limiter := &testRateLimiter{}
+
+	tests := []struct {
+		name     string
+		option   IterableJobOption
+		validate func(*testing.T, *IterableJobOptions)
+	}{
+		{
+			name:   "WithIterableMaxRetries",
+			option: WithIterableMaxRetries(2),
+			validate: func(t *testing.T, opts *IterableJobOptions) {
+				if opts.MaxRetries != 2 {
+					t.Errorf("expected MaxRetries 2, got %d", opts.MaxRetries)
+				}
+			},
+		},
+		{
+			name:   "WithIterableTimeout",
+			option: WithIterableTimeout(3 * time.Second),
+			validate: func(t *testing.T, opts *IterableJobOptions) {
+				if opts.Timeout != 3*time.Second {
+					t.Errorf("expected Timeout 3s, got %v", opts.Timeout)
+				}
+			},
+		},
+		{
+			name:   "WithIterableRateLimiter",
+			option: WithIterableRateLimiter(limiter),
+			validate: func(t *testing.T, opts *IterableJobOptions) {
+				if opts.RateLimiter != limiter {
+					t.Errorf("expected RateLimiter %v, got %v", limiter, opts.RateLimiter)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &IterableJobOptions{
 				MaxRetries:   25,
 				RetryBackoff: senna.DefaultBackoff(),
 			}
@@ -1092,7 +1170,7 @@ func TestWorker_ProcessJob_HandlerError(t *testing.T) {
 
 	w.Register("failing_job", func(ctx context.Context, job *senna.Job) error {
 		return errors.New("job failed")
-	}, WithMaxRetries(1))
+	}, WithJobMaxRetries(1))
 
 	job := senna.NewJob("failing_job", nil)
 	opts, err := w.handlers.process(context.Background(), job)
