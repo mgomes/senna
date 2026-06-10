@@ -63,6 +63,7 @@ type WorkerSettings struct {
 	Queues                 []QueueConfig
 	ShutdownTimeout        time.Duration
 	PollInterval           time.Duration
+	BlockTimeout           time.Duration
 	ScheduledPollInterval  time.Duration
 	HeartbeatRate          time.Duration
 	ReaperOperationTimeout time.Duration
@@ -84,6 +85,7 @@ func DefaultWorkerSettings() WorkerSettings {
 		Queues:                 []QueueConfig{{Name: DefaultQueueName, Priority: 1}},
 		ShutdownTimeout:        30 * time.Second,
 		PollInterval:           100 * time.Millisecond,
+		BlockTimeout:           2 * time.Second,
 		ScheduledPollInterval:  5 * time.Second,
 		HeartbeatRate:          5 * time.Second,
 		ReaperOperationTimeout: 5 * time.Second,
@@ -162,6 +164,13 @@ func WithShutdownTimeout(d time.Duration) Option {
 func WithReaperOperationTimeout(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.ReaperOperationTimeout = d
+	}
+}
+
+// WithBlockTimeout sets how long a worker can block in Redis waiting for jobs.
+func WithBlockTimeout(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.BlockTimeout = d
 	}
 }
 

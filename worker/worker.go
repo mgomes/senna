@@ -117,6 +117,9 @@ func normalizeWorkerSettings(settings senna.WorkerSettings) senna.WorkerSettings
 	if settings.PollInterval <= 0 {
 		settings.PollInterval = defaults.PollInterval
 	}
+	if settings.BlockTimeout <= 0 {
+		settings.BlockTimeout = defaults.BlockTimeout
+	}
 	if settings.ScheduledPollInterval <= 0 {
 		settings.ScheduledPollInterval = defaults.ScheduledPollInterval
 	}
@@ -275,13 +278,7 @@ func (w *Worker) Close() error {
 // workerLoop blocks on Redis waiting for jobs, then processes them.
 // Uses BLMOVE for efficient blocking without polling.
 func (w *Worker) workerLoop(ctx context.Context) {
-	// Block timeout controls how long we wait before cycling.
-	// This allows checking context cancellation and rotating across queues.
-	// Uses configured PollInterval to honor user's latency/load tuning preferences.
-	blockTimeout := w.config.Settings.PollInterval
-	if blockTimeout <= 0 {
-		blockTimeout = 100 * time.Millisecond
-	}
+	blockTimeout := workerBlockTimeout(w.config.Settings)
 
 	for {
 		select {
@@ -307,6 +304,22 @@ func (w *Worker) workerLoop(ctx context.Context) {
 
 		w.processJob(ctx, job)
 	}
+}
+
+func workerBlockTimeout(settings senna.WorkerSettings) time.Duration {
+	blockTimeout := settings.BlockTimeout
+	if blockTimeout <= 0 {
+		blockTimeout = senna.DefaultWorkerSettings().BlockTimeout
+	}
+
+	shutdownTimeout := settings.ShutdownTimeout
+	if shutdownTimeout > 0 && blockTimeout >= shutdownTimeout {
+		blockTimeout = shutdownTimeout / 2
+		if blockTimeout <= 0 {
+			blockTimeout = shutdownTimeout
+		}
+	}
+	return blockTimeout
 }
 
 func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
