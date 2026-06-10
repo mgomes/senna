@@ -351,6 +351,65 @@ func TestIterable_SaveErrorOnInterruptDoesNotReturnInterrupted(t *testing.T) {
 	}
 }
 
+func TestIterable_MaxItemsAfterCancellationReturnsInterrupted(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-cancelled-max-items:*")
+
+	k := keys.New("test-iterable-cancelled-max-items")
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1, 2}),
+		afterProcess:        cancel,
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	var stopCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxItemsPerRun:     1,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnStop: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				stopCalled.Store(true)
+				return nil
+			},
+		},
+	}
+	job := senna.NewJob("test_iterable", nil)
+
+	err := w.processIterable(ctx, job, handler, opts)
+	if !isInterruptedError(err) {
+		t.Fatalf("processIterable() error = %v, want InterruptedError", err)
+	}
+	if !stopCalled.Load() {
+		t.Fatal("OnStop not called after cancelled max-items interruption")
+	}
+
+	state, err := w.loadIterationState(context.Background(), k.IterationState(job.ID))
+	if err != nil {
+		t.Fatalf("loadIterationState() error = %v, want nil", err)
+	}
+	if state == nil {
+		t.Fatal("iteration state = nil, want saved state")
+	}
+	cursor, err := senna.CursorTo[int](state.Cursor)
+	if err != nil {
+		t.Fatalf("CursorTo[int](%v) error = %v, want nil", state.Cursor, err)
+	}
+	if cursor != 1 {
+		t.Errorf("cursor = %d, want 1", cursor)
+	}
+	if state.TotalItems != 1 {
+		t.Errorf("total items = %d, want 1", state.TotalItems)
+	}
+}
+
 func TestIterable_PeriodicCheckpointAfterCancellationReturnsInterrupted(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-iterable-cancelled-checkpoint:*")

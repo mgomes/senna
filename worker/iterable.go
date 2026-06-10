@@ -204,8 +204,12 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 		// Check max items per run
 		if opts.MaxItemsPerRun > 0 && itemsThisRun >= opts.MaxItemsPerRun {
-			w.preserveCancellation(ctx, state, stateKey)
-			return w.handleIterationInterrupt(ctx, state, stateKey, runStart, opts, job)
+			interruptCtx := ctx
+			if ctx.Err() != nil {
+				interruptCtx = context.WithoutCancel(ctx)
+			}
+			w.preserveCancellation(interruptCtx, state, stateKey)
+			return w.handleIterationInterrupt(interruptCtx, state, stateKey, runStart, opts, job)
 		}
 
 		// Periodic cursor save
