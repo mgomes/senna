@@ -49,6 +49,8 @@ type BatchStatus struct {
 	state *BatchState
 }
 
+const defaultBatchJoinInterval = 500 * time.Millisecond
+
 // NewBatchStatus creates a BatchStatus for querying a batch's state.
 func NewBatchStatus(redis redis.Cmdable, namespace, bid string) *BatchStatus {
 	k := keys.New(namespace)
@@ -183,7 +185,20 @@ func (bs *BatchStatus) Data() map[string]any {
 
 // Join blocks until the batch is complete or the context is cancelled.
 func (bs *BatchStatus) Join(ctx context.Context) error {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	return bs.join(ctx, defaultBatchJoinInterval)
+}
+
+// JoinWithInterval blocks until the batch is complete, refreshing at interval.
+func (bs *BatchStatus) JoinWithInterval(ctx context.Context, interval time.Duration) error {
+	return bs.join(ctx, interval)
+}
+
+func (bs *BatchStatus) join(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = defaultBatchJoinInterval
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
