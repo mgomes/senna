@@ -471,7 +471,7 @@ func (w *Worker) waitToRetryFinalization(ctx context.Context, job *senna.Job, op
 	select {
 	case <-ctx.Done():
 		timer.Stop()
-		slog.ErrorContext(context.Background(),
+		slog.ErrorContext(context.WithoutCancel(ctx),
 			"leaving job in-flight after finalization failure during shutdown",
 			"job_id", job.ID,
 			"operation", operation,
@@ -690,8 +690,9 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			if err := w.removeHeartbeat(context.WithoutCancel(ctx)); err != nil {
-				slog.WarnContext(context.Background(),
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := w.removeHeartbeat(cleanupCtx); err != nil {
+				slog.WarnContext(cleanupCtx,
 					"failed to remove worker heartbeat",
 					"error", err,
 					"worker_id", w.id,

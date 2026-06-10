@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -230,6 +231,100 @@ func TestWorker_RunRestartsAfterTimedOutShutdownCompletes(t *testing.T) {
 	w.Stop()
 	if err := waitForWorkerExit(t, errCh); err != nil {
 		t.Fatalf("second Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func TestWorker_FinalizationShutdownLogPreservesContextValues(t *testing.T) {
+	key := workerLogContextKey("trace_id")
+	values := captureLogContextValue(t, key, "leaving job in-flight after finalization failure during shutdown")
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key, "trace-finalization"))
+	cancel()
+
+	w := &Worker{}
+	job := senna.NewJob("finalized_job", nil)
+	if retry := w.waitToRetryFinalization(ctx, job, jobFinalizationComplete, errors.New("finalization failed")); retry {
+		t.Fatal("waitToRetryFinalization(canceled ctx) = true, want false")
+	}
+
+	assertLoggedContextValue(t, values, "trace-finalization")
+}
+
+func TestWorker_HeartbeatRemovalLogPreservesContextValues(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-heartbeat-log-context")
+
+	if err := w.redis.Set(context.Background(), w.keys.Workers(), "not-a-hash", 0).Err(); err != nil {
+		t.Fatalf("Set(workers wrong type) error = %v, want nil", err)
+	}
+
+	key := workerLogContextKey("trace_id")
+	values := captureLogContextValue(t, key, "failed to remove worker heartbeat")
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key, "trace-heartbeat"))
+	cancel()
+	w.heartbeat(ctx)
+
+	assertLoggedContextValue(t, values, "trace-heartbeat")
+}
+
+type workerLogContextKey string
+
+type contextValueLogHandler struct {
+	key     any
+	message string
+	values  chan any
+}
+
+func (h *contextValueLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *contextValueLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Message != h.message {
+		return nil
+	}
+
+	select {
+	case h.values <- ctx.Value(h.key):
+	default:
+	}
+	return nil
+}
+
+func (h *contextValueLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *contextValueLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func captureLogContextValue(t *testing.T, key any, message string) <-chan any {
+	t.Helper()
+
+	values := make(chan any, 1)
+	previous := slog.Default()
+	slog.SetDefault(slog.New(&contextValueLogHandler{
+		key:     key,
+		message: message,
+		values:  values,
+	}))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+	})
+	return values
+}
+
+func assertLoggedContextValue(t *testing.T, values <-chan any, want string) {
+	t.Helper()
+
+	select {
+	case got := <-values:
+		if got != want {
+			t.Fatalf("logged context value = %v, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("log entry was not captured")
 	}
 }
 
