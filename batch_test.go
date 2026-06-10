@@ -388,6 +388,56 @@ func TestBatch_InvalidBatchStatus(t *testing.T) {
 	}
 }
 
+func TestBatchStatusDelete_ReturnsSetRemovalErrors(t *testing.T) {
+	namespace := "batch-delete-errors"
+	flushKeysBatch(t, namespace+":*")
+
+	redisClient := newTestRedisClient(t)
+	defer func() { _ = redisClient.Close() }()
+
+	ctx := context.Background()
+	bid := "batch-1"
+	batchKey := namespace + ":batch:" + bid
+	batchJobsKey := batchKey + ":jobs"
+	batchFailedKey := batchKey + ":failed"
+
+	if err := redisClient.Set(ctx, namespace+":batches", "not-a-set", 0).Err(); err != nil {
+		t.Fatalf("failed to seed batches key: %v", err)
+	}
+	if err := redisClient.Set(ctx, namespace+":batches:dead", "not-a-set", 0).Err(); err != nil {
+		t.Fatalf("failed to seed dead batches key: %v", err)
+	}
+	if err := redisClient.Set(ctx, batchKey, "{}", 0).Err(); err != nil {
+		t.Fatalf("failed to seed batch key: %v", err)
+	}
+	if err := redisClient.Set(ctx, batchJobsKey, "{}", 0).Err(); err != nil {
+		t.Fatalf("failed to seed batch jobs key: %v", err)
+	}
+	if err := redisClient.Set(ctx, batchFailedKey, "{}", 0).Err(); err != nil {
+		t.Fatalf("failed to seed batch failed key: %v", err)
+	}
+
+	status := senna.NewBatchStatus(redisClient, namespace, bid)
+	err := status.Delete(ctx)
+	if err == nil {
+		t.Fatal("BatchStatus.Delete(ctx) error = nil, want set removal errors")
+	}
+
+	for _, want := range []string{"remove batch batch-1 from batches set", "remove batch batch-1 from dead batches set"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("BatchStatus.Delete(ctx) error = %q, want substring %q", err, want)
+		}
+	}
+
+	exists, err := redisClient.Exists(ctx, batchKey, batchJobsKey, batchFailedKey).Result()
+	if err != nil {
+		t.Fatalf("failed to check deleted batch keys: %v", err)
+	}
+	if exists != 0 {
+		t.Errorf("batch data keys still exist = %d, want 0", exists)
+	}
+}
+
 func TestBatch_DynamicJobAdding(t *testing.T) {
 	flushKeysBatch(t, "batch-dynamic:*")
 

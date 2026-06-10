@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/mgomes/senna/internal/keys"
@@ -208,10 +209,28 @@ func (bs *BatchStatus) Delete(ctx context.Context) error {
 		bs.batchJobsKey(),
 		bs.batchFailedKey(),
 	}
-	// Also remove from the batches set
-	bs.redis.SRem(ctx, bs.keys.Batches(), bs.bid)
-	bs.redis.SRem(ctx, bs.keys.DeadBatches(), bs.bid)
-	return bs.redis.Del(ctx, keys...).Err()
+
+	pipe := bs.redis.Pipeline()
+	removeFromBatches := pipe.SRem(ctx, bs.keys.Batches(), bs.bid)
+	removeFromDeadBatches := pipe.SRem(ctx, bs.keys.DeadBatches(), bs.bid)
+	deleteBatchData := pipe.Del(ctx, keys...)
+
+	_, execErr := pipe.Exec(ctx)
+
+	var commandErrs []error
+	if err := removeFromBatches.Err(); err != nil {
+		commandErrs = append(commandErrs, fmt.Errorf("remove batch %s from batches set: %w", bs.bid, err))
+	}
+	if err := removeFromDeadBatches.Err(); err != nil {
+		commandErrs = append(commandErrs, fmt.Errorf("remove batch %s from dead batches set: %w", bs.bid, err))
+	}
+	if err := deleteBatchData.Err(); err != nil {
+		commandErrs = append(commandErrs, fmt.Errorf("delete batch %s data: %w", bs.bid, err))
+	}
+	if err := errors.Join(commandErrs...); err != nil {
+		return err
+	}
+	return execErr
 }
 
 func loadBatchStatus(ctx context.Context, client redis.Cmdable, k *keys.Keys, setKey, bid string) (*BatchStatus, error) {
