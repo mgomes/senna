@@ -13,6 +13,9 @@ var enqueueScheduledLua string
 //go:embed lua/sequential_fetch.lua
 var sequentialFetchLua string
 
+//go:embed lua/discard_sequential_fetch.lua
+var discardSequentialFetchLua string
+
 //go:embed lua/requeue_orphaned.lua
 var requeueOrphanedLua string
 
@@ -35,17 +38,18 @@ var requeueJobLua string
 var markJobFinalizationLua string
 
 var (
-	batchCompleteScript         = lua.BatchCompleteScript
-	batchCallbackCompleteScript = lua.BatchCallbackCompleteScript
-	batchAddJobsScript          = lua.BatchAddJobsScript
-	batchInvalidateScript       = lua.BatchInvalidateScript
-	ackJobScript                = script.New("ack-job", ackJobLua)
-	retryJobScript              = script.New("retry-job", retryJobLua)
-	moveToDeadJobScript         = script.New("move-to-dead-job", moveToDeadJobLua)
-	requeueJobScript            = script.New("requeue-job", requeueJobLua)
-	markJobFinalizationScript   = script.New("mark-job-finalization", markJobFinalizationLua)
-	enqueueScheduledScript      = script.New("enqueue_scheduled", enqueueScheduledLua)
-	sequentialFetchScript       = script.New("sequential_fetch", sequentialFetchLua)
-	requeueOrphanedScript       = script.New("requeue_orphaned", requeueOrphanedLua)
-	releaseSequentialLockScript = script.New("release_sequential_lock", releaseSequentialLockLua)
+	batchCompleteScript          = lua.BatchCompleteScript
+	batchCallbackCompleteScript  = lua.BatchCallbackCompleteScript
+	batchAddJobsScript           = lua.BatchAddJobsScript
+	batchInvalidateScript        = lua.BatchInvalidateScript
+	ackJobScript                 = script.New("ack-job", ackJobLua)
+	retryJobScript               = script.New("retry-job", retryJobLua)
+	moveToDeadJobScript          = script.New("move-to-dead-job", moveToDeadJobLua)
+	requeueJobScript             = script.New("requeue-job", requeueJobLua)
+	markJobFinalizationScript    = script.New("mark-job-finalization", markJobFinalizationLua)
+	enqueueScheduledScript       = script.New("enqueue_scheduled", enqueueScheduledLua)
+	sequentialFetchScript        = script.New("sequential_fetch", sequentialFetchLua)
+	discardSequentialFetchScript = script.New("discard_sequential_fetch", discardSequentialFetchLua)
+	requeueOrphanedScript        = script.New("requeue_orphaned", requeueOrphanedLua)
+	releaseSequentialLockScript  = script.New("release_sequential_lock", releaseSequentialLockLua)
 )
