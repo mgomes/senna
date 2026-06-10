@@ -373,6 +373,57 @@ func TestBatch_Status(t *testing.T) {
 	}
 }
 
+func TestBatchStatusJoin_WithBatchJoinInterval(t *testing.T) {
+	const namespace = "batch-join-interval"
+	const bid = "batch-join-interval-bid"
+	flushKeysBatch(t, namespace+":*")
+
+	redisClient := newTestRedisClient(t)
+	ctx := context.Background()
+	status := senna.NewBatchStatus(redisClient, namespace, bid)
+
+	pendingState := senna.BatchState{
+		ID:        bid,
+		Total:     1,
+		Pending:   1,
+		CreatedAt: time.Now(),
+	}
+	pendingData, err := json.Marshal(pendingState)
+	if err != nil {
+		t.Fatalf("json.Marshal(pending BatchState) error = %v, want nil", err)
+	}
+	batchKey := namespace + ":batch:" + bid
+	if err := redisClient.Set(ctx, batchKey, string(pendingData), 0).Err(); err != nil {
+		t.Fatalf("Set(%q, pending state) error = %v, want nil", batchKey, err)
+	}
+
+	updateErr := make(chan error, 1)
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		completeState := pendingState
+		completeState.Pending = 0
+		completeData, err := json.Marshal(completeState)
+		if err != nil {
+			updateErr <- err
+			return
+		}
+		updateErr <- redisClient.Set(context.Background(), batchKey, string(completeData), 0).Err()
+	}()
+
+	joinCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	if err := status.Join(joinCtx, senna.WithBatchJoinInterval(10*time.Millisecond)); err != nil {
+		t.Fatalf("BatchStatus.Join(ctx, WithBatchJoinInterval(10ms)) error = %v, want nil", err)
+	}
+
+	if err := <-updateErr; err != nil {
+		t.Fatalf("complete batch update error = %v, want nil", err)
+	}
+	if !status.Complete() {
+		t.Fatal("BatchStatus.Complete() = false, want true")
+	}
+}
+
 func TestBatch_InvalidBatchStatus(t *testing.T) {
 	flushKeysBatch(t, "batch-invalid:*")
 
