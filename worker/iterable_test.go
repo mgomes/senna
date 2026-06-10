@@ -471,6 +471,53 @@ func TestIterable_PeriodicCheckpointAfterCancellationReturnsInterrupted(t *testi
 	}
 }
 
+func TestIterable_CompletionAfterCancellationUsesLiveContext(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-cancelled-completion:*")
+
+	k := keys.New("test-iterable-cancelled-completion")
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1}),
+		afterProcess:        cancel,
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	var completeCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnComplete: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				completeCalled.Store(true)
+				return nil
+			},
+		},
+	}
+	job := senna.NewJob("test_iterable", nil)
+
+	if err := w.processIterable(ctx, job, handler, opts); err != nil {
+		t.Fatalf("processIterable() error = %v, want nil", err)
+	}
+	if !completeCalled.Load() {
+		t.Fatal("OnComplete not called after cancelled terminal checkpoint")
+	}
+
+	exists, err := client.Exists(context.Background(), k.IterationState(job.ID)).Result()
+	if err != nil {
+		t.Fatalf("Exists(%q) error = %v, want nil", k.IterationState(job.ID), err)
+	}
+	if exists != 0 {
+		t.Errorf("Exists(%q) = %d, want 0", k.IterationState(job.ID), exists)
+	}
+}
+
 func TestIterable_MiddlewareAndRateLimiter(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-iterable-mw:*")

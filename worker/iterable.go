@@ -249,17 +249,22 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		return err
 	}
 
+	terminalCtx := ctx
+	if ctx.Err() != nil {
+		terminalCtx = context.WithoutCancel(ctx)
+	}
+
 	// Check for late cancellation before completing
-	if w.iterationCancelled(ctx, stateKey) {
-		return w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
+	if w.iterationCancelled(terminalCtx, stateKey) {
+		return w.handleIterationCancelled(terminalCtx, state, stateKey, runStart, opts, job)
 	}
 
 	if err := iter.Close(); err != nil {
 		iterClosed = true
-		w.preserveCancellation(ctx, state, stateKey)
+		w.preserveCancellation(terminalCtx, state, stateKey)
 		w.updateIterationTiming(state, runStart)
 		closeErr := fmt.Errorf("close iterable iterator: %w", err)
-		if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "on iterator close error"); saveErr != nil {
+		if saveErr := w.saveIterationStateFor(terminalCtx, stateKey, state, "on iterator close error"); saveErr != nil {
 			return errors.Join(closeErr, saveErr)
 		}
 		return closeErr
@@ -267,21 +272,21 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	iterClosed = true
 
 	// Complete - fire OnComplete and DELETE state from Redis
-	w.preserveCancellation(ctx, state, stateKey)
+	w.preserveCancellation(terminalCtx, state, stateKey)
 	w.updateIterationTiming(state, runStart)
-	if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "before completion"); saveErr != nil {
+	if saveErr := w.saveIterationStateFor(terminalCtx, stateKey, state, "before completion"); saveErr != nil {
 		return saveErr
 	}
 
 	if opts.Callbacks != nil && opts.Callbacks.OnComplete != nil {
-		if err := opts.Callbacks.OnComplete(ctx, job, state); err != nil {
+		if err := opts.Callbacks.OnComplete(terminalCtx, job, state); err != nil {
 			return err
 		}
 	}
 
 	// Delete state on successful completion
-	if err := w.redis.Del(ctx, stateKey).Err(); err != nil {
-		slog.WarnContext(ctx, "failed to delete completed iteration state", "job_id", job.ID, "error", err)
+	if err := w.redis.Del(terminalCtx, stateKey).Err(); err != nil {
+		slog.WarnContext(terminalCtx, "failed to delete completed iteration state", "job_id", job.ID, "error", err)
 	}
 
 	return nil
