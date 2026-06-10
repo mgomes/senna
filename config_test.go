@@ -23,6 +23,9 @@ func TestRedisConfig_Options_Defaults(t *testing.T) {
 	if opts.DB != 0 {
 		t.Errorf("expected DB 0, got %d", opts.DB)
 	}
+	if !opts.ContextTimeoutEnabled {
+		t.Error("expected ContextTimeoutEnabled to be true")
+	}
 }
 
 func TestRedisConfig_Options_AllFields(t *testing.T) {
@@ -64,6 +67,9 @@ func TestRedisConfig_Options_AllFields(t *testing.T) {
 	}
 	if opts.WriteTimeout != 3*time.Second {
 		t.Errorf("expected WriteTimeout 3s, got %v", opts.WriteTimeout)
+	}
+	if !opts.ContextTimeoutEnabled {
+		t.Error("expected ContextTimeoutEnabled to be true")
 	}
 	if opts.TLSConfig == nil {
 		t.Fatal("expected TLSConfig to be set")
@@ -117,6 +123,9 @@ func TestDefaultWorkerSettings(t *testing.T) {
 	}
 	if settings.HeartbeatRate != 5*time.Second {
 		t.Errorf("expected HeartbeatRate 5s, got %v", settings.HeartbeatRate)
+	}
+	if settings.ReaperOperationTimeout != 5*time.Second {
+		t.Errorf("expected ReaperOperationTimeout 5s, got %v", settings.ReaperOperationTimeout)
 	}
 }
 
@@ -184,6 +193,17 @@ func TestOption_WithShutdownTimeout(t *testing.T) {
 
 	if cfg.Worker.ShutdownTimeout != time.Minute {
 		t.Errorf("expected ShutdownTimeout 1m, got %v", cfg.Worker.ShutdownTimeout)
+	}
+}
+
+func TestOption_WithReaperOperationTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithReaperOperationTimeout(2 * time.Second)
+	opt(cfg)
+
+	if cfg.Worker.ReaperOperationTimeout != 2*time.Second {
+		t.Errorf("expected ReaperOperationTimeout 2s, got %v", cfg.Worker.ReaperOperationTimeout)
 	}
 }
 

@@ -45,6 +45,9 @@ func FuzzRedisConfigOptions(f *testing.F) {
 		if got.DB != cfg.DB {
 			t.Errorf("RedisConfig.Options().DB = %d, want %d", got.DB, cfg.DB)
 		}
+		if !got.ContextTimeoutEnabled {
+			t.Error("RedisConfig.Options().ContextTimeoutEnabled = false, want true")
+		}
 		if cfg.PoolSize > 0 && got.PoolSize != cfg.PoolSize {
 			t.Errorf("RedisConfig.Options().PoolSize = %d, want %d", got.PoolSize, cfg.PoolSize)
 		}

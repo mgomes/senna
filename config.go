@@ -33,10 +33,11 @@ type RedisConfig struct {
 // Options converts the RedisConfig into go-redis client options.
 func (c RedisConfig) Options() *redis.Options {
 	opts := &redis.Options{
-		Addr:      c.Addr,
-		Password:  c.Password,
-		DB:        c.DB,
-		TLSConfig: c.TLSConfig,
+		Addr:                  c.Addr,
+		Password:              c.Password,
+		DB:                    c.DB,
+		TLSConfig:             c.TLSConfig,
+		ContextTimeoutEnabled: true,
 	}
 	if c.PoolSize > 0 {
 		opts.PoolSize = c.PoolSize
@@ -58,14 +59,15 @@ func (c RedisConfig) Options() *redis.Options {
 
 // WorkerSettings configures worker runtime behavior.
 type WorkerSettings struct {
-	Concurrency           int
-	Queues                []QueueConfig
-	ShutdownTimeout       time.Duration
-	PollInterval          time.Duration
-	ScheduledPollInterval time.Duration
-	HeartbeatRate         time.Duration
-	PeriodicEnabled       bool
-	StrictPriority        bool // If true, always process higher priority queues first (can starve lower priority)
+	Concurrency            int
+	Queues                 []QueueConfig
+	ShutdownTimeout        time.Duration
+	PollInterval           time.Duration
+	ScheduledPollInterval  time.Duration
+	HeartbeatRate          time.Duration
+	ReaperOperationTimeout time.Duration
+	PeriodicEnabled        bool
+	StrictPriority         bool // If true, always process higher priority queues first (can starve lower priority)
 }
 
 const (
@@ -78,12 +80,13 @@ const (
 // DefaultWorkerSettings returns the default worker settings.
 func DefaultWorkerSettings() WorkerSettings {
 	return WorkerSettings{
-		Concurrency:           10,
-		Queues:                []QueueConfig{{Name: DefaultQueueName, Priority: 1}},
-		ShutdownTimeout:       30 * time.Second,
-		PollInterval:          100 * time.Millisecond,
-		ScheduledPollInterval: 5 * time.Second,
-		HeartbeatRate:         5 * time.Second,
+		Concurrency:            10,
+		Queues:                 []QueueConfig{{Name: DefaultQueueName, Priority: 1}},
+		ShutdownTimeout:        30 * time.Second,
+		PollInterval:           100 * time.Millisecond,
+		ScheduledPollInterval:  5 * time.Second,
+		HeartbeatRate:          5 * time.Second,
+		ReaperOperationTimeout: 5 * time.Second,
 	}
 }
 
@@ -152,6 +155,13 @@ func WithQueues(queues ...QueueConfig) Option {
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.ShutdownTimeout = d
+	}
+}
+
+// WithReaperOperationTimeout sets the per-Redis-command timeout for orphan recovery.
+func WithReaperOperationTimeout(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.ReaperOperationTimeout = d
 	}
 }
 

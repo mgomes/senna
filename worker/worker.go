@@ -119,6 +119,9 @@ func normalizeWorkerSettings(settings senna.WorkerSettings) senna.WorkerSettings
 	if settings.HeartbeatRate <= 0 {
 		settings.HeartbeatRate = defaults.HeartbeatRate
 	}
+	if settings.ReaperOperationTimeout <= 0 {
+		settings.ReaperOperationTimeout = defaults.ReaperOperationTimeout
+	}
 
 	return settings
 }
@@ -836,8 +839,13 @@ func (w *Worker) reaper(ctx context.Context) {
 const workerHeartbeatTimeout = 60 * time.Second
 
 func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
-	workers, err := w.redis.HGetAll(ctx, w.keys.Workers()).Result()
+	opCtx, cancel := w.reaperOperationContext(ctx)
+	workers, err := w.redis.HGetAll(opCtx, w.keys.Workers()).Result()
+	cancel()
 	if err != nil {
+		if ctx.Err() == nil {
+			slog.WarnContext(ctx, "failed to read worker heartbeats", "error", err)
+		}
 		return
 	}
 
@@ -867,8 +875,13 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 
 	// Clean up stale worker entries from the hash
 	for _, id := range staleWorkers {
-		if err := w.redis.HDel(ctx, w.keys.Workers(), id).Err(); err != nil {
-			slog.WarnContext(ctx, "failed to remove stale worker heartbeat", "error", err, "worker_id", id)
+		opCtx, cancel := w.reaperOperationContext(ctx)
+		err := w.redis.HDel(opCtx, w.keys.Workers(), id).Err()
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.WarnContext(ctx, "failed to remove stale worker heartbeat", "error", err, "worker_id", id)
+			}
 		}
 	}
 
@@ -877,8 +890,13 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 	queuePrefix := w.keys.Queue("")
 	var cursor uint64
 	for {
-		keys, nextCursor, err := w.redis.Scan(ctx, cursor, pattern, 100).Result()
+		opCtx, cancel := w.reaperOperationContext(ctx)
+		keys, nextCursor, err := w.redis.Scan(opCtx, cursor, pattern, 100).Result()
+		cancel()
 		if err != nil {
+			if ctx.Err() == nil {
+				slog.WarnContext(ctx, "failed to scan in-flight jobs", "error", err)
+			}
 			return
 		}
 
@@ -888,8 +906,13 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 				continue
 			}
 
-			if _, err := requeueOrphanedScript.Run(ctx, w.redis, []string{key, w.keys.Queues()}, queuePrefix); err != nil {
-				slog.WarnContext(ctx, "failed to requeue orphaned jobs", "error", err, "worker_id", workerID)
+			opCtx, cancel := w.reaperOperationContext(ctx)
+			_, err := requeueOrphanedScript.Run(opCtx, w.redis, []string{key, w.keys.Queues()}, queuePrefix)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.WarnContext(ctx, "failed to requeue orphaned jobs", "error", err, "worker_id", workerID)
+				}
 			}
 		}
 
@@ -898,6 +921,10 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 			break
 		}
 	}
+}
+
+func (w *Worker) reaperOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, w.config.Settings.ReaperOperationTimeout)
 }
 
 func encryptionMiddleware(enc *encryption.Encryptor) senna.Middleware {
