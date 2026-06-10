@@ -253,6 +253,57 @@ func TestFetcher_BlockingFetchSubSecondBlockTimeoutUsesPollInterval(t *testing.T
 	}
 }
 
+func TestFetcher_BlockingFetchMultipleQueuesUsesPollInterval(t *testing.T) {
+	tests := []struct {
+		name           string
+		strictPriority bool
+	}{
+		{
+			name:           "weighted",
+			strictPriority: false,
+		},
+		{
+			name:           "strict",
+			strictPriority: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestRedisClient(t)
+			namespace := "test-blocking-multi-" + tt.name
+			flushTestKeys(t, client, namespace+":*")
+
+			k := keys.New(namespace)
+			f := newFetcher(client, k, []senna.QueueConfig{
+				{Name: "critical", Priority: 10},
+				{Name: "default", Priority: 1},
+			}, 20*time.Millisecond, tt.strictPriority)
+			hook := &commandNameHook{}
+			client.AddHook(hook)
+
+			startedAt := time.Now()
+			fetched, err := f.BlockingFetch(context.Background(), "worker-1", time.Second)
+			elapsed := time.Since(startedAt)
+			if err != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) error = %v, want nil", err)
+			}
+			if fetched != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) job = %v, want nil", fetched)
+			}
+			if hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) issued BLMOVE; commands = %v", hook.names())
+			}
+			if elapsed < 15*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want poll interval wait", elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want less than block timeout", elapsed)
+			}
+		})
+	}
+}
+
 type commandNameHook struct {
 	mu           sync.Mutex
 	commandNames []string

@@ -392,6 +392,16 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, bl
 		}
 	}
 
+	// BLMOVE can only watch one queue. Keep multi-queue rotation bounded by the
+	// poll interval so jobs arriving on another queue are not delayed by the full
+	// block timeout.
+	if len(processable) > 1 {
+		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
 	// All queues empty, block on a weighted random processable queue
 	blockQueue := selectProcessableQueue(processable, totalWeight)
 
@@ -448,6 +458,16 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, bloc
 		if job != nil {
 			return job, nil
 		}
+	}
+
+	// BLMOVE can only watch one queue. Keep multi-queue rotation bounded by the
+	// poll interval so lower-priority queues are rechecked promptly when all
+	// current queues are empty.
+	if len(processable) > 1 {
+		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 
 	// Block on HIGHEST priority processable queue - ensures high-priority jobs wake us immediately
