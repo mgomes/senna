@@ -96,6 +96,9 @@ func TestWorker_New_PartialSettings(t *testing.T) {
 	if w.config.Settings.HeartbeatRate != defaults.HeartbeatRate {
 		t.Errorf("expected HeartbeatRate %v, got %v", defaults.HeartbeatRate, w.config.Settings.HeartbeatRate)
 	}
+	if w.config.Settings.ReaperOperationTimeout != defaults.ReaperOperationTimeout {
+		t.Errorf("expected ReaperOperationTimeout %v, got %v", defaults.ReaperOperationTimeout, w.config.Settings.ReaperOperationTimeout)
+	}
 	if !w.config.Settings.PeriodicEnabled {
 		t.Error("expected PeriodicEnabled to remain true")
 	}
@@ -1534,6 +1537,69 @@ func TestWorker_Retries_ConcurrentWorkers_NoDuplicates(t *testing.T) {
 	retryLen, _ := redisClient.ZCard(ctx, workers[0].keys.Retry()).Result()
 	if retryLen != 0 {
 		t.Errorf("expected 0 jobs in retry set, got %d", retryLen)
+	}
+}
+
+type blockingCommandHook struct {
+	command string
+	started chan struct{}
+}
+
+func (h *blockingCommandHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *blockingCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() != h.command {
+			return next(ctx, cmd)
+		}
+		select {
+		case h.started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+func (h *blockingCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func TestWorker_RequeueOrphanedJobs_ScanTimeout(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-orphan-scan-timeout:*")
+
+	settings := senna.DefaultWorkerSettings()
+	settings.ReaperOperationTimeout = 20 * time.Millisecond
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-orphan-scan-timeout",
+		Settings:  settings,
+	})
+	if err != nil {
+		t.Fatalf("worker.New() error = %v, want nil", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	hook := &blockingCommandHook{
+		command: "scan",
+		started: make(chan struct{}, 1),
+	}
+	w.redis.AddHook(hook)
+
+	startedAt := time.Now()
+	w.requeueOrphanedJobs(context.Background())
+	elapsed := time.Since(startedAt)
+
+	select {
+	case <-hook.started:
+	default:
+		t.Fatal("requeueOrphanedJobs() did not attempt SCAN")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("requeueOrphanedJobs() elapsed = %v, want bounded by SCAN timeout", elapsed)
 	}
 }
 

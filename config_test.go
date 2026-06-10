@@ -118,6 +118,9 @@ func TestDefaultWorkerSettings(t *testing.T) {
 	if settings.HeartbeatRate != 5*time.Second {
 		t.Errorf("expected HeartbeatRate 5s, got %v", settings.HeartbeatRate)
 	}
+	if settings.ReaperOperationTimeout != 5*time.Second {
+		t.Errorf("expected ReaperOperationTimeout 5s, got %v", settings.ReaperOperationTimeout)
+	}
 }
 
 func TestDefaultClientSettings(t *testing.T) {
@@ -184,6 +187,17 @@ func TestOption_WithShutdownTimeout(t *testing.T) {
 
 	if cfg.Worker.ShutdownTimeout != time.Minute {
 		t.Errorf("expected ShutdownTimeout 1m, got %v", cfg.Worker.ShutdownTimeout)
+	}
+}
+
+func TestOption_WithReaperOperationTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithReaperOperationTimeout(2 * time.Second)
+	opt(cfg)
+
+	if cfg.Worker.ReaperOperationTimeout != 2*time.Second {
+		t.Errorf("expected ReaperOperationTimeout 2s, got %v", cfg.Worker.ReaperOperationTimeout)
 	}
 }
 
