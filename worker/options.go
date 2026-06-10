@@ -10,13 +10,20 @@ import (
 type JobOption func(*JobOptions)
 
 // WithMaxRetries sets the maximum retry count for a registered job type.
+//
+// Deprecated: use WithJobMaxRetries.
 func WithMaxRetries(n int) JobOption {
+	return WithJobMaxRetries(n)
+}
+
+// WithJobMaxRetries sets the maximum retry count for a regular registered job type.
+func WithJobMaxRetries(n int) JobOption {
 	return func(o *JobOptions) {
 		o.MaxRetries = n
 	}
 }
 
-// WithJobTimeout sets the handler context deadline for a registered job type.
+// WithJobTimeout sets the handler context deadline for a regular registered job type.
 func WithJobTimeout(d time.Duration) JobOption {
 	return func(o *JobOptions) {
 		o.Timeout = d
@@ -41,7 +48,14 @@ func WithUniqueJob(key string, ttl time.Duration) JobOption {
 }
 
 // WithRateLimiter applies a rate limiter to a registered job type.
+//
+// Deprecated: use WithJobRateLimiter.
 func WithRateLimiter(limiter ratelimit.Limiter) JobOption {
+	return WithJobRateLimiter(limiter)
+}
+
+// WithJobRateLimiter applies a rate limiter to a regular registered job type.
+func WithJobRateLimiter(limiter ratelimit.Limiter) JobOption {
 	return func(o *JobOptions) {
 		o.RateLimiter = limiter
 	}
