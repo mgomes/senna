@@ -161,8 +161,7 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	for iter.Next(ctx) {
 		// Check for cancellation (marked in Redis)
 		if state.Cancelled || w.iterationCancelled(ctx, stateKey) {
-			w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
-			return nil // Ack job (success), no on_complete
+			return w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
 		}
 
 		// Check for shutdown
@@ -191,8 +190,8 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 				// Real error - save state and return for retry
 				w.preserveCancellation(ctx, state, stateKey)
 				w.updateIterationTiming(state, runStart)
-				if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
-					slog.WarnContext(ctx, "failed to save iteration state on error", "job_id", job.ID, "error", saveErr)
+				if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "on item error"); saveErr != nil {
+					return errors.Join(err, saveErr)
 				}
 				return err
 			}
@@ -215,8 +214,8 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 			if needsSave {
 				w.preserveCancellation(ctx, state, stateKey)
 				runStart = w.updateIterationTiming(state, runStart)
-				if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
-					slog.WarnContext(ctx, "failed to save iteration cursor", "job_id", job.ID, "error", saveErr)
+				if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "during cursor checkpoint"); saveErr != nil {
+					return saveErr
 				}
 			}
 		default:
@@ -232,34 +231,34 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 		}
 
 		w.updateIterationTiming(state, runStart)
-		if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
-			slog.WarnContext(ctx, "failed to save iteration state on iterator error", "job_id", job.ID, "error", saveErr)
+		if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "on iterator error"); saveErr != nil {
+			return errors.Join(err, saveErr)
 		}
 		return err
 	}
 
 	// Check for late cancellation before completing
 	if w.iterationCancelled(ctx, stateKey) {
-		w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
-		return nil // Ack job (success), no OnComplete
+		return w.handleIterationCancelled(ctx, state, stateKey, runStart, opts, job)
 	}
 
 	if err := iter.Close(); err != nil {
 		iterClosed = true
 		w.preserveCancellation(ctx, state, stateKey)
 		w.updateIterationTiming(state, runStart)
-		if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
-			slog.WarnContext(ctx, "failed to save iteration state on iterator close error", "job_id", job.ID, "error", saveErr)
+		closeErr := fmt.Errorf("close iterable iterator: %w", err)
+		if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "on iterator close error"); saveErr != nil {
+			return errors.Join(closeErr, saveErr)
 		}
-		return fmt.Errorf("close iterable iterator: %w", err)
+		return closeErr
 	}
 	iterClosed = true
 
 	// Complete - fire OnComplete and DELETE state from Redis
 	w.preserveCancellation(ctx, state, stateKey)
 	w.updateIterationTiming(state, runStart)
-	if saveErr := w.saveIterationState(ctx, stateKey, state); saveErr != nil {
-		slog.WarnContext(ctx, "failed to save iteration state before completion", "job_id", job.ID, "error", saveErr)
+	if saveErr := w.saveIterationStateFor(ctx, stateKey, state, "before completion"); saveErr != nil {
+		return saveErr
 	}
 
 	if opts.Callbacks != nil && opts.Callbacks.OnComplete != nil {
@@ -286,6 +285,13 @@ func (w *Worker) saveIterationState(ctx context.Context, key string, state *senn
 	return iteration.Save(ctx, w.redis, key, state, iteration.StateTTL)
 }
 
+func (w *Worker) saveIterationStateFor(ctx context.Context, key string, state *senna.IterationState, reason string) error {
+	if err := w.saveIterationState(ctx, key, state); err != nil {
+		return fmt.Errorf("save iteration state %s: %w", reason, err)
+	}
+	return nil
+}
+
 func (w *Worker) iterationCancelled(ctx context.Context, key string) bool {
 	cancelled, err := iteration.IsCancelled(ctx, w.redis, key)
 	if err != nil {
@@ -308,11 +314,11 @@ func (w *Worker) preserveCancellation(ctx context.Context, state *senna.Iteratio
 }
 
 // handleIterationCancelled handles cancellation - saves state, fires callbacks.
-func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) {
+func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) error {
 	state.Cancelled = true
 	w.updateIterationTiming(state, runStart)
-	if err := w.saveIterationState(ctx, stateKey, state); err != nil {
-		slog.WarnContext(ctx, "failed to save iteration state on cancel", "job_id", job.ID, "error", err)
+	if err := w.saveIterationStateFor(ctx, stateKey, state, "on cancel"); err != nil {
+		return err
 	}
 
 	if opts.Callbacks != nil {
@@ -327,13 +333,14 @@ func (w *Worker) handleIterationCancelled(ctx context.Context, state *senna.Iter
 			}
 		}
 	}
+	return nil
 }
 
 // handleIterationInterrupt handles interrupt/requeue - saves state, fires OnStop, returns InterruptedError.
 func (w *Worker) handleIterationInterrupt(ctx context.Context, state *senna.IterationState, stateKey string, runStart time.Time, opts *IterableJobOptions, job *senna.Job) error {
 	w.updateIterationTiming(state, runStart)
-	if err := w.saveIterationState(ctx, stateKey, state); err != nil {
-		slog.WarnContext(ctx, "failed to save iteration state on interrupt", "job_id", job.ID, "error", err)
+	if err := w.saveIterationStateFor(ctx, stateKey, state, "on interrupt"); err != nil {
+		return err
 	}
 
 	if opts.Callbacks != nil && opts.Callbacks.OnStop != nil {
