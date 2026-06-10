@@ -73,20 +73,37 @@ func (bs *BatchStatus) batchFailedKey() string {
 	return bs.keys.BatchFailed(bs.bid)
 }
 
-// Refresh reloads the batch state from Redis.
+// Refresh reloads the batch state and failed job IDs from Redis.
 func (bs *BatchStatus) Refresh(ctx context.Context) error {
-	data, err := bs.redis.Get(ctx, bs.batchKey()).Result()
+	pipe := bs.redis.Pipeline()
+	stateCmd := pipe.Get(ctx, bs.batchKey())
+	failedCmd := pipe.SMembers(ctx, bs.batchFailedKey())
+
+	_, execErr := pipe.Exec(ctx)
+
+	data, err := stateCmd.Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return &BatchNotFoundError{BatchID: bs.bid}
 		}
 		return err
 	}
+	failedJIDs, err := failedCmd.Result()
+	if err != nil {
+		return err
+	}
+	if execErr != nil {
+		return execErr
+	}
 
 	var state BatchState
 	if err := json.Unmarshal([]byte(data), &state); err != nil {
 		return err
 	}
+	if failedJIDs == nil {
+		failedJIDs = []string{}
+	}
+	state.FailedJIDs = failedJIDs
 	bs.state = &state
 	return nil
 }
@@ -160,8 +177,11 @@ func (bs *BatchStatus) CreatedAt() time.Time {
 	return bs.state.CreatedAt
 }
 
-// FailedJIDs returns the job IDs of failed jobs.
+// FailedJIDs returns the job IDs of failed jobs from the refreshed snapshot.
 func (bs *BatchStatus) FailedJIDs(ctx context.Context) ([]string, error) {
+	if bs.state != nil && bs.state.FailedJIDs != nil {
+		return copyStrings(bs.state.FailedJIDs), nil
+	}
 	return bs.redis.SMembers(ctx, bs.batchFailedKey()).Result()
 }
 
@@ -170,7 +190,7 @@ func (bs *BatchStatus) Data() map[string]any {
 	if bs.state == nil {
 		return nil
 	}
-	return map[string]any{
+	data := map[string]any{
 		"bid":         bs.bid,
 		"description": bs.state.Description,
 		"total":       bs.state.Total,
@@ -181,6 +201,10 @@ func (bs *BatchStatus) Data() map[string]any {
 		"dead":        bs.state.Dead,
 		"created_at":  bs.state.CreatedAt.Unix(),
 	}
+	if bs.state.FailedJIDs != nil {
+		data["failed_jids"] = copyStrings(bs.state.FailedJIDs)
+	}
+	return data
 }
 
 // Join blocks until the batch is complete or the context is cancelled.
@@ -259,6 +283,15 @@ func loadBatchStatus(ctx context.Context, client redis.Cmdable, k *keys.Keys, se
 		return nil, err
 	}
 	return status, nil
+}
+
+func copyStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	copied := make([]string, len(values))
+	copy(copied, values)
+	return copied
 }
 
 // BatchSet provides iteration over all known batches.
