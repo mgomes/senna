@@ -234,6 +234,58 @@ func TestWorker_RunRestartsAfterTimedOutShutdownCompletes(t *testing.T) {
 	}
 }
 
+func TestWorker_RunRejectsRestartUntilTimedOutShutdownCompletes(t *testing.T) {
+	w := newLifecycleTestWorker(t, "test-worker-timeout-restart-window")
+	w.config.Settings.ShutdownTimeout = 10 * time.Millisecond
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	w.Register("stuck_job", func(ctx context.Context, job *senna.Job) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	job := senna.NewJob("stuck_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	if err := w.redis.LPush(context.Background(), w.keys.Queue("default"), string(data)).Err(); err != nil {
+		t.Fatalf("LPush(stuck_job) error = %v, want nil", err)
+	}
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stuck_job handler did not start")
+	}
+
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Worker.Run() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	restartErrCh := runWorker(t, w)
+	if err := waitForWorkerExit(t, restartErrCh); !errors.Is(err, errWorkerAlreadyRunning) {
+		t.Fatalf("second Worker.Run() error = %v, want %v", err, errWorkerAlreadyRunning)
+	}
+
+	w.Stop()
+	close(release)
+	waitForWorkerStopped(t, w)
+
+	errCh = runWorker(t, w)
+	waitForWorkerRunning(t, w)
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("third Worker.Run() error = %v, want nil", err)
+	}
+}
+
 func TestWorker_FinalizationShutdownLogPreservesContextValues(t *testing.T) {
 	key := workerLogContextKey("trace_id")
 	values := captureLogContextValue(t, key, "leaving job in-flight after finalization failure during shutdown")
