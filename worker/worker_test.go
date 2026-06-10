@@ -47,6 +47,7 @@ func TestWorker_New_WithSettings(t *testing.T) {
 			Queues:          []senna.QueueConfig{{Name: "high", Priority: 10}, {Name: "low", Priority: 1}},
 			ShutdownTimeout: time.Minute,
 			PollInterval:    50 * time.Millisecond,
+			BlockTimeout:    3 * time.Second,
 			HeartbeatRate:   time.Second,
 		},
 	})
@@ -60,6 +61,9 @@ func TestWorker_New_WithSettings(t *testing.T) {
 	}
 	if len(w.config.Settings.Queues) != 2 {
 		t.Fatalf("expected 2 queues, got %d", len(w.config.Settings.Queues))
+	}
+	if w.config.Settings.BlockTimeout != 3*time.Second {
+		t.Errorf("expected BlockTimeout 3s, got %v", w.config.Settings.BlockTimeout)
 	}
 }
 
@@ -91,6 +95,9 @@ func TestWorker_New_PartialSettings(t *testing.T) {
 	if w.config.Settings.PollInterval != defaults.PollInterval {
 		t.Errorf("expected PollInterval %v, got %v", defaults.PollInterval, w.config.Settings.PollInterval)
 	}
+	if w.config.Settings.BlockTimeout != defaults.BlockTimeout {
+		t.Errorf("expected BlockTimeout %v, got %v", defaults.BlockTimeout, w.config.Settings.BlockTimeout)
+	}
 	if w.config.Settings.ScheduledPollInterval != defaults.ScheduledPollInterval {
 		t.Errorf("expected ScheduledPollInterval %v, got %v", defaults.ScheduledPollInterval, w.config.Settings.ScheduledPollInterval)
 	}
@@ -102,6 +109,55 @@ func TestWorker_New_PartialSettings(t *testing.T) {
 	}
 	if !w.config.Settings.PeriodicEnabled {
 		t.Error("expected PeriodicEnabled to remain true")
+	}
+}
+
+func TestWorkerBlockTimeoutLeavesShutdownHeadroom(t *testing.T) {
+	t.Parallel()
+	defaults := senna.DefaultWorkerSettings()
+
+	tests := []struct {
+		name     string
+		settings senna.WorkerSettings
+		want     time.Duration
+	}{
+		{
+			name:     "default",
+			settings: defaults,
+			want:     2 * time.Second,
+		},
+		{
+			name: "shorter than shutdown",
+			settings: senna.WorkerSettings{
+				BlockTimeout:    500 * time.Millisecond,
+				ShutdownTimeout: time.Second,
+			},
+			want: 500 * time.Millisecond,
+		},
+		{
+			name: "longer than shutdown",
+			settings: senna.WorkerSettings{
+				BlockTimeout:    5 * time.Second,
+				ShutdownTimeout: time.Second,
+			},
+			want: 500 * time.Millisecond,
+		},
+		{
+			name: "missing block timeout",
+			settings: senna.WorkerSettings{
+				ShutdownTimeout: 30 * time.Second,
+			},
+			want: 2 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := workerBlockTimeout(tt.settings); got != tt.want {
+				t.Errorf("workerBlockTimeout(%+v) = %v, want %v", tt.settings, got, tt.want)
+			}
+		})
 	}
 }
 

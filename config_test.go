@@ -121,6 +121,9 @@ func TestDefaultWorkerSettings(t *testing.T) {
 	if settings.PollInterval != 100*time.Millisecond {
 		t.Errorf("expected PollInterval 100ms, got %v", settings.PollInterval)
 	}
+	if settings.BlockTimeout != 2*time.Second {
+		t.Errorf("expected BlockTimeout 2s, got %v", settings.BlockTimeout)
+	}
 	if settings.HeartbeatRate != 5*time.Second {
 		t.Errorf("expected HeartbeatRate 5s, got %v", settings.HeartbeatRate)
 	}
@@ -204,6 +207,17 @@ func TestOption_WithReaperOperationTimeout(t *testing.T) {
 
 	if cfg.Worker.ReaperOperationTimeout != 2*time.Second {
 		t.Errorf("expected ReaperOperationTimeout 2s, got %v", cfg.Worker.ReaperOperationTimeout)
+	}
+}
+
+func TestOption_WithBlockTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithBlockTimeout(3 * time.Second)
+	opt(cfg)
+
+	if cfg.Worker.BlockTimeout != 3*time.Second {
+		t.Errorf("expected BlockTimeout 3s, got %v", cfg.Worker.BlockTimeout)
 	}
 }
 

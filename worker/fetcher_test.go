@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,6 +192,106 @@ func TestFetcher_Fetch_ContextCanceled(t *testing.T) {
 		t.Errorf("fetch should have been canceled quickly, took %v", elapsed)
 	}
 	_ = err
+}
+
+func TestFetcher_BlockingFetchUsesBLMoveWithSubSecondPollInterval(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-blocking-blmove:*")
+
+	k := keys.New("test-blocking-blmove")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 10*time.Millisecond, false)
+	hook := &commandNameHook{}
+	client.AddHook(hook)
+
+	startedAt := time.Now()
+	fetched, err := f.BlockingFetch(context.Background(), "worker-1", time.Second)
+	elapsed := time.Since(startedAt)
+	if err != nil {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) error = %v, want nil", err)
+	}
+	if fetched != nil {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) job = %v, want nil", fetched)
+	}
+	if !hook.saw("blmove") {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) did not issue BLMOVE; commands = %v", hook.names())
+	}
+	if elapsed < 800*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+	}
+}
+
+func TestFetcher_BlockingFetchSubSecondBlockTimeoutUsesPollInterval(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-blocking-poll-fallback:*")
+
+	k := keys.New("test-blocking-poll-fallback")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 20*time.Millisecond, false)
+	hook := &commandNameHook{}
+	client.AddHook(hook)
+
+	startedAt := time.Now()
+	fetched, err := f.BlockingFetch(context.Background(), "worker-1", 500*time.Millisecond)
+	elapsed := time.Since(startedAt)
+	if err != nil {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 500ms) error = %v, want nil", err)
+	}
+	if fetched != nil {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 500ms) job = %v, want nil", fetched)
+	}
+	if hook.saw("blmove") {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 500ms) issued BLMOVE; commands = %v", hook.names())
+	}
+	if elapsed < 15*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 500ms) elapsed = %v, want poll interval wait", elapsed)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 500ms) elapsed = %v, want less than block timeout", elapsed)
+	}
+}
+
+type commandNameHook struct {
+	mu           sync.Mutex
+	commandNames []string
+}
+
+func (h *commandNameHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *commandNameHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.mu.Lock()
+		h.commandNames = append(h.commandNames, cmd.Name())
+		h.mu.Unlock()
+		return next(ctx, cmd)
+	}
+}
+
+func (h *commandNameHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *commandNameHook) saw(name string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, commandName := range h.commandNames {
+		if commandName == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *commandNameHook) names() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	names := make([]string, len(h.commandNames))
+	copy(names, h.commandNames)
+	return names
 }
 
 func TestFetcher_Ack_RemovesFromInFlight(t *testing.T) {
@@ -1233,7 +1334,7 @@ func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
 		t.Fatalf("failed to set sequential lock: %v", err)
 	}
 
-	// Worker 2's blocking fetch should timeout (can't acquire lock)
+	// Worker 2's blocking fetch should wait for the poll interval (can't acquire lock)
 	start := time.Now()
 	fetched, err := f2.BlockingFetch(ctx, "worker-2", 200*time.Millisecond)
 	elapsed := time.Since(start)
@@ -1244,8 +1345,8 @@ func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
 	if fetched != nil {
 		t.Error("worker-2 should not have gotten a job")
 	}
-	if elapsed < 150*time.Millisecond {
-		t.Errorf("should have waited for timeout, only waited %v", elapsed)
+	if elapsed < 80*time.Millisecond {
+		t.Errorf("should have waited for poll interval, only waited %v", elapsed)
 	}
 }
 
