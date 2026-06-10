@@ -11,6 +11,7 @@ import (
 	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
 	"github.com/mgomes/senna/ratelimit"
+	"github.com/redis/go-redis/v9"
 )
 
 type testRateLimiter struct {
@@ -94,6 +95,22 @@ func (h *closeErrorIterableHandler) BuildIterator(ctx context.Context, job *senn
 		return nil, err
 	}
 	return closeErrorIterator{Iterator: iter, err: h.closeErr}, nil
+}
+
+type instrumentedIterableHandler struct {
+	*testIterableHandler
+	afterProcess func()
+	processErr   error
+}
+
+func (h *instrumentedIterableHandler) ProcessItem(ctx context.Context, job *senna.Job, item any) error {
+	if err := h.testIterableHandler.ProcessItem(ctx, job, item); err != nil {
+		return err
+	}
+	if h.afterProcess != nil {
+		h.afterProcess()
+	}
+	return h.processErr
 }
 
 func TestIterable_ProcessAll(t *testing.T) {
@@ -204,6 +221,310 @@ func TestIterable_CloseErrorPreventsCompletion(t *testing.T) {
 	}
 	if state.TotalItems != 2 {
 		t.Errorf("iteration state total items = %d, want 2", state.TotalItems)
+	}
+}
+
+func TestIterable_SaveErrorOnItemErrorIsReturned(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-save-item-error:*")
+
+	k := keys.New("test-iterable-save-item-error")
+	processErr := errors.New("process failed")
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1}),
+		processErr:          processErr,
+		afterProcess: func() {
+			if err := client.Close(); err != nil {
+				t.Fatalf("Client.Close() error = %v, want nil", err)
+			}
+		},
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	ctx := context.Background()
+	job := senna.NewJob("test_iterable", nil)
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+	}
+
+	err := w.processIterable(ctx, job, handler, opts)
+	if !errors.Is(err, processErr) {
+		t.Fatalf("processIterable() error = %v, want process error %v", err, processErr)
+	}
+	if !errors.Is(err, redis.ErrClosed) {
+		t.Fatalf("processIterable() error = %v, want Redis close error", err)
+	}
+}
+
+func TestIterable_SaveErrorBeforeCompletionPreventsOnComplete(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-save-complete:*")
+
+	k := keys.New("test-iterable-save-complete")
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1}),
+		afterProcess: func() {
+			if err := client.Close(); err != nil {
+				t.Fatalf("Client.Close() error = %v, want nil", err)
+			}
+		},
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	var completeCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnComplete: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				completeCalled.Store(true)
+				return nil
+			},
+		},
+	}
+
+	err := w.processIterable(context.Background(), senna.NewJob("test_iterable", nil), handler, opts)
+	if !errors.Is(err, redis.ErrClosed) {
+		t.Fatalf("processIterable() error = %v, want Redis close error", err)
+	}
+	if completeCalled.Load() {
+		t.Fatal("OnComplete called after completion state save failed")
+	}
+}
+
+func TestIterable_SaveErrorOnInterruptDoesNotReturnInterrupted(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-save-interrupt:*")
+
+	k := keys.New("test-iterable-save-interrupt")
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1, 2}),
+		afterProcess: func() {
+			if err := client.Close(); err != nil {
+				t.Fatalf("Client.Close() error = %v, want nil", err)
+			}
+		},
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	var stopCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxItemsPerRun:     1,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnStop: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				stopCalled.Store(true)
+				return nil
+			},
+		},
+	}
+
+	err := w.processIterable(context.Background(), senna.NewJob("test_iterable", nil), handler, opts)
+	if !errors.Is(err, redis.ErrClosed) {
+		t.Fatalf("processIterable() error = %v, want Redis close error", err)
+	}
+	if isInterruptedError(err) {
+		t.Fatalf("processIterable() error = %v, want non-interrupted save failure", err)
+	}
+	if stopCalled.Load() {
+		t.Fatal("OnStop called after interrupt state save failed")
+	}
+}
+
+func TestIterable_MaxItemsAfterCancellationReturnsInterrupted(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-cancelled-max-items:*")
+
+	k := keys.New("test-iterable-cancelled-max-items")
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1, 2}),
+		afterProcess:        cancel,
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	var stopCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxItemsPerRun:     1,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnStop: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				stopCalled.Store(true)
+				return nil
+			},
+		},
+	}
+	job := senna.NewJob("test_iterable", nil)
+
+	err := w.processIterable(ctx, job, handler, opts)
+	if !isInterruptedError(err) {
+		t.Fatalf("processIterable() error = %v, want InterruptedError", err)
+	}
+	if !stopCalled.Load() {
+		t.Fatal("OnStop not called after cancelled max-items interruption")
+	}
+
+	state, err := w.loadIterationState(context.Background(), k.IterationState(job.ID))
+	if err != nil {
+		t.Fatalf("loadIterationState() error = %v, want nil", err)
+	}
+	if state == nil {
+		t.Fatal("iteration state = nil, want saved state")
+	}
+	cursor, err := senna.CursorTo[int](state.Cursor)
+	if err != nil {
+		t.Fatalf("CursorTo[int](%v) error = %v, want nil", state.Cursor, err)
+	}
+	if cursor != 1 {
+		t.Errorf("cursor = %d, want 1", cursor)
+	}
+	if state.TotalItems != 1 {
+		t.Errorf("total items = %d, want 1", state.TotalItems)
+	}
+}
+
+func TestIterable_PeriodicCheckpointAfterCancellationReturnsInterrupted(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-cancelled-checkpoint:*")
+
+	k := keys.New("test-iterable-cancelled-checkpoint")
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+	job := senna.NewJob("test_iterable", nil)
+	stateKey := k.IterationState(job.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1, 2}),
+		afterProcess: func() {
+			cancelledState := &senna.IterationState{
+				JobID:     job.ID,
+				Cancelled: true,
+			}
+			if err := w.saveIterationState(context.Background(), stateKey, cancelledState); err != nil {
+				t.Fatalf("saveIterationState(cancelled) error = %v, want nil", err)
+			}
+			cancel()
+			time.Sleep(5 * time.Millisecond)
+		},
+	}
+
+	var stopCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: time.Millisecond,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnStop: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				stopCalled.Store(true)
+				return nil
+			},
+		},
+	}
+
+	err := w.processIterable(ctx, job, handler, opts)
+	if !isInterruptedError(err) {
+		t.Fatalf("processIterable() error = %v, want InterruptedError", err)
+	}
+	if !stopCalled.Load() {
+		t.Fatal("OnStop not called after cancelled checkpoint interruption")
+	}
+
+	state, err := w.loadIterationState(context.Background(), k.IterationState(job.ID))
+	if err != nil {
+		t.Fatalf("loadIterationState() error = %v, want nil", err)
+	}
+	if state == nil {
+		t.Fatal("iteration state = nil, want saved state")
+	}
+	cursor, err := senna.CursorTo[int](state.Cursor)
+	if err != nil {
+		t.Fatalf("CursorTo[int](%v) error = %v, want nil", state.Cursor, err)
+	}
+	if cursor != 1 {
+		t.Errorf("cursor = %d, want 1", cursor)
+	}
+	if state.TotalItems != 1 {
+		t.Errorf("total items = %d, want 1", state.TotalItems)
+	}
+	if !state.Cancelled {
+		t.Error("cancelled = false, want true")
+	}
+}
+
+func TestIterable_CompletionAfterCancellationUsesLiveContext(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-iterable-cancelled-completion:*")
+
+	k := keys.New("test-iterable-cancelled-completion")
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &instrumentedIterableHandler{
+		testIterableHandler: newTestIterableHandler([]any{1}),
+		afterProcess:        cancel,
+	}
+
+	w := &Worker{
+		id:    "worker-1",
+		redis: client,
+		keys:  k,
+	}
+
+	var completeCalled atomic.Bool
+	opts := &IterableJobOptions{
+		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxRetries:         senna.DefaultRetryCount,
+		RetryBackoff:       senna.DefaultBackoff(),
+		Callbacks: &senna.IterableCallbacks{
+			OnComplete: func(ctx context.Context, job *senna.Job, state *senna.IterationState) error {
+				completeCalled.Store(true)
+				return nil
+			},
+		},
+	}
+	job := senna.NewJob("test_iterable", nil)
+
+	if err := w.processIterable(ctx, job, handler, opts); err != nil {
+		t.Fatalf("processIterable() error = %v, want nil", err)
+	}
+	if !completeCalled.Load() {
+		t.Fatal("OnComplete not called after cancelled terminal checkpoint")
+	}
+
+	exists, err := client.Exists(context.Background(), k.IterationState(job.ID)).Result()
+	if err != nil {
+		t.Fatalf("Exists(%q) error = %v, want nil", k.IterationState(job.ID), err)
+	}
+	if exists != 0 {
+		t.Errorf("Exists(%q) = %d, want 0", k.IterationState(job.ID), exists)
 	}
 }
 
@@ -361,8 +682,8 @@ func TestIterable_CursorPersistence(t *testing.T) {
 }
 
 func isInterruptedError(err error) bool {
-	_, ok := err.(*senna.InterruptedError)
-	return ok
+	var interruptedErr *senna.InterruptedError
+	return errors.As(err, &interruptedErr)
 }
 
 func TestIterable_Callbacks(t *testing.T) {
