@@ -15,24 +15,44 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const sequentialLockTTL = 30 * time.Second
-
 type fetcher struct {
-	client         *redis.Client
-	keys           *keys.Keys
-	queues         []senna.QueueConfig
-	pollInterval   time.Duration
-	strictPriority bool
-	sequentialSema map[string]chan struct{} // per-queue semaphore for local coordination
-	sequentialMu   sync.RWMutex
-	sequentialHeld map[string]struct{}
+	client            *redis.Client
+	keys              *keys.Keys
+	queues            []senna.QueueConfig
+	pollInterval      time.Duration
+	strictPriority    bool
+	sequentialLockTTL time.Duration
+	sequentialSema    map[string]chan struct{} // per-queue semaphore for local coordination
+	sequentialMu      sync.RWMutex
+	sequentialHeld    map[string]struct{}
 }
 
 func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, pollInterval time.Duration, strictPriority bool) *fetcher {
+	return newFetcherWithSequentialLockTTL(
+		client,
+		k,
+		queues,
+		pollInterval,
+		strictPriority,
+		senna.DefaultWorkerSettings().SequentialLockTTL,
+	)
+}
+
+func newFetcherWithSequentialLockTTL(
+	client *redis.Client,
+	k *keys.Keys,
+	queues []senna.QueueConfig,
+	pollInterval time.Duration,
+	strictPriority bool,
+	sequentialLockTTL time.Duration,
+) *fetcher {
 	for i := range queues {
 		if queues[i].Priority < 1 {
 			queues[i].Priority = 1
 		}
+	}
+	if sequentialLockTTL <= 0 {
+		sequentialLockTTL = senna.DefaultWorkerSettings().SequentialLockTTL
 	}
 
 	// For strict priority, sort queues by priority descending
@@ -55,13 +75,14 @@ func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, 
 	}
 
 	return &fetcher{
-		client:         client,
-		keys:           k,
-		queues:         queues,
-		pollInterval:   pollInterval,
-		strictPriority: strictPriority,
-		sequentialSema: sema,
-		sequentialHeld: make(map[string]struct{}),
+		client:            client,
+		keys:              k,
+		queues:            queues,
+		pollInterval:      pollInterval,
+		strictPriority:    strictPriority,
+		sequentialLockTTL: sequentialLockTTL,
+		sequentialSema:    sema,
+		sequentialHeld:    make(map[string]struct{}),
 	}
 }
 
@@ -78,7 +99,7 @@ func (f *fetcher) RenewSequentialLocks(ctx context.Context, workerID string) {
 		lockKey := f.keys.SequentialLock(q.Name)
 		holder, err := f.client.Get(ctx, lockKey).Result()
 		if err == nil && holder == workerID {
-			f.client.Expire(ctx, lockKey, sequentialLockTTL)
+			f.client.PExpire(ctx, lockKey, f.sequentialLockTTL)
 		}
 	}
 }
@@ -277,7 +298,7 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 	result, err := sequentialFetchScript.Run(
 		ctx, f.client,
 		[]string{queueKey, inFlightKey, lockKey},
-		workerID, int(sequentialLockTTL.Seconds()),
+		workerID, durationMilliseconds(f.sequentialLockTTL),
 	)
 	if errors.Is(err, redis.Nil) {
 		// Script returned nil - queue empty or lock held by another worker
@@ -329,6 +350,14 @@ func (f *fetcher) discardClaimedSequentialPayload(ctx context.Context, workerID,
 		return fmt.Errorf("discard invalid sequential payload from queue %s: %w", queueName, err)
 	}
 	return nil
+}
+
+func durationMilliseconds(d time.Duration) int64 {
+	ms := d.Milliseconds()
+	if ms <= 0 {
+		return 1
+	}
+	return ms
 }
 
 // BlockingFetch blocks until a job is available, then atomically moves it to in-flight.

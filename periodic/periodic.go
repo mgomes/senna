@@ -33,10 +33,20 @@ type Job struct {
 // Option configures a periodic job.
 type Option func(*Job)
 
+// SchedulerOption configures a periodic scheduler.
+type SchedulerOption func(*Scheduler)
+
 // WithQueue sets the queue for enqueued jobs.
 func WithQueue(queue string) Option {
 	return func(j *Job) {
 		j.Queue = queue
+	}
+}
+
+// WithPollInterval sets how often the scheduler checks registered jobs.
+func WithPollInterval(d time.Duration) SchedulerOption {
+	return func(s *Scheduler) {
+		s.interval = d
 	}
 }
 
@@ -70,21 +80,35 @@ type Scheduler struct {
 }
 
 // NewScheduler creates a new periodic job scheduler.
-func NewScheduler(redis redis.Cmdable, k *keys.Keys) *Scheduler {
+func NewScheduler(redis redis.Cmdable, k *keys.Keys, opts ...SchedulerOption) *Scheduler {
 	done := make(chan struct{})
 	close(done)
 
-	return &Scheduler{
+	s := &Scheduler{
 		redis: redis,
 		keys:  k,
 		jobs:  make([]*Job, 0),
 		parser: cron.NewParser(
 			cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow,
 		),
-		interval: 15 * time.Second,
+		interval: senna.DefaultWorkerSettings().PeriodicPollInterval,
 		stopCh:   make(chan struct{}),
 		done:     done,
 	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.interval <= 0 {
+		s.interval = senna.DefaultWorkerSettings().PeriodicPollInterval
+	}
+
+	return s
+}
+
+// PollInterval returns how often the scheduler checks registered jobs.
+func (s *Scheduler) PollInterval() time.Duration {
+	return s.interval
 }
 
 // Register adds a periodic job to the scheduler.

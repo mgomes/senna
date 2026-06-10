@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mgomes/senna"
 	"github.com/mgomes/senna/internal/keys"
 )
 
@@ -22,6 +23,36 @@ func waitForMinuteWindow(guard time.Duration) {
 		} else {
 			time.Sleep(remaining + 10*time.Millisecond)
 		}
+	}
+}
+
+func TestScheduler_PollInterval_Default(t *testing.T) {
+	t.Parallel()
+
+	s := NewScheduler(nil, keys.New("test"))
+	want := senna.DefaultWorkerSettings().PeriodicPollInterval
+	if s.PollInterval() != want {
+		t.Errorf("NewScheduler(nil, keys.New(test)).PollInterval() = %v, want %v", s.PollInterval(), want)
+	}
+}
+
+func TestScheduler_PollInterval_WithOption(t *testing.T) {
+	t.Parallel()
+
+	const want = 250 * time.Millisecond
+	s := NewScheduler(nil, keys.New("test"), WithPollInterval(want))
+	if s.PollInterval() != want {
+		t.Errorf("NewScheduler(nil, keys.New(test), WithPollInterval(%v)).PollInterval() = %v, want %v", want, s.PollInterval(), want)
+	}
+}
+
+func TestScheduler_PollInterval_WithNonPositiveOption(t *testing.T) {
+	t.Parallel()
+
+	s := NewScheduler(nil, keys.New("test"), WithPollInterval(0))
+	want := senna.DefaultWorkerSettings().PeriodicPollInterval
+	if s.PollInterval() != want {
+		t.Errorf("NewScheduler(nil, keys.New(test), WithPollInterval(0)).PollInterval() = %v, want %v", s.PollInterval(), want)
 	}
 }
 

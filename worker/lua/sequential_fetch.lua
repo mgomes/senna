@@ -4,7 +4,7 @@
 -- KEYS[2] = in-flight key
 -- KEYS[3] = lock key
 -- ARGV[1] = worker ID
--- ARGV[2] = lock TTL in seconds
+-- ARGV[2] = lock TTL in milliseconds
 
 local queue_key = KEYS[1]
 local inflight_key = KEYS[2]
@@ -27,6 +27,6 @@ if not job then
 end
 
 -- Successfully fetched a job, acquire/refresh the lock
-redis.call("SET", lock_key, worker_id, "EX", lock_ttl)
+redis.call("SET", lock_key, worker_id, "PX", lock_ttl)
 
 return job
