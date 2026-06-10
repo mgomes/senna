@@ -21,6 +21,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var errWorkerAlreadyRunning = errors.New("worker already running")
+
 // Worker fetches and executes jobs from Redis queues.
 type Worker struct {
 	id         string
@@ -172,12 +174,14 @@ func (w *Worker) PeriodicJobs() []*periodic.Job {
 	return w.periodic.Jobs()
 }
 
-// Run starts the worker loop and blocks until shutdown completes.
+// Run starts the worker loop and blocks until shutdown completes. If shutdown
+// exceeds ShutdownTimeout, Run returns context.DeadlineExceeded and rejects
+// another Run call until the still-active worker goroutines exit.
 func (w *Worker) Run(ctx context.Context) error {
 	w.mu.Lock()
 	if w.running {
 		w.mu.Unlock()
-		return errors.New("worker already running")
+		return errWorkerAlreadyRunning
 	}
 	w.running = true
 	w.stopping = false
