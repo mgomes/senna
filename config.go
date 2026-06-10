@@ -14,7 +14,6 @@ type Config struct {
 	Worker     WorkerSettings
 	Client     ClientSettings
 	Encryption EncryptionSettings
-	Metrics    MetricsSettings
 }
 
 // RedisConfig configures the Redis connection used by Senna.
@@ -128,15 +127,6 @@ type EncryptionSettings struct {
 	Key     []byte
 }
 
-// MetricsSettings configures metrics emission.
-type MetricsSettings struct {
-	Enabled    bool
-	StatsdAddr string
-	Prefix     string
-	SampleRate float64
-	Tags       map[string]string
-}
-
 // Option mutates a Config.
 type Option func(*Config)
 
@@ -215,15 +205,6 @@ func WithEncryptionConfig(key []byte) Option {
 	return func(c *Config) {
 		c.Encryption.Enabled = true
 		c.Encryption.Key = key
-	}
-}
-
-// WithMetrics enables metrics emission with the provided address and prefix.
-func WithMetrics(addr, prefix string) Option {
-	return func(c *Config) {
-		c.Metrics.Enabled = true
-		c.Metrics.StatsdAddr = addr
-		c.Metrics.Prefix = prefix
 	}
 }
 
