@@ -68,6 +68,10 @@ func (b *Batch) Add(jobType string, args map[string]any, opts ...EnqueueOption) 
 		b.err = fmt.Errorf("batch.Add does not support options: %s", strings.Join(unsupported, ", "))
 		return b
 	}
+	if err := validateQueueName(cfg.queue); err != nil {
+		b.err = err
+		return b
+	}
 
 	job := senna.NewJob(jobType, args)
 	job.Queue = cfg.queue

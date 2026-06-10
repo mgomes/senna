@@ -67,6 +67,8 @@ c.EnqueueIn(ctx, 5*time.Minute, "send_reminder", map[string]any{"user_id": 123})
 c.Enqueue(ctx, "process_payment", args, client.WithQueue("critical"))
 ```
 
+Queue names must not be empty or only whitespace. Senna validates that at enqueue time, but it does not verify that a worker is currently configured for every valid queue name. A job sent to a queue no worker consumes will remain queued until a worker starts consuming that queue.
+
 ### Processing Jobs
 
 ```go

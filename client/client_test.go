@@ -98,6 +98,76 @@ func TestClient_EnqueueWithQueue(t *testing.T) {
 	}
 }
 
+func TestClient_EnqueueRejectsInvalidQueueName(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-invalid-queue:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-invalid-queue",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	tests := []struct {
+		name string
+		opts []EnqueueOption
+	}{
+		{
+			name: "empty option queue",
+			opts: []EnqueueOption{WithQueue("")},
+		},
+		{
+			name: "whitespace option queue",
+			opts: []EnqueueOption{WithQueue(" \t\n")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job, err := client.Enqueue(context.Background(), "process", nil, tt.opts...)
+			if !errors.Is(err, ErrInvalidQueueName) {
+				t.Fatalf("Enqueue(%s) error = %v, want %v", tt.name, err, ErrInvalidQueueName)
+			}
+			if job != nil {
+				t.Fatalf("Enqueue(%s) job = %#v, want nil", tt.name, job)
+			}
+		})
+	}
+
+	queueCount, err := redisClient.Exists(context.Background(), "test-invalid-queue:queues").Result()
+	if err != nil {
+		t.Fatalf("Exists(queues) error = %v, want nil", err)
+	}
+	if queueCount != 0 {
+		t.Errorf("Exists(queues) = %d, want 0", queueCount)
+	}
+}
+
+func TestClient_EnqueueRejectsInvalidDefaultQueue(t *testing.T) {
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-invalid-default-queue",
+		Settings: Settings{
+			DefaultQueue: " ",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	job, err := client.Enqueue(context.Background(), "process", nil)
+	if !errors.Is(err, ErrInvalidQueueName) {
+		t.Fatalf("Enqueue(default whitespace queue) error = %v, want %v", err, ErrInvalidQueueName)
+	}
+	if job != nil {
+		t.Fatalf("Enqueue(default whitespace queue) job = %#v, want nil", job)
+	}
+}
+
 func TestClient_EnqueueWithRetry(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
@@ -380,6 +450,68 @@ func TestClient_Batch(t *testing.T) {
 	}
 	if batchJobsCount != 3 {
 		t.Errorf("expected 3 jobs in batch tracking, got %d", batchJobsCount)
+	}
+}
+
+func TestClient_EnqueueBatchRejectsInvalidJobQueue(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-invalid-job-queue:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-invalid-job-queue",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	batch := NewBatch().
+		Add("job", nil, WithQueue(" \t\n"))
+
+	err = client.EnqueueBatch(context.Background(), batch)
+	if !errors.Is(err, ErrInvalidQueueName) {
+		t.Fatalf("EnqueueBatch(invalid job queue) error = %v, want %v", err, ErrInvalidQueueName)
+	}
+
+	stateCount, err := redisClient.Exists(context.Background(), "test-batch-invalid-job-queue:batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("Exists(batch state) error = %v, want nil", err)
+	}
+	if stateCount != 0 {
+		t.Errorf("Exists(batch state) = %d, want 0", stateCount)
+	}
+}
+
+func TestClient_EnqueueBatchRejectsInvalidCallbackQueue(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-invalid-callback-queue:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-invalid-callback-queue",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	batch := NewBatch().
+		Add("job", nil).
+		OnCompleteCallback("complete").
+		WithCallbackQueue(" \t\n")
+
+	err = client.EnqueueBatch(context.Background(), batch)
+	if !errors.Is(err, ErrInvalidQueueName) {
+		t.Fatalf("EnqueueBatch(invalid callback queue) error = %v, want %v", err, ErrInvalidQueueName)
+	}
+
+	stateCount, err := redisClient.Exists(context.Background(), "test-batch-invalid-callback-queue:batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("Exists(batch state) error = %v, want nil", err)
+	}
+	if stateCount != 0 {
+		t.Errorf("Exists(batch state) = %d, want 0", stateCount)
 	}
 }
 
@@ -867,6 +999,37 @@ func TestClient_EnqueueBulk_WithQueue(t *testing.T) {
 	isMember, _ := redisClient.SIsMember(ctx, "test-bulk-queue:queues", "critical").Result()
 	if !isMember {
 		t.Error("critical queue should be in queues set")
+	}
+}
+
+func TestClient_EnqueueBulkRejectsInvalidQueueName(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-invalid-queue:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-bulk-invalid-queue",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	argsList := []map[string]any{{"id": 1}}
+	jobs, err := client.EnqueueBulk(context.Background(), "bulk_job", argsList, WithQueue(" \t\n"))
+	if !errors.Is(err, ErrInvalidQueueName) {
+		t.Fatalf("EnqueueBulk(invalid queue) error = %v, want %v", err, ErrInvalidQueueName)
+	}
+	if jobs != nil {
+		t.Fatalf("EnqueueBulk(invalid queue) jobs = %#v, want nil", jobs)
+	}
+
+	queueCount, err := redisClient.Exists(context.Background(), "test-bulk-invalid-queue:queues").Result()
+	if err != nil {
+		t.Fatalf("Exists(queues) error = %v, want nil", err)
+	}
+	if queueCount != 0 {
+		t.Errorf("Exists(queues) = %d, want 0", queueCount)
 	}
 }
 
