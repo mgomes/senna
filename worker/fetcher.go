@@ -324,7 +324,8 @@ func (f *fetcher) discardClaimedSequentialPayload(ctx context.Context, workerID,
 		f.keys.InFlight(workerID),
 		f.keys.SequentialLock(queueName),
 	}
-	if _, err := discardSequentialFetchScript.Run(ctx, f.client, keys, payload, workerID); err != nil {
+	cleanupCtx := context.WithoutCancel(ctx)
+	if _, err := discardSequentialFetchScript.Run(cleanupCtx, f.client, keys, payload, workerID); err != nil {
 		return fmt.Errorf("discard invalid sequential payload from queue %s: %w", queueName, err)
 	}
 	return nil

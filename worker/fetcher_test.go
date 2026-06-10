@@ -963,6 +963,48 @@ func TestFetcher_Sequential_UnmarshalErrorDiscardsPayloadAndReleasesLock(t *test
 	}
 }
 
+func TestFetcher_Sequential_DiscardClaimedPayloadIgnoresCancellation(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-invalid-cancel:*")
+
+	k := keys.New("test-seq-invalid-cancel")
+	queue := senna.QueueConfig{Name: "transforms", Priority: 1, Sequential: true}
+	f := newFetcher(client, k, []senna.QueueConfig{queue}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	workerID := "worker-1"
+	payload := "not-json"
+	if err := client.LPush(ctx, k.InFlight(workerID), payload).Err(); err != nil {
+		t.Fatalf("LPush(%q) error = %v, want nil", k.InFlight(workerID), err)
+	}
+	if err := client.Set(ctx, k.SequentialLock("transforms"), workerID, sequentialLockTTL).Err(); err != nil {
+		t.Fatalf("Set(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if err := f.discardClaimedSequentialPayload(canceledCtx, workerID, "transforms", payload); err != nil {
+		t.Fatalf("discardClaimedSequentialPayload(canceled context) error = %v, want nil", err)
+	}
+
+	inFlightLen, err := client.LLen(ctx, k.InFlight(workerID)).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", k.InFlight(workerID), err)
+	}
+	if inFlightLen != 0 {
+		t.Errorf("LLen(%q) = %d, want 0", k.InFlight(workerID), inFlightLen)
+	}
+
+	lockExists, err := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("Exists(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+	if lockExists != 0 {
+		t.Errorf("Exists(%q) = %d, want 0", k.SequentialLock("transforms"), lockExists)
+	}
+}
+
 func TestFetcher_Sequential_OnlyOneWorkerProcesses(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-seq-exclusive:*")
