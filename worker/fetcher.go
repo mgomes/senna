@@ -305,7 +305,11 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 
 	var job senna.Job
 	if err := json.Unmarshal([]byte(jobData), &job); err != nil {
+		cleanupErr := f.discardClaimedSequentialPayload(ctx, workerID, queueName, jobData)
 		<-sema // Release local semaphore
+		if cleanupErr != nil {
+			return nil, errors.Join(err, cleanupErr)
+		}
 		return nil, err
 	}
 
@@ -313,6 +317,18 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID, queueN
 	f.holdSequentialLock(queueName)
 	job.SetRaw(jobData)
 	return &job, nil
+}
+
+func (f *fetcher) discardClaimedSequentialPayload(ctx context.Context, workerID, queueName, payload string) error {
+	keys := []string{
+		f.keys.InFlight(workerID),
+		f.keys.SequentialLock(queueName),
+	}
+	cleanupCtx := context.WithoutCancel(ctx)
+	if _, err := discardSequentialFetchScript.Run(cleanupCtx, f.client, keys, payload, workerID); err != nil {
+		return fmt.Errorf("discard invalid sequential payload from queue %s: %w", queueName, err)
+	}
+	return nil
 }
 
 // BlockingFetch blocks until a job is available, then atomically moves it to in-flight.

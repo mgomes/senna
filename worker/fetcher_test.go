@@ -901,6 +901,110 @@ func TestFetcher_Sequential_AcquiresLock(t *testing.T) {
 	}
 }
 
+func TestFetcher_Sequential_UnmarshalErrorDiscardsPayloadAndReleasesLock(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-invalid:*")
+
+	k := keys.New("test-seq-invalid")
+	queue := senna.QueueConfig{Name: "transforms", Priority: 1, Sequential: true}
+	f1 := newFetcher(client, k, []senna.QueueConfig{queue}, 100*time.Millisecond, false)
+	f2 := newFetcher(client, k, []senna.QueueConfig{queue}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	if err := client.LPush(ctx, k.Queue("transforms"), "not-json").Err(); err != nil {
+		t.Fatalf("LPush(invalid sequential payload) error = %v, want nil", err)
+	}
+
+	fetched, err := f1.Fetch(ctx, "worker-1")
+	if err == nil {
+		t.Fatal("Fetch(invalid sequential payload) error = nil, want decode error")
+	}
+	if fetched != nil {
+		t.Fatalf("Fetch(invalid sequential payload) job = %#v, want nil", fetched)
+	}
+
+	lockExists, err := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("Exists(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+	if lockExists != 0 {
+		t.Errorf("sequential lock exists = %d, want 0", lockExists)
+	}
+	if f1.hasSequentialLock("transforms") {
+		t.Error("local sequential lock held after invalid payload, want released")
+	}
+
+	inFlightLen, err := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", k.InFlight("worker-1"), err)
+	}
+	if inFlightLen != 0 {
+		t.Errorf("LLen(%q) = %d, want 0", k.InFlight("worker-1"), inFlightLen)
+	}
+
+	validJob := senna.NewJob("valid_job", nil)
+	validData, err := validJob.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	if err := client.LPush(ctx, k.Queue("transforms"), string(validData)).Err(); err != nil {
+		t.Fatalf("LPush(valid sequential payload) error = %v, want nil", err)
+	}
+
+	fetched, err = f2.Fetch(ctx, "worker-2")
+	if err != nil {
+		t.Fatalf("second Fetch() error = %v, want nil", err)
+	}
+	if fetched == nil {
+		t.Fatal("second Fetch() job = nil, want valid job")
+	}
+	if fetched.ID != validJob.ID {
+		t.Errorf("second Fetch() job ID = %q, want %q", fetched.ID, validJob.ID)
+	}
+}
+
+func TestFetcher_Sequential_DiscardClaimedPayloadIgnoresCancellation(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-invalid-cancel:*")
+
+	k := keys.New("test-seq-invalid-cancel")
+	queue := senna.QueueConfig{Name: "transforms", Priority: 1, Sequential: true}
+	f := newFetcher(client, k, []senna.QueueConfig{queue}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	workerID := "worker-1"
+	payload := "not-json"
+	if err := client.LPush(ctx, k.InFlight(workerID), payload).Err(); err != nil {
+		t.Fatalf("LPush(%q) error = %v, want nil", k.InFlight(workerID), err)
+	}
+	if err := client.Set(ctx, k.SequentialLock("transforms"), workerID, sequentialLockTTL).Err(); err != nil {
+		t.Fatalf("Set(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if err := f.discardClaimedSequentialPayload(canceledCtx, workerID, "transforms", payload); err != nil {
+		t.Fatalf("discardClaimedSequentialPayload(canceled context) error = %v, want nil", err)
+	}
+
+	inFlightLen, err := client.LLen(ctx, k.InFlight(workerID)).Result()
+	if err != nil {
+		t.Fatalf("LLen(%q) error = %v, want nil", k.InFlight(workerID), err)
+	}
+	if inFlightLen != 0 {
+		t.Errorf("LLen(%q) = %d, want 0", k.InFlight(workerID), inFlightLen)
+	}
+
+	lockExists, err := client.Exists(ctx, k.SequentialLock("transforms")).Result()
+	if err != nil {
+		t.Fatalf("Exists(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+	if lockExists != 0 {
+		t.Errorf("Exists(%q) = %d, want 0", k.SequentialLock("transforms"), lockExists)
+	}
+}
+
 func TestFetcher_Sequential_OnlyOneWorkerProcesses(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-seq-exclusive:*")
