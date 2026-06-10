@@ -73,8 +73,26 @@ func (bs *BatchStatus) batchFailedKey() string {
 	return bs.keys.BatchFailed(bs.bid)
 }
 
-// Refresh reloads the batch state and failed job IDs from Redis.
+// Refresh reloads the batch state from Redis.
 func (bs *BatchStatus) Refresh(ctx context.Context) error {
+	data, err := bs.redis.Get(ctx, bs.batchKey()).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return &BatchNotFoundError{BatchID: bs.bid}
+		}
+		return err
+	}
+
+	state, err := decodeBatchState(data)
+	if err != nil {
+		return err
+	}
+	bs.state = state
+	return nil
+}
+
+// RefreshFull reloads the batch state and failed job IDs from Redis.
+func (bs *BatchStatus) RefreshFull(ctx context.Context) error {
 	pipe := bs.redis.Pipeline()
 	stateCmd := pipe.Get(ctx, bs.batchKey())
 	failedCmd := pipe.SMembers(ctx, bs.batchFailedKey())
@@ -96,15 +114,15 @@ func (bs *BatchStatus) Refresh(ctx context.Context) error {
 		return execErr
 	}
 
-	var state BatchState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
+	state, err := decodeBatchState(data)
+	if err != nil {
 		return err
 	}
 	if failedJIDs == nil {
 		failedJIDs = []string{}
 	}
 	state.FailedJIDs = failedJIDs
-	bs.state = &state
+	bs.state = state
 	return nil
 }
 
@@ -177,7 +195,7 @@ func (bs *BatchStatus) CreatedAt() time.Time {
 	return bs.state.CreatedAt
 }
 
-// FailedJIDs returns the job IDs of failed jobs from the refreshed snapshot.
+// FailedJIDs returns the job IDs of failed jobs.
 func (bs *BatchStatus) FailedJIDs(ctx context.Context) ([]string, error) {
 	if bs.state != nil && bs.state.FailedJIDs != nil {
 		return copyStrings(bs.state.FailedJIDs), nil
@@ -292,6 +310,14 @@ func copyStrings(values []string) []string {
 	copied := make([]string, len(values))
 	copy(copied, values)
 	return copied
+}
+
+func decodeBatchState(data string) (*BatchState, error) {
+	var state BatchState
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
 }
 
 // BatchSet provides iteration over all known batches.
