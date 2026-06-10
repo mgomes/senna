@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -289,6 +290,87 @@ func TestWorker_RunRejectsRestartUntilTimedOutShutdownCompletes(t *testing.T) {
 	}
 }
 
+func TestWorker_SequentialLockReleasedAfterJobCompletion(t *testing.T) {
+	const queueName = "serial"
+	w := newSequentialLifecycleTestWorker(t, "test-worker-seq-lock-release", queueName)
+
+	finished := make(chan struct{})
+	w.Register("fast_sequential_job", func(ctx context.Context, job *senna.Job) error {
+		close(finished)
+		return nil
+	})
+
+	job := senna.NewJob("fast_sequential_job", nil)
+	job.Queue = queueName
+	enqueueWorkerJob(t, w, job)
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("fast_sequential_job handler did not finish")
+	}
+
+	waitForSequentialLockReleased(t, w, queueName)
+
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); err != nil {
+		t.Fatalf("Worker.Run() error = %v, want nil", err)
+	}
+}
+
+func TestWorker_SequentialLockRenewalStopsAfterShutdownTimeout(t *testing.T) {
+	const queueName = "serial"
+	w := newSequentialLifecycleTestWorker(t, "test-worker-seq-renew-timeout", queueName)
+	w.config.Settings.ShutdownTimeout = 20 * time.Millisecond
+	w.sequentialLockRenewEvery = 5 * time.Millisecond
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	t.Cleanup(releaseHandler)
+
+	w.Register("stuck_sequential_job", func(ctx context.Context, job *senna.Job) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	job := senna.NewJob("stuck_sequential_job", nil)
+	job.Queue = queueName
+	enqueueWorkerJob(t, w, job)
+
+	errCh := runWorker(t, w)
+	waitForWorkerRunning(t, w)
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stuck_sequential_job handler did not start")
+	}
+	waitForSequentialLockHolder(t, w, queueName, w.id)
+
+	w.Stop()
+	if err := waitForWorkerExit(t, errCh); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Worker.Run() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	if err := w.redis.PExpire(context.Background(), w.keys.SequentialLock(queueName), 25*time.Millisecond).Err(); err != nil {
+		t.Fatalf("PExpire(%q) error = %v, want nil", w.keys.SequentialLock(queueName), err)
+	}
+	waitForSequentialLockReleased(t, w, queueName)
+
+	releaseHandler()
+	waitForWorkerStopped(t, w)
+}
+
 func TestWorker_FinalizationShutdownLogPreservesContextValues(t *testing.T) {
 	key := workerLogContextKey("trace_id")
 	values := captureLogContextValue(t, key, "leaving job in-flight after finalization failure during shutdown")
@@ -408,6 +490,96 @@ func newLifecycleTestWorker(t *testing.T, namespace string) *Worker {
 	})
 
 	return w
+}
+
+func newSequentialLifecycleTestWorker(t *testing.T, namespace, queueName string) *Worker {
+	t.Helper()
+
+	settings := senna.DefaultWorkerSettings()
+	settings.Concurrency = 1
+	settings.Queues = []senna.QueueConfig{{Name: queueName, Priority: 1, Sequential: true}}
+	settings.PollInterval = 10 * time.Millisecond
+	settings.ShutdownTimeout = time.Second
+	settings.HeartbeatRate = time.Hour
+	settings.ScheduledPollInterval = time.Hour
+
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+		Settings:  settings,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	flushTestKeys(t, w.redis, namespace+":*")
+	t.Cleanup(func() {
+		flushTestKeys(t, w.redis, namespace+":*")
+		_ = w.redis.Close()
+	})
+
+	return w
+}
+
+func enqueueWorkerJob(t *testing.T, w *Worker, job *senna.Job) {
+	t.Helper()
+
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	if err := w.redis.LPush(context.Background(), w.keys.Queue(job.Queue), string(data)).Err(); err != nil {
+		t.Fatalf("LPush(%q) error = %v, want nil", w.keys.Queue(job.Queue), err)
+	}
+}
+
+func waitForSequentialLockHolder(t *testing.T, w *Worker, queueName, want string) {
+	t.Helper()
+
+	lockKey := w.keys.SequentialLock(queueName)
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		got, err := w.redis.Get(context.Background(), lockKey).Result()
+		if err == nil && got == want {
+			return
+		}
+		if err != nil && !errors.Is(err, redis.Nil) {
+			t.Fatalf("Get(%q) error = %v, want nil or redis.Nil", lockKey, err)
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("sequential lock holder for %q did not become %q", queueName, want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForSequentialLockReleased(t *testing.T, w *Worker, queueName string) {
+	t.Helper()
+
+	lockKey := w.keys.SequentialLock(queueName)
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		exists, err := w.redis.Exists(context.Background(), lockKey).Result()
+		if err != nil {
+			t.Fatalf("Exists(%q) error = %v, want nil", lockKey, err)
+		}
+		if exists == 0 {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("sequential lock %q still exists", lockKey)
+		case <-ticker.C:
+		}
+	}
 }
 
 func runWorker(t *testing.T, w *Worker) <-chan error {
