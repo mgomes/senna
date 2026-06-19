@@ -74,6 +74,7 @@ func (bh *BatchHandle) AddJobs(ctx context.Context, jobs []*senna.Job) error {
 	// 3. Enqueues all jobs
 	keys := []string{
 		bh.keys.Batch(bh.bid),
+		bh.keys.BatchProgress(bh.bid),
 		bh.keys.BatchJobs(bh.bid),
 	}
 
@@ -120,7 +121,7 @@ func (bh *BatchHandle) Add(ctx context.Context, jobType string, args map[string]
 // Invalidate marks the batch as invalidated.
 // Jobs that check for validity will skip execution.
 func (bh *BatchHandle) Invalidate(ctx context.Context) error {
-	keys := []string{bh.keys.Batch(bh.bid)}
+	keys := []string{bh.keys.Batch(bh.bid), bh.keys.BatchProgress(bh.bid)}
 
 	var invalidateResult struct {
 		Error   string `json:"error,omitempty"`
@@ -142,6 +143,14 @@ func (bh *BatchHandle) Invalidate(ctx context.Context) error {
 
 // Valid checks if the batch is still valid (not invalidated).
 func (bh *BatchHandle) Valid(ctx context.Context) (bool, error) {
+	invalidated, err := bh.redis.HGet(ctx, bh.keys.BatchProgress(bh.bid), "invalidated").Result()
+	if err == nil {
+		return invalidated != "1" && invalidated != "true", nil
+	}
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return false, err
+	}
+
 	data, err := bh.redis.Get(ctx, bh.keys.Batch(bh.bid)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {

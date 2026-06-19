@@ -644,7 +644,12 @@ func TestClient_EnqueueBatch_RejectsWrongQueueTypeWithoutQueueingPartialJobs(t *
 		t.Errorf("default queue length = %d, want 0", queueLength)
 	}
 
-	keysLeft, err := redisClient.Exists(ctx, client.keys.Batch(batch.ID), client.keys.BatchJobs(batch.ID)).Result()
+	keysLeft, err := redisClient.Exists(
+		ctx,
+		client.keys.Batch(batch.ID),
+		client.keys.BatchProgress(batch.ID),
+		client.keys.BatchJobs(batch.ID),
+	).Result()
 	if err != nil {
 		t.Fatalf("failed to check batch cleanup: %v", err)
 	}
@@ -697,6 +702,7 @@ func TestClientCleanupOrphanedBatch_UsesUnlinkForBatchData(t *testing.T) {
 	batchID := "batch-1"
 	batchDataKeys := []string{
 		client.keys.Batch(batchID),
+		client.keys.BatchProgress(batchID),
 		client.keys.BatchJobs(batchID),
 		client.keys.BatchFailed(batchID),
 		client.keys.BatchCallbacks(batchID),
@@ -704,6 +710,9 @@ func TestClientCleanupOrphanedBatch_UsesUnlinkForBatchData(t *testing.T) {
 
 	if err := redisClient.Set(ctx, client.keys.Batch(batchID), "{}", 0).Err(); err != nil {
 		t.Fatalf("Set(batch state) error = %v, want nil", err)
+	}
+	if err := redisClient.HSet(ctx, client.keys.BatchProgress(batchID), "pending", 1).Err(); err != nil {
+		t.Fatalf("HSet(batch progress) error = %v, want nil", err)
 	}
 	if err := redisClient.SAdd(ctx, client.keys.BatchJobs(batchID), "jid-1").Err(); err != nil {
 		t.Fatalf("SAdd(batch jobs) error = %v, want nil", err)

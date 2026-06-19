@@ -469,11 +469,17 @@ func TestBatchStatusRefreshDoesNotLoadFailedJIDs(t *testing.T) {
 		t.Fatalf("BatchStatus.Refresh(ctx) error = %v, want nil", err)
 	}
 
-	if got := hook.pipelines.Load(); got != 0 {
-		t.Errorf("Redis pipelines after Refresh = %d, want 0", got)
+	if got := hook.singleCommands.Load(); got != 0 {
+		t.Errorf("single Redis commands after Refresh = %d, want 0", got)
 	}
-	wantCommandNames := []string{"get"}
-	if diff := cmp.Diff(wantCommandNames, hook.singleCommandNames(), cmpopts.SortSlices(func(a, b string) bool {
+	if got := hook.pipelines.Load(); got != 1 {
+		t.Errorf("Redis pipelines after Refresh = %d, want 1", got)
+	}
+	if got := hook.pipelineCommands.Load(); got != 2 {
+		t.Errorf("Redis pipeline command count = %d, want 2", got)
+	}
+	wantCommandNames := []string{"get", "hgetall"}
+	if diff := cmp.Diff(wantCommandNames, hook.pipelineCommandNames(), cmpopts.SortSlices(func(a, b string) bool {
 		return a < b
 	})); diff != "" {
 		t.Errorf("Redis command names after Refresh mismatch (-want +got):\n%s", diff)
@@ -545,10 +551,10 @@ func TestBatchStatusRefreshFullLoadsFailedJIDsInSinglePipeline(t *testing.T) {
 	if got := hook.pipelines.Load(); got != 1 {
 		t.Errorf("Redis pipelines after hook install = %d, want 1", got)
 	}
-	if got := hook.pipelineCommands.Load(); got != 2 {
-		t.Errorf("Redis pipeline command count = %d, want 2", got)
+	if got := hook.pipelineCommands.Load(); got != 3 {
+		t.Errorf("Redis pipeline command count = %d, want 3", got)
 	}
-	wantCommandNames := []string{"get", "smembers"}
+	wantCommandNames := []string{"get", "hgetall", "smembers"}
 	if diff := cmp.Diff(wantCommandNames, hook.pipelineCommandNames(), cmpopts.SortSlices(func(a, b string) bool {
 		return a < b
 	})); diff != "" {
@@ -561,7 +567,6 @@ type batchStatusCommandHook struct {
 	pipelines        atomic.Int64
 	pipelineCommands atomic.Int64
 	mu               sync.Mutex
-	singleNames      []string
 	pipelineNames    []string
 }
 
@@ -572,9 +577,6 @@ func (h *batchStatusCommandHook) DialHook(next redis.DialHook) redis.DialHook {
 func (h *batchStatusCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		h.singleCommands.Add(1)
-		h.mu.Lock()
-		h.singleNames = append(h.singleNames, cmd.Name())
-		h.mu.Unlock()
 		return next(ctx, cmd)
 	}
 }
@@ -592,14 +594,6 @@ func (h *batchStatusCommandHook) ProcessPipelineHook(next redis.ProcessPipelineH
 
 		return next(ctx, cmds)
 	}
-}
-
-func (h *batchStatusCommandHook) singleCommandNames() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	names := make([]string, len(h.singleNames))
-	copy(names, h.singleNames)
-	return names
 }
 
 func (h *batchStatusCommandHook) pipelineCommandNames() []string {
@@ -635,8 +629,10 @@ func TestBatchStatusDelete_ReturnsSetRemovalErrors(t *testing.T) {
 	ctx := context.Background()
 	bid := "batch-1"
 	batchKey := namespace + ":batch:" + bid
+	batchProgressKey := batchKey + ":progress"
 	batchJobsKey := batchKey + ":jobs"
 	batchFailedKey := batchKey + ":failed"
+	batchCallbacksKey := batchKey + ":callbacks"
 
 	if err := redisClient.Set(ctx, namespace+":batches", "not-a-set", 0).Err(); err != nil {
 		t.Fatalf("failed to seed batches key: %v", err)
@@ -647,11 +643,17 @@ func TestBatchStatusDelete_ReturnsSetRemovalErrors(t *testing.T) {
 	if err := redisClient.Set(ctx, batchKey, "{}", 0).Err(); err != nil {
 		t.Fatalf("failed to seed batch key: %v", err)
 	}
+	if err := redisClient.HSet(ctx, batchProgressKey, "pending", 1).Err(); err != nil {
+		t.Fatalf("failed to seed batch progress key: %v", err)
+	}
 	if err := redisClient.Set(ctx, batchJobsKey, "{}", 0).Err(); err != nil {
 		t.Fatalf("failed to seed batch jobs key: %v", err)
 	}
 	if err := redisClient.Set(ctx, batchFailedKey, "{}", 0).Err(); err != nil {
 		t.Fatalf("failed to seed batch failed key: %v", err)
+	}
+	if err := redisClient.Set(ctx, batchCallbacksKey, "{}", 0).Err(); err != nil {
+		t.Fatalf("failed to seed batch callbacks key: %v", err)
 	}
 
 	status := senna.NewBatchStatus(redisClient, namespace, bid)
@@ -666,7 +668,7 @@ func TestBatchStatusDelete_ReturnsSetRemovalErrors(t *testing.T) {
 		}
 	}
 
-	exists, err := redisClient.Exists(ctx, batchKey, batchJobsKey, batchFailedKey).Result()
+	exists, err := redisClient.Exists(ctx, batchKey, batchProgressKey, batchJobsKey, batchFailedKey, batchCallbacksKey).Result()
 	if err != nil {
 		t.Fatalf("failed to check deleted batch keys: %v", err)
 	}
@@ -685,17 +687,25 @@ func TestBatchStatusDelete_UsesUnlinkForBatchData(t *testing.T) {
 	ctx := context.Background()
 	bid := "batch-1"
 	batchKey := namespace + ":batch:" + bid
+	batchProgressKey := batchKey + ":progress"
 	batchJobsKey := batchKey + ":jobs"
 	batchFailedKey := batchKey + ":failed"
+	batchCallbacksKey := batchKey + ":callbacks"
 
 	if err := redisClient.Set(ctx, batchKey, "{}", 0).Err(); err != nil {
 		t.Fatalf("Set(%q) error = %v, want nil", batchKey, err)
+	}
+	if err := redisClient.HSet(ctx, batchProgressKey, "pending", 1).Err(); err != nil {
+		t.Fatalf("HSet(%q) error = %v, want nil", batchProgressKey, err)
 	}
 	if err := redisClient.SAdd(ctx, batchJobsKey, "jid-1", "jid-2").Err(); err != nil {
 		t.Fatalf("SAdd(%q) error = %v, want nil", batchJobsKey, err)
 	}
 	if err := redisClient.SAdd(ctx, batchFailedKey, "jid-2").Err(); err != nil {
 		t.Fatalf("SAdd(%q) error = %v, want nil", batchFailedKey, err)
+	}
+	if err := redisClient.SAdd(ctx, batchCallbacksKey, "jid-2:callback:1").Err(); err != nil {
+		t.Fatalf("SAdd(%q) error = %v, want nil", batchCallbacksKey, err)
 	}
 
 	hook := &batchStatusCommandHook{}
@@ -720,7 +730,7 @@ func TestBatchStatusDelete_UsesUnlinkForBatchData(t *testing.T) {
 		t.Errorf("Redis pipeline command names mismatch (-want +got):\n%s", diff)
 	}
 
-	exists, err := redisClient.Exists(ctx, batchKey, batchJobsKey, batchFailedKey).Result()
+	exists, err := redisClient.Exists(ctx, batchKey, batchProgressKey, batchJobsKey, batchFailedKey, batchCallbacksKey).Result()
 	if err != nil {
 		t.Fatalf("Exists(batch data keys) error = %v, want nil", err)
 	}
@@ -936,19 +946,15 @@ func TestBatch_DynamicAddRejectsWrongQueueTypeWithoutTrackingJob(t *testing.T) {
 		t.Fatalf("failed dynamic add should not leave child job %s in batch jobs set", childValue.(string))
 	}
 
-	data, err := c.Redis().Get(context.Background(), namespace+":batch:"+batch.ID).Result()
-	if err != nil {
-		t.Fatalf("failed to read batch state: %v", err)
+	status := senna.NewBatchStatus(c.Redis(), namespace, batch.ID)
+	if err := status.Refresh(context.Background()); err != nil {
+		t.Fatalf("BatchStatus.Refresh(ctx) error = %v, want nil", err)
 	}
-	var state senna.BatchState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		t.Fatalf("failed to decode batch state: %v", err)
+	if status.Total() != 1 {
+		t.Fatalf("BatchStatus.Total() = %d, want 1", status.Total())
 	}
-	if state.Total != 1 {
-		t.Fatalf("BatchState.Total = %d, want 1", state.Total)
-	}
-	if state.Pending != 0 {
-		t.Fatalf("BatchState.Pending = %d, want 0", state.Pending)
+	if status.Pending() != 0 {
+		t.Fatalf("BatchStatus.Pending() = %d, want 0", status.Pending())
 	}
 }
 
@@ -1281,24 +1287,22 @@ func TestBatch_CallbackEnqueueRejectsWrongQueueTypeWithoutStateMutation(t *testi
 		t.Fatalf("batch job should have run once, got %d", jobsProcessed.Load())
 	}
 
-	data, err := c.Redis().Get(context.Background(), namespace+":batch:"+batch.ID).Result()
+	status := senna.NewBatchStatus(c.Redis(), namespace, batch.ID)
+	if err := status.Refresh(context.Background()); err != nil {
+		t.Fatalf("BatchStatus.Refresh(ctx) error = %v, want nil", err)
+	}
+	if status.Pending() != 1 {
+		t.Errorf("BatchStatus.Pending() = %d, want 1", status.Pending())
+	}
+	if status.Successes() != 0 {
+		t.Errorf("BatchStatus.Successes() = %d, want 0", status.Successes())
+	}
+	callbacksPending, err := c.Redis().HGet(context.Background(), namespace+":batch:"+batch.ID+":progress", "callbacks_pending").Result()
 	if err != nil {
-		t.Fatalf("failed to read batch state: %v", err)
+		t.Fatalf("failed to read callbacks_pending progress: %v", err)
 	}
-
-	var state senna.BatchState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		t.Fatalf("failed to decode batch state: %v", err)
-	}
-
-	if state.Pending != 1 {
-		t.Errorf("BatchState.Pending = %d, want 1", state.Pending)
-	}
-	if state.Successes != 0 {
-		t.Errorf("BatchState.Successes = %d, want 0", state.Successes)
-	}
-	if state.CallbacksPending != 0 {
-		t.Errorf("BatchState.CallbacksPending = %d, want 0", state.CallbacksPending)
+	if callbacksPending != "0" {
+		t.Errorf("BatchStatus.CallbacksPending = %s, want 0", callbacksPending)
 	}
 
 	callbacks, err := c.Redis().SCard(context.Background(), namespace+":batch:"+batch.ID+":callbacks").Result()
@@ -1422,18 +1426,18 @@ func TestBatch_EmptyChildDoesNotRollbackCompletedParentOnAncestorPropagationErro
 		t.Fatalf("EnqueueBatch(empty child) error = %v, want nil", err)
 	}
 
-	parentRaw, err := c.Redis().Get(ctx, namespace+":batch:"+parentID).Result()
+	parentStatus := senna.NewBatchStatus(c.Redis(), namespace, parentID)
+	if err := parentStatus.Refresh(ctx); err != nil {
+		t.Fatalf("parent BatchStatus.Refresh(ctx) error = %v, want nil", err)
+	}
+	if parentStatus.Pending() != 0 {
+		t.Fatalf("parent Pending = %d, want 0", parentStatus.Pending())
+	}
+	parentCompleteFired, err := c.Redis().HGet(ctx, namespace+":batch:"+parentID+":progress", "complete_fired").Result()
 	if err != nil {
-		t.Fatalf("failed to read parent state: %v", err)
+		t.Fatalf("failed to read parent complete_fired progress: %v", err)
 	}
-	var gotParent senna.BatchState
-	if err := json.Unmarshal([]byte(parentRaw), &gotParent); err != nil {
-		t.Fatalf("failed to decode parent state: %v", err)
-	}
-	if gotParent.Pending != 0 {
-		t.Fatalf("parent Pending = %d, want 0", gotParent.Pending)
-	}
-	if !gotParent.CompleteFired {
+	if parentCompleteFired != "1" {
 		t.Fatal("parent CompleteFired = false, want true")
 	}
 
@@ -1445,19 +1449,19 @@ func TestBatch_EmptyChildDoesNotRollbackCompletedParentOnAncestorPropagationErro
 		t.Fatalf("child batch state should remain after ancestor propagation failure")
 	}
 
-	grandparentRaw, err := c.Redis().Get(ctx, namespace+":batch:"+grandparentID).Result()
+	grandparentStatus := senna.NewBatchStatus(c.Redis(), namespace, grandparentID)
+	if err := grandparentStatus.Refresh(ctx); err != nil {
+		t.Fatalf("grandparent BatchStatus.Refresh(ctx) error = %v, want nil", err)
+	}
+	if grandparentStatus.Pending() != 1 {
+		t.Fatalf("grandparent Pending = %d, want 1", grandparentStatus.Pending())
+	}
+	grandparentCallbacksPending, err := c.Redis().HGet(ctx, namespace+":batch:"+grandparentID+":progress", "callbacks_pending").Result()
 	if err != nil {
-		t.Fatalf("failed to read grandparent state: %v", err)
+		t.Fatalf("failed to read grandparent callbacks_pending progress: %v", err)
 	}
-	var gotGrandparent senna.BatchState
-	if err := json.Unmarshal([]byte(grandparentRaw), &gotGrandparent); err != nil {
-		t.Fatalf("failed to decode grandparent state: %v", err)
-	}
-	if gotGrandparent.Pending != 1 {
-		t.Fatalf("grandparent Pending = %d, want 1", gotGrandparent.Pending)
-	}
-	if gotGrandparent.CallbacksPending != 0 {
-		t.Fatalf("grandparent CallbacksPending = %d, want 0", gotGrandparent.CallbacksPending)
+	if grandparentCallbacksPending != "0" {
+		t.Fatalf("grandparent CallbacksPending = %s, want 0", grandparentCallbacksPending)
 	}
 }
 
@@ -1549,14 +1553,12 @@ func TestBatch_ReopenedBatchUsesUniqueCallbackIDs(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
-	var state senna.BatchState
+	progress := map[string]string{}
 	for time.Now().Before(deadline) {
-		data, err := c.Redis().Get(ctx, namespace+":batch:"+batch.ID).Result()
+		gotProgress, err := c.Redis().HGetAll(ctx, namespace+":batch:"+batch.ID+":progress").Result()
 		if err == nil {
-			if err := json.Unmarshal([]byte(data), &state); err != nil {
-				t.Fatalf("failed to decode batch state: %v", err)
-			}
-			if callbackCount.Load() >= 2 && state.CallbacksPending == 0 {
+			progress = gotProgress
+			if callbackCount.Load() >= 2 && progress["callbacks_pending"] == "0" {
 				break
 			}
 		}
@@ -1578,11 +1580,11 @@ func TestBatch_ReopenedBatchUsesUniqueCallbackIDs(t *testing.T) {
 	if callbackCount.Load() != 2 {
 		t.Fatalf("callback count = %d, want 2", callbackCount.Load())
 	}
-	if state.CallbacksPending != 0 {
-		t.Fatalf("BatchState.CallbacksPending = %d, want 0", state.CallbacksPending)
+	if progress["callbacks_pending"] != "0" {
+		t.Fatalf("BatchState.CallbacksPending = %s, want 0", progress["callbacks_pending"])
 	}
-	if state.CallbackSequence != 2 {
-		t.Fatalf("BatchState.CallbackSequence = %d, want 2", state.CallbackSequence)
+	if progress["callback_seq"] != "2" {
+		t.Fatalf("BatchState.CallbackSequence = %s, want 2", progress["callback_seq"])
 	}
 }
 

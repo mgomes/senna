@@ -135,6 +135,16 @@ func TestKeys_Batch(t *testing.T) {
 	}
 }
 
+func TestKeys_BatchProgress(t *testing.T) {
+	t.Parallel()
+	k := New("app")
+
+	result := k.BatchProgress("batch-123")
+	if result != "app:batch:batch-123:progress" {
+		t.Errorf("expected 'app:batch:batch-123:progress', got '%s'", result)
+	}
+}
+
 func TestKeys_BatchJobs(t *testing.T) {
 	t.Parallel()
 	k := New("app")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/mgomes/senna/internal/keys"
@@ -65,6 +66,10 @@ func (bs *BatchStatus) batchKey() string {
 	return bs.keys.Batch(bs.bid)
 }
 
+func (bs *BatchStatus) batchProgressKey() string {
+	return bs.keys.BatchProgress(bs.bid)
+}
+
 func (bs *BatchStatus) batchJobsKey() string {
 	return bs.keys.BatchJobs(bs.bid)
 }
@@ -73,9 +78,19 @@ func (bs *BatchStatus) batchFailedKey() string {
 	return bs.keys.BatchFailed(bs.bid)
 }
 
+func (bs *BatchStatus) batchCallbacksKey() string {
+	return bs.keys.BatchCallbacks(bs.bid)
+}
+
 // Refresh reloads the batch state from Redis.
 func (bs *BatchStatus) Refresh(ctx context.Context) error {
-	data, err := bs.redis.Get(ctx, bs.batchKey()).Result()
+	pipe := bs.redis.Pipeline()
+	stateCmd := pipe.Get(ctx, bs.batchKey())
+	progressCmd := pipe.HGetAll(ctx, bs.batchProgressKey())
+
+	_, execErr := pipe.Exec(ctx)
+
+	data, err := stateCmd.Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return &BatchNotFoundError{BatchID: bs.bid}
@@ -87,6 +102,17 @@ func (bs *BatchStatus) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	progress, err := progressCmd.Result()
+	if err != nil {
+		return err
+	}
+	if execErr != nil && !errors.Is(execErr, redis.Nil) {
+		return execErr
+	}
+	if len(progress) > 0 {
+		applyBatchProgress(state, progress)
+	}
 	bs.state = state
 	return nil
 }
@@ -95,6 +121,7 @@ func (bs *BatchStatus) Refresh(ctx context.Context) error {
 func (bs *BatchStatus) RefreshFull(ctx context.Context) error {
 	pipe := bs.redis.Pipeline()
 	stateCmd := pipe.Get(ctx, bs.batchKey())
+	progressCmd := pipe.HGetAll(ctx, bs.batchProgressKey())
 	failedCmd := pipe.SMembers(ctx, bs.batchFailedKey())
 
 	_, execErr := pipe.Exec(ctx)
@@ -118,8 +145,15 @@ func (bs *BatchStatus) RefreshFull(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	progress, err := progressCmd.Result()
+	if err != nil {
+		return err
+	}
 	if failedJIDs == nil {
 		failedJIDs = []string{}
+	}
+	if len(progress) > 0 {
+		applyBatchProgress(state, progress)
 	}
 	state.FailedJIDs = failedJIDs
 	bs.state = state
@@ -263,8 +297,10 @@ func (bs *BatchStatus) join(ctx context.Context, interval time.Duration) error {
 func (bs *BatchStatus) Delete(ctx context.Context) error {
 	keys := []string{
 		bs.batchKey(),
+		bs.batchProgressKey(),
 		bs.batchJobsKey(),
 		bs.batchFailedKey(),
+		bs.batchCallbacksKey(),
 	}
 
 	pipe := bs.redis.Pipeline()
@@ -318,6 +354,40 @@ func decodeBatchState(data string) (*BatchState, error) {
 		return nil, err
 	}
 	return &state, nil
+}
+
+func applyBatchProgress(state *BatchState, progress map[string]string) {
+	state.Total = progressInt(progress, "total", state.Total)
+	state.Pending = progressInt(progress, "pending", state.Pending)
+	state.Failures = progressInt(progress, "failures", state.Failures)
+	state.Successes = progressInt(progress, "successes", state.Successes)
+	state.CallbacksPending = progressInt(progress, "callbacks_pending", state.CallbacksPending)
+	state.CallbackSequence = progressInt(progress, "callback_seq", state.CallbackSequence)
+	state.Dead = progressBool(progress, "dead", state.Dead)
+	state.DeathFired = progressBool(progress, "death_fired", state.DeathFired)
+	state.CompleteFired = progressBool(progress, "complete_fired", state.CompleteFired)
+	state.SuccessFired = progressBool(progress, "success_fired", state.SuccessFired)
+	state.Invalidated = progressBool(progress, "invalidated", state.Invalidated)
+}
+
+func progressInt(progress map[string]string, field string, fallback int) int {
+	value, ok := progress[field]
+	if !ok || value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func progressBool(progress map[string]string, field string, fallback bool) bool {
+	value, ok := progress[field]
+	if !ok || value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true"
 }
 
 // BatchSet provides iteration over all known batches.

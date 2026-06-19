@@ -30,6 +30,7 @@ const (
 func CompletionKeys(k *keys.Keys, batchID string) []string {
 	return []string{
 		k.Batch(batchID),
+		k.BatchProgress(batchID),
 		k.BatchJobs(batchID),
 		k.BatchFailed(batchID),
 		k.DeadBatches(),
