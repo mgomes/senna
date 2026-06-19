@@ -604,9 +604,19 @@ func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 
 	fetched, _ := f.Fetch(ctx, "worker-1")
 
-	err := f.Nack(ctx, "worker-1", fetched, 5*time.Second)
+	retryIn := 5 * time.Second
+	beforeRetry, err := redisNow(ctx, client)
+	if err != nil {
+		t.Fatalf("redisNow() before Nack error = %v, want nil", err)
+	}
+
+	err = f.Nack(ctx, "worker-1", fetched, retryIn)
 	if err != nil {
 		t.Fatalf("nack failed: %v", err)
+	}
+	afterRetry, err := redisNow(ctx, client)
+	if err != nil {
+		t.Fatalf("redisNow() after Nack error = %v, want nil", err)
 	}
 
 	inFlightLen, _ := client.LLen(ctx, k.InFlight("worker-1")).Result()
@@ -614,9 +624,17 @@ func TestFetcher_Nack_SchedulesRetry(t *testing.T) {
 		t.Errorf("expected 0 jobs in-flight after nack, got %d", inFlightLen)
 	}
 
-	retryLen, _ := client.ZCard(ctx, k.Retry()).Result()
-	if retryLen != 1 {
-		t.Errorf("expected 1 job in retry set, got %d", retryLen)
+	retryItems, err := client.ZRangeWithScores(ctx, k.Retry(), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("ZRangeWithScores(%q) error = %v, want nil", k.Retry(), err)
+	}
+	if len(retryItems) != 1 {
+		t.Fatalf("expected 1 job in retry set, got %d", len(retryItems))
+	}
+	minScore := beforeRetry.Add(retryIn).Unix()
+	maxScore := afterRetry.Add(retryIn).Unix()
+	if got := int64(retryItems[0].Score); got < minScore || got > maxScore {
+		t.Errorf("retry score = %d, want between Redis-time scores %d and %d", got, minScore, maxScore)
 	}
 }
 

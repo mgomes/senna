@@ -405,10 +405,26 @@ func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
 	if retryIn > 0 {
-		w.retryJobAt(ctx, job, time.Now().Add(retryIn))
+		w.retryJobIn(ctx, job, retryIn)
 		return
 	}
 	w.finalizeRetryJob(ctx, job, senna.JobFinalization{Operation: jobFinalizationRetry}, retryIn)
+}
+
+func (w *Worker) retryJobIn(ctx context.Context, job *senna.Job, retryIn time.Duration) {
+	for {
+		now, err := redisNow(ctx, w.redis)
+		if err == nil {
+			w.retryJobAt(ctx, job, now.Add(retryIn))
+			return
+		}
+
+		err = fmt.Errorf("get Redis time for retry: %w", err)
+		w.logFinalizationRetry(ctx, job, jobFinalizationRetry, err)
+		if !w.waitToRetryFinalization(ctx, job, jobFinalizationRetry, err) {
+			return
+		}
+	}
 }
 
 func (w *Worker) retryJobAt(ctx context.Context, job *senna.Job, retryAt time.Time) {
