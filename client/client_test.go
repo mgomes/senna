@@ -891,11 +891,18 @@ func TestClient_EnqueueIn_CorrectTimestamp(t *testing.T) {
 
 	ctx := context.Background()
 	delay := 10 * time.Minute
-	beforeEnqueue := time.Now()
+	beforeEnqueue, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() before EnqueueIn error = %v, want nil", err)
+	}
 
 	_, err = client.EnqueueIn(ctx, delay, "delayed_job", nil)
 	if err != nil {
 		t.Fatalf("enqueue in failed: %v", err)
+	}
+	afterEnqueue, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() after EnqueueIn error = %v, want nil", err)
 	}
 
 	items, err := redisClient.ZRangeWithScores(ctx, "test-schedule-ts:scheduled", 0, -1).Result()
@@ -908,7 +915,53 @@ func TestClient_EnqueueIn_CorrectTimestamp(t *testing.T) {
 
 	score := items[0].Score
 	expectedMin := float64(beforeEnqueue.Add(delay).Unix())
-	expectedMax := float64(beforeEnqueue.Add(delay).Unix() + 2)
+	expectedMax := float64(afterEnqueue.Add(delay).Unix())
+
+	if score < expectedMin || score > expectedMax {
+		t.Errorf("score %f not in expected range [%f, %f]", score, expectedMin, expectedMax)
+	}
+}
+
+func TestClient_EnqueueIn_UniqueUsesRedisTime(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-schedule-unique-ts:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-schedule-unique-ts",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	delay := 10 * time.Minute
+	beforeEnqueue, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() before unique EnqueueIn error = %v, want nil", err)
+	}
+
+	_, err = client.EnqueueIn(ctx, delay, "delayed_unique_job", nil, WithUniqueKey("unique-delayed", time.Hour))
+	if err != nil {
+		t.Fatalf("unique enqueue in failed: %v", err)
+	}
+	afterEnqueue, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() after unique EnqueueIn error = %v, want nil", err)
+	}
+
+	items, err := redisClient.ZRangeWithScores(ctx, "test-schedule-unique-ts:scheduled", 0, -1).Result()
+	if err != nil {
+		t.Fatalf("failed to get scheduled items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 scheduled job, got %d", len(items))
+	}
+
+	score := items[0].Score
+	expectedMin := float64(beforeEnqueue.Add(delay).Unix())
+	expectedMax := float64(afterEnqueue.Add(delay).Unix())
 
 	if score < expectedMin || score > expectedMax {
 		t.Errorf("score %f not in expected range [%f, %f]", score, expectedMin, expectedMax)
@@ -1288,6 +1341,11 @@ func TestClient_EnqueueBulkIn_Scheduled(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	ctx := context.Background()
+	delay := time.Hour
+	beforeEnqueue, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() before EnqueueBulkIn error = %v, want nil", err)
+	}
 
 	argsList := []map[string]any{
 		{"id": 1},
@@ -1295,9 +1353,13 @@ func TestClient_EnqueueBulkIn_Scheduled(t *testing.T) {
 		{"id": 3},
 	}
 
-	jobs, err := client.EnqueueBulkIn(ctx, time.Hour, "delayed_bulk_job", argsList)
+	jobs, err := client.EnqueueBulkIn(ctx, delay, "delayed_bulk_job", argsList)
 	if err != nil {
 		t.Fatalf("EnqueueBulkIn failed: %v", err)
+	}
+	afterEnqueue, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() after EnqueueBulkIn error = %v, want nil", err)
 	}
 
 	if len(jobs) != 3 {
@@ -1308,6 +1370,20 @@ func TestClient_EnqueueBulkIn_Scheduled(t *testing.T) {
 	scheduledLen, _ := redisClient.ZCard(ctx, "test-bulk-in:scheduled").Result()
 	if scheduledLen != 3 {
 		t.Errorf("expected 3 jobs in scheduled, got %d", scheduledLen)
+	}
+	items, err := redisClient.ZRangeWithScores(ctx, "test-bulk-in:scheduled", 0, -1).Result()
+	if err != nil {
+		t.Fatalf("ZRangeWithScores(%q) error = %v, want nil", "test-bulk-in:scheduled", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 scheduled jobs, got %d", len(items))
+	}
+	expectedMin := float64(beforeEnqueue.Add(delay).Unix())
+	expectedMax := float64(afterEnqueue.Add(delay).Unix())
+	for i, item := range items {
+		if item.Score < expectedMin || item.Score > expectedMax {
+			t.Errorf("scheduled item %d score = %f, want in range [%f, %f]", i, item.Score, expectedMin, expectedMax)
+		}
 	}
 
 	queueLen, _ := redisClient.LLen(ctx, "test-bulk-in:queue:default").Result()
