@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/aes"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/mgomes/senna"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestClient_New(t *testing.T) {
@@ -674,6 +676,109 @@ func TestBatch_Builder(t *testing.T) {
 	if batch.OnDeath == nil || batch.OnDeath.JobType != "on_death" {
 		t.Errorf("expected OnDeath.JobType 'on_death', got '%v'", batch.OnDeath)
 	}
+}
+
+func TestClientCleanupOrphanedBatch_UsesUnlinkForBatchData(t *testing.T) {
+	const namespace = "test-cleanup-orphaned-unlink"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	batchID := "batch-1"
+	batchDataKeys := []string{
+		client.keys.Batch(batchID),
+		client.keys.BatchJobs(batchID),
+		client.keys.BatchFailed(batchID),
+		client.keys.BatchCallbacks(batchID),
+	}
+
+	if err := redisClient.Set(ctx, client.keys.Batch(batchID), "{}", 0).Err(); err != nil {
+		t.Fatalf("Set(batch state) error = %v, want nil", err)
+	}
+	if err := redisClient.SAdd(ctx, client.keys.BatchJobs(batchID), "jid-1").Err(); err != nil {
+		t.Fatalf("SAdd(batch jobs) error = %v, want nil", err)
+	}
+	if err := redisClient.SAdd(ctx, client.keys.BatchFailed(batchID), "jid-1").Err(); err != nil {
+		t.Fatalf("SAdd(batch failed) error = %v, want nil", err)
+	}
+	if err := redisClient.SAdd(ctx, client.keys.BatchCallbacks(batchID), "jid-1:callback:1").Err(); err != nil {
+		t.Fatalf("SAdd(batch callbacks) error = %v, want nil", err)
+	}
+	if err := redisClient.SAdd(ctx, client.keys.Batches(), batchID).Err(); err != nil {
+		t.Fatalf("SAdd(batches) error = %v, want nil", err)
+	}
+
+	hook := &clientCommandHook{}
+	client.redis.AddHook(hook)
+
+	client.cleanupOrphanedBatch(ctx, batchID)
+
+	names := hook.pipelineCommandNames()
+	if len(names) != 2 {
+		t.Fatalf("cleanupOrphanedBatch pipeline command names = %v, want 2 commands", names)
+	}
+	if names[0] != "srem" || names[1] != "unlink" {
+		t.Fatalf("cleanupOrphanedBatch pipeline command names = %v, want [srem unlink]", names)
+	}
+
+	exists, err := redisClient.Exists(ctx, batchDataKeys...).Result()
+	if err != nil {
+		t.Fatalf("Exists(batch data keys) error = %v, want nil", err)
+	}
+	if exists != 0 {
+		t.Errorf("Exists(batch data keys) = %d, want 0", exists)
+	}
+
+	registered, err := redisClient.SIsMember(ctx, client.keys.Batches(), batchID).Result()
+	if err != nil {
+		t.Fatalf("SIsMember(batches, batchID) error = %v, want nil", err)
+	}
+	if registered {
+		t.Fatal("SIsMember(batches, batchID) = true, want false")
+	}
+}
+
+type clientCommandHook struct {
+	mu            sync.Mutex
+	pipelineNames []string
+}
+
+func (h *clientCommandHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *clientCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return next
+}
+
+func (h *clientCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		h.mu.Lock()
+		for _, cmd := range cmds {
+			h.pipelineNames = append(h.pipelineNames, cmd.Name())
+		}
+		h.mu.Unlock()
+
+		return next(ctx, cmds)
+	}
+}
+
+func (h *clientCommandHook) pipelineCommandNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	names := make([]string, len(h.pipelineNames))
+	copy(names, h.pipelineNames)
+	return names
 }
 
 func TestClient_EncryptedJob(t *testing.T) {

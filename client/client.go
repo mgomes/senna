@@ -608,11 +608,14 @@ func (c *Client) propagateBatchCompletion(ctx context.Context, childBatchID, par
 // since the batch state is deleted.
 func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 	pipe := c.redis.Pipeline()
-	pipe.Del(ctx, c.keys.Batch(batchID))
 	pipe.SRem(ctx, c.keys.Batches(), batchID)
-	pipe.Del(ctx, c.keys.BatchJobs(batchID))
-	pipe.Del(ctx, c.keys.BatchFailed(batchID))
-	pipe.Del(ctx, c.keys.BatchCallbacks(batchID))
+	pipe.Unlink(
+		ctx,
+		c.keys.Batch(batchID),
+		c.keys.BatchJobs(batchID),
+		c.keys.BatchFailed(batchID),
+		c.keys.BatchCallbacks(batchID),
+	)
 	if _, err := pipe.Exec(ctx); err != nil {
 		slog.WarnContext(ctx, "failed to cleanup orphaned batch", "batch_id", batchID, "error", err)
 	}

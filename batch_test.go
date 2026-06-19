@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -671,6 +672,60 @@ func TestBatchStatusDelete_ReturnsSetRemovalErrors(t *testing.T) {
 	}
 	if exists != 0 {
 		t.Errorf("batch data keys still exist = %d, want 0", exists)
+	}
+}
+
+func TestBatchStatusDelete_UsesUnlinkForBatchData(t *testing.T) {
+	namespace := "batch-delete-unlink"
+	flushKeysBatch(t, namespace+":*")
+
+	redisClient := newTestRedisClient(t)
+	defer func() { _ = redisClient.Close() }()
+
+	ctx := context.Background()
+	bid := "batch-1"
+	batchKey := namespace + ":batch:" + bid
+	batchJobsKey := batchKey + ":jobs"
+	batchFailedKey := batchKey + ":failed"
+
+	if err := redisClient.Set(ctx, batchKey, "{}", 0).Err(); err != nil {
+		t.Fatalf("Set(%q) error = %v, want nil", batchKey, err)
+	}
+	if err := redisClient.SAdd(ctx, batchJobsKey, "jid-1", "jid-2").Err(); err != nil {
+		t.Fatalf("SAdd(%q) error = %v, want nil", batchJobsKey, err)
+	}
+	if err := redisClient.SAdd(ctx, batchFailedKey, "jid-2").Err(); err != nil {
+		t.Fatalf("SAdd(%q) error = %v, want nil", batchFailedKey, err)
+	}
+
+	hook := &batchStatusCommandHook{}
+	redisClient.AddHook(hook)
+
+	status := senna.NewBatchStatus(redisClient, namespace, bid)
+	if err := status.Delete(ctx); err != nil {
+		t.Fatalf("BatchStatus.Delete(ctx) error = %v, want nil", err)
+	}
+
+	if got := hook.singleCommands.Load(); got != 0 {
+		t.Errorf("single Redis commands after hook install = %d, want 0", got)
+	}
+	if got := hook.pipelines.Load(); got != 1 {
+		t.Errorf("Redis pipelines after hook install = %d, want 1", got)
+	}
+
+	wantCommandNames := []string{"srem", "srem", "unlink"}
+	if diff := cmp.Diff(wantCommandNames, hook.pipelineCommandNames(), cmpopts.SortSlices(func(a, b string) bool {
+		return a < b
+	})); diff != "" {
+		t.Errorf("Redis pipeline command names mismatch (-want +got):\n%s", diff)
+	}
+
+	exists, err := redisClient.Exists(ctx, batchKey, batchJobsKey, batchFailedKey).Result()
+	if err != nil {
+		t.Fatalf("Exists(batch data keys) error = %v, want nil", err)
+	}
+	if exists != 0 {
+		t.Errorf("Exists(batch data keys) = %d, want 0", exists)
 	}
 }
 
@@ -1732,5 +1787,58 @@ func TestBatch_InvalidatedBatchCompletes(t *testing.T) {
 	}
 	if status.Pending() != 0 {
 		t.Errorf("expected 0 pending, got %d", status.Pending())
+	}
+}
+
+func BenchmarkBatchStatusDeleteLargeBatchData(b *testing.B) {
+	const namespace = "bench-batch-delete-large"
+	const memberCount = 1000
+
+	redisClient := newTestRedisClient(b)
+	flushKeysBatch(b, namespace+":*")
+	b.Cleanup(func() {
+		flushKeysBatch(b, namespace+":*")
+	})
+
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	for i := range b.N {
+		bid := fmt.Sprintf("batch-%d", i)
+		batchKey := namespace + ":batch:" + bid
+		batchJobsKey := batchKey + ":jobs"
+		batchFailedKey := batchKey + ":failed"
+
+		b.StopTimer()
+		seedLargeBatchData(b, redisClient, batchKey, batchJobsKey, batchFailedKey, memberCount)
+		b.StartTimer()
+
+		status := senna.NewBatchStatus(redisClient, namespace, bid)
+		if err := status.Delete(ctx); err != nil {
+			b.Fatalf("BatchStatus.Delete(ctx) error = %v, want nil", err)
+		}
+	}
+}
+
+func seedLargeBatchData(b testing.TB, redisClient *redis.Client, batchKey, batchJobsKey, batchFailedKey string, memberCount int) {
+	b.Helper()
+
+	ctx := context.Background()
+	pipe := redisClient.Pipeline()
+	pipe.Set(ctx, batchKey, "{}", 0)
+
+	jobMembers := make([]any, 0, memberCount)
+	failedMembers := make([]any, 0, memberCount)
+	for i := range memberCount {
+		jid := fmt.Sprintf("jid-%d", i)
+		jobMembers = append(jobMembers, jid)
+		failedMembers = append(failedMembers, jid)
+	}
+
+	pipe.SAdd(ctx, batchJobsKey, jobMembers...)
+	pipe.SAdd(ctx, batchFailedKey, failedMembers...)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		b.Fatalf("seed large batch data pipeline error = %v, want nil", err)
 	}
 }
