@@ -33,6 +33,7 @@ func FuzzKeys(f *testing.F) {
 			{"InFlight", k.InFlight(name), wantNamespace + ":inflight:" + name},
 			{"Worker", k.Worker(name), wantNamespace + ":worker:" + name},
 			{"Batch", k.Batch(name), wantNamespace + ":batch:" + name},
+			{"BatchProgress", k.BatchProgress(name), wantNamespace + ":batch:" + name + ":progress"},
 			{"BatchJobs", k.BatchJobs(name), wantNamespace + ":batch:" + name + ":jobs"},
 			{"BatchFailed", k.BatchFailed(name), wantNamespace + ":batch:" + name + ":failed"},
 			{"BatchCallbacks", k.BatchCallbacks(name), wantNamespace + ":batch:" + name + ":callbacks"},

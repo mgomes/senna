@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,10 +260,11 @@ func seedBatchProgress(b *testing.B, redisClient *redis.Client, k *keys.Keys, ba
 
 	ctx := context.Background()
 	state := senna.BatchState{
-		ID:        batchID,
-		Total:     len(jobs),
-		Pending:   len(jobs),
-		CreatedAt: time.Now(),
+		ID:          batchID,
+		Description: strings.Repeat("batch metadata ", 4096),
+		Total:       len(jobs),
+		Pending:     len(jobs),
+		CreatedAt:   time.Now(),
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -270,6 +272,23 @@ func seedBatchProgress(b *testing.B, redisClient *redis.Client, k *keys.Keys, ba
 	}
 	if err := redisClient.Set(ctx, k.Batch(batchID), string(data), 0).Err(); err != nil {
 		b.Fatalf("Set(%q, batch state) error = %v, want nil", k.Batch(batchID), err)
+	}
+	if err := redisClient.HSet(ctx, k.BatchProgress(batchID), map[string]any{
+		"id":                batchID,
+		"callback_queue":    "default",
+		"total":             len(jobs),
+		"pending":           len(jobs),
+		"failures":          0,
+		"successes":         0,
+		"callbacks_pending": 0,
+		"callback_seq":      0,
+		"dead":              0,
+		"death_fired":       0,
+		"complete_fired":    0,
+		"success_fired":     0,
+		"invalidated":       0,
+	}).Err(); err != nil {
+		b.Fatalf("HSet(%q, batch progress) error = %v, want nil", k.BatchProgress(batchID), err)
 	}
 
 	const chunkSize = 1000

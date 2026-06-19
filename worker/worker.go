@@ -709,6 +709,7 @@ func (w *Worker) handleBatchCallbackComplete(ctx context.Context, job *senna.Job
 
 	keys := []string{
 		w.keys.Batch(job.CallbackBatchID),
+		w.keys.BatchProgress(job.CallbackBatchID),
 		w.keys.BatchCallbacks(job.CallbackBatchID),
 	}
 

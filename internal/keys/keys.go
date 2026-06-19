@@ -63,6 +63,10 @@ func (k *Keys) Batch(id string) string {
 	return k.prefix("batch", id)
 }
 
+func (k *Keys) BatchProgress(id string) string {
+	return k.prefix("batch", id, "progress")
+}
+
 func (k *Keys) BatchJobs(id string) string {
 	return k.prefix("batch", id, "jobs")
 }

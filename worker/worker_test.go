@@ -1393,33 +1393,39 @@ func TestWorker_BatchFailuresCountOncePerJob(t *testing.T) {
 		t.Fatalf("seed batch jobs set: %v", err)
 	}
 
-	if err := w.updateBatchProgress(context.Background(), job, batch.ResultFailure); err != nil {
+	ctx := context.Background()
+	if err := w.updateBatchProgress(ctx, job, batch.ResultFailure); err != nil {
 		t.Fatalf("update batch progress failure: %v", err)
 	}
 
-	stateJSON, _ := redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
-	var updated senna.BatchState
-	_ = json.Unmarshal([]byte(stateJSON), &updated)
-	if updated.Failures != 1 || updated.Pending != 1 {
-		t.Fatalf("expected failures=1 pending=1 after first failure, got failures=%d pending=%d", updated.Failures, updated.Pending)
+	progress, err := redisClient.HGetAll(ctx, w.keys.BatchProgress(job.BatchID)).Result()
+	if err != nil {
+		t.Fatalf("HGetAll(%q) error = %v, want nil", w.keys.BatchProgress(job.BatchID), err)
+	}
+	if progress["failures"] != "1" || progress["pending"] != "1" {
+		t.Fatalf("batch progress after first failure = failures:%s pending:%s, want failures:1 pending:1", progress["failures"], progress["pending"])
 	}
 
-	if err := w.updateBatchProgress(context.Background(), job, batch.ResultFailure); err != nil {
+	if err := w.updateBatchProgress(ctx, job, batch.ResultFailure); err != nil {
 		t.Fatalf("update batch progress failure: %v", err)
 	}
-	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
-	_ = json.Unmarshal([]byte(stateJSON), &updated)
-	if updated.Failures != 1 || updated.Pending != 1 {
-		t.Fatalf("expected failures to remain 1, got failures=%d pending=%d", updated.Failures, updated.Pending)
+	progress, err = redisClient.HGetAll(ctx, w.keys.BatchProgress(job.BatchID)).Result()
+	if err != nil {
+		t.Fatalf("HGetAll(%q) error = %v, want nil", w.keys.BatchProgress(job.BatchID), err)
+	}
+	if progress["failures"] != "1" || progress["pending"] != "1" {
+		t.Fatalf("batch progress after duplicate failure = failures:%s pending:%s, want failures:1 pending:1", progress["failures"], progress["pending"])
 	}
 
-	if err := w.updateBatchProgress(context.Background(), job, batch.ResultSuccess); err != nil {
+	if err := w.updateBatchProgress(ctx, job, batch.ResultSuccess); err != nil {
 		t.Fatalf("update batch progress success: %v", err)
 	}
-	stateJSON, _ = redisClient.Get(context.Background(), w.keys.Batch(job.BatchID)).Result()
-	_ = json.Unmarshal([]byte(stateJSON), &updated)
-	if updated.Failures != 1 || updated.Pending != 0 || updated.Successes != 1 {
-		t.Fatalf("after success expected failures=1 pending=0 successes=1, got failures=%d pending=%d successes=%d", updated.Failures, updated.Pending, updated.Successes)
+	progress, err = redisClient.HGetAll(ctx, w.keys.BatchProgress(job.BatchID)).Result()
+	if err != nil {
+		t.Fatalf("HGetAll(%q) error = %v, want nil", w.keys.BatchProgress(job.BatchID), err)
+	}
+	if progress["failures"] != "1" || progress["pending"] != "0" || progress["successes"] != "1" {
+		t.Fatalf("batch progress after success = failures:%s pending:%s successes:%s, want failures:1 pending:0 successes:1", progress["failures"], progress["pending"], progress["successes"])
 	}
 }
 

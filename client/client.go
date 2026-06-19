@@ -634,6 +634,7 @@ func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 	pipe.Unlink(
 		ctx,
 		c.keys.Batch(batchID),
+		c.keys.BatchProgress(batchID),
 		c.keys.BatchJobs(batchID),
 		c.keys.BatchFailed(batchID),
 		c.keys.BatchCallbacks(batchID),
@@ -648,6 +649,7 @@ func (c *Client) cleanupOrphanedBatch(ctx context.Context, batchID string) {
 func (c *Client) rollbackParentLink(ctx context.Context, parentID, childID string) {
 	keys := []string{
 		c.keys.Batch(parentID),
+		c.keys.BatchProgress(parentID),
 		c.keys.BatchJobs(parentID),
 	}
 	if _, err := batchRemoveChildScript.Run(ctx, c.redis, keys, childID); err != nil {
@@ -724,6 +726,8 @@ func (c *Client) storeBatchState(ctx context.Context, batchID string, state *sen
 
 	pipe := c.redis.Pipeline()
 	pipe.Set(ctx, c.keys.Batch(batchID), string(batchData), batch.BatchTTL)
+	pipe.HSet(ctx, c.keys.BatchProgress(batchID), batchProgressFields(state))
+	pipe.Expire(ctx, c.keys.BatchProgress(batchID), batch.BatchTTL)
 	pipe.SAdd(ctx, c.keys.Batches(), batchID)
 
 	if _, err = pipe.Exec(ctx); err != nil {
@@ -732,10 +736,37 @@ func (c *Client) storeBatchState(ctx context.Context, batchID string, state *sen
 	return nil
 }
 
+func batchProgressFields(state *senna.BatchState) map[string]any {
+	return map[string]any{
+		"id":                state.ID,
+		"parent_id":         state.ParentID,
+		"callback_queue":    state.CallbackQueue,
+		"total":             state.Total,
+		"pending":           state.Pending,
+		"failures":          state.Failures,
+		"successes":         state.Successes,
+		"callbacks_pending": state.CallbacksPending,
+		"callback_seq":      state.CallbackSequence,
+		"dead":              boolInt(state.Dead),
+		"death_fired":       boolInt(state.DeathFired),
+		"complete_fired":    boolInt(state.CompleteFired),
+		"success_fired":     boolInt(state.SuccessFired),
+		"invalidated":       boolInt(state.Invalidated),
+	}
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 // linkBatchToParent links a child batch to its parent (Step 2).
 func (c *Client) linkBatchToParent(ctx context.Context, b *Batch) error {
 	scriptKeys := []string{
 		c.keys.Batch(b.ParentID),
+		c.keys.BatchProgress(b.ParentID),
 		c.keys.BatchJobs(b.ParentID),
 	}
 
