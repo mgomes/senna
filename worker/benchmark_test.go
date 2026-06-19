@@ -37,6 +37,142 @@ func BenchmarkFetcherFetchIdle(b *testing.B) {
 	}
 }
 
+func BenchmarkFetcherFetchWeightedMultiQueueIdle(b *testing.B) {
+	redisClient := newTestRedisClient(b)
+	const namespace = "bench-fetch-weighted-multi-idle"
+	flushTestKeys(b, redisClient, namespace+":*")
+	b.Cleanup(func() {
+		flushTestKeys(b, redisClient, namespace+":*")
+	})
+
+	k := keys.New(namespace)
+	f := newFetcher(redisClient, k, []senna.QueueConfig{
+		{Name: "critical", Priority: 10},
+		{Name: "mailers", Priority: 6},
+		{Name: "default", Priority: 4},
+		{Name: "reports", Priority: 2},
+		{Name: "low", Priority: 1},
+	}, 100*time.Millisecond, false)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		job, err := f.Fetch(ctx, "worker-1")
+		if err != nil {
+			b.Fatalf("fetcher.Fetch() error = %v, want nil", err)
+		}
+		if job != nil {
+			b.Fatalf("fetcher.Fetch() job = %v, want nil", job)
+		}
+	}
+}
+
+func BenchmarkFetcherFetchStrictMultiQueueIdle(b *testing.B) {
+	redisClient := newTestRedisClient(b)
+	const namespace = "bench-fetch-strict-multi-idle"
+	flushTestKeys(b, redisClient, namespace+":*")
+	b.Cleanup(func() {
+		flushTestKeys(b, redisClient, namespace+":*")
+	})
+
+	k := keys.New(namespace)
+	f := newFetcher(redisClient, k, []senna.QueueConfig{
+		{Name: "critical", Priority: 10},
+		{Name: "mailers", Priority: 6},
+		{Name: "default", Priority: 4},
+		{Name: "reports", Priority: 2},
+		{Name: "low", Priority: 1},
+	}, 100*time.Millisecond, true)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		job, err := f.Fetch(ctx, "worker-1")
+		if err != nil {
+			b.Fatalf("fetcher.Fetch() error = %v, want nil", err)
+		}
+		if job != nil {
+			b.Fatalf("fetcher.Fetch() job = %v, want nil", job)
+		}
+	}
+}
+
+func BenchmarkFetcherFetchPausedQueuesIdle(b *testing.B) {
+	redisClient := newTestRedisClient(b)
+	const namespace = "bench-fetch-paused-idle"
+	flushTestKeys(b, redisClient, namespace+":*")
+	b.Cleanup(func() {
+		flushTestKeys(b, redisClient, namespace+":*")
+	})
+
+	k := keys.New(namespace)
+	f := newFetcher(redisClient, k, []senna.QueueConfig{
+		{Name: "critical", Priority: 10, Paused: true},
+		{Name: "mailers", Priority: 6, Paused: true},
+		{Name: "default", Priority: 4},
+		{Name: "reports", Priority: 2, Paused: true},
+		{Name: "low", Priority: 1, Paused: true},
+	}, 100*time.Millisecond, false)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		job, err := f.Fetch(ctx, "worker-1")
+		if err != nil {
+			b.Fatalf("fetcher.Fetch() error = %v, want nil", err)
+		}
+		if job != nil {
+			b.Fatalf("fetcher.Fetch() job = %v, want nil", job)
+		}
+	}
+}
+
+func BenchmarkFetcherFetchSequentialLockedQueueIdle(b *testing.B) {
+	redisClient := newTestRedisClient(b)
+	const namespace = "bench-fetch-sequential-locked-idle"
+	flushTestKeys(b, redisClient, namespace+":*")
+	b.Cleanup(func() {
+		flushTestKeys(b, redisClient, namespace+":*")
+	})
+
+	k := keys.New(namespace)
+	f := newFetcher(redisClient, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+	ctx := context.Background()
+
+	job := senna.NewJob("bench_fetch_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		b.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	if err := redisClient.LPush(ctx, k.Queue("transforms"), string(data)).Err(); err != nil {
+		b.Fatalf("LPush(%q) error = %v, want nil", k.Queue("transforms"), err)
+	}
+	if err := redisClient.Set(ctx, k.SequentialLock("transforms"), "worker-1", time.Minute).Err(); err != nil {
+		b.Fatalf("Set(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+
+	if job, err := f.Fetch(ctx, "worker-2"); err != nil || job != nil {
+		b.Fatalf("warm fetcher.Fetch() = (%v, %v), want (nil, nil)", job, err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		job, err := f.Fetch(ctx, "worker-2")
+		if err != nil {
+			b.Fatalf("fetcher.Fetch() error = %v, want nil", err)
+		}
+		if job != nil {
+			b.Fatalf("fetcher.Fetch() job = %v, want nil", job)
+		}
+	}
+}
+
 func BenchmarkFetcherBlockingFetchLoaded(b *testing.B) {
 	redisClient := newTestRedisClient(b)
 	const namespace = "bench-fetch-loaded"
