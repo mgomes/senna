@@ -68,7 +68,6 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		nowUs := time.Now().UnixMicro()
 		windowUs := l.interval.Microseconds()
 		if windowUs < 1 {
 			windowUs = 1
@@ -81,7 +80,7 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 
 		result, err := windowScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.limit, windowUs, nowUs, member, ttlSeconds,
+			l.limit, windowUs, member, ttlSeconds,
 		)
 		if err != nil {
 			return nil, 0, err
@@ -127,7 +126,11 @@ func (l *WindowLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 
 // Remaining returns the remaining capacity in the current window.
 func (l *WindowLimiter) Remaining(ctx context.Context) (int, error) {
-	nowUs := time.Now().UnixMicro()
+	now, err := redisNow(ctx, l.client)
+	if err != nil {
+		return 0, err
+	}
+	nowUs := now.UnixMicro()
 	windowUs := l.interval.Microseconds()
 	if windowUs < 1 {
 		windowUs = 1

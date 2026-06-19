@@ -1,16 +1,16 @@
 -- Atomically pop due jobs from a sorted set and push them to their queues
 -- KEYS[1] = sorted set key (scheduled or retry)
 -- KEYS[2] = queues set key (to track known queues)
--- ARGV[1] = max score (current timestamp)
--- ARGV[2] = limit (max jobs to pop)
--- ARGV[3] = queue key prefix (e.g., "senna:queue:")
+-- ARGV[1] = limit (max jobs to pop)
+-- ARGV[2] = queue key prefix (e.g., "senna:queue:")
 -- Returns: number of jobs enqueued
 
 local zset_key = KEYS[1]
 local queues_key = KEYS[2]
-local max_score = ARGV[1]
-local limit = tonumber(ARGV[2])
-local queue_prefix = ARGV[3]
+local limit = tonumber(ARGV[1])
+local queue_prefix = ARGV[2]
+local redis_time = redis.call('TIME')
+local max_score = redis_time[1]
 
 local zset_type = redis.call('TYPE', zset_key).ok
 if zset_type == 'none' then

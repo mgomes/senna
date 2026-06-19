@@ -113,12 +113,11 @@ func (l *ConcurrentLimiter) ensureInitialized(ctx context.Context) error {
 }
 
 func (l *ConcurrentLimiter) reclaim(ctx context.Context) (int, error) {
-	nowMs := time.Now().UnixMilli()
 	lockTimeoutMs := l.lockTimeout.Milliseconds()
 
 	result, err := concurrentReclaimScript.Run(ctx, l.client,
 		[]string{l.slotsKey(), l.locksKey(), l.keyPrefix + ":" + l.name + ":metrics"},
-		nowMs, lockTimeoutMs, l.ttlSeconds(),
+		lockTimeoutMs, l.ttlSeconds(),
 	)
 	if err != nil {
 		return 0, err
@@ -149,11 +148,10 @@ func (l *ConcurrentLimiter) Acquire(ctx context.Context) (Lease, time.Duration, 
 		if _, err := l.reclaim(ctx); err != nil {
 			return nil, 0, fmt.Errorf("reclaim expired concurrent limiter slots: %w", err)
 		}
-		nowMs := time.Now().UnixMilli()
 
 		result, err := concurrentAcquireScript.Run(ctx, l.client,
 			[]string{l.slotsKey(), l.locksKey()},
-			tempLockID, nowMs, l.ttlSeconds(),
+			tempLockID, l.ttlSeconds(),
 		)
 		if err != nil {
 			return nil, 0, err

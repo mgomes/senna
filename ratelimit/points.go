@@ -132,7 +132,6 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, tim
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		nowUs := time.Now().UnixMicro()
 		refillTimeUs := l.refillTime.Microseconds()
 		if refillTimeUs < 1 {
 			refillTimeUs = 1
@@ -144,7 +143,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, tim
 
 		result, err := pointsCheckScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.capacity, refillTimeUs, cost, nowUs, ttlSeconds,
+			l.capacity, refillTimeUs, cost, ttlSeconds,
 		)
 		if err != nil {
 			return nil, 0, err
@@ -206,7 +205,11 @@ func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
 
 // AvailablePoints returns the currently available point balance.
 func (l *PointsLimiter) AvailablePoints(ctx context.Context) (float64, error) {
-	nowUs := time.Now().UnixMicro()
+	now, err := redisNow(ctx, l.client)
+	if err != nil {
+		return 0, err
+	}
+	nowUs := now.UnixMicro()
 	refillTimeUs := l.refillTime.Microseconds()
 	if refillTimeUs < 1 {
 		refillTimeUs = 1

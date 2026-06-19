@@ -835,14 +835,13 @@ func (w *Worker) scheduler(ctx context.Context) {
 }
 
 func (w *Worker) enqueueFromZSet(ctx context.Context, sourceKey string) error {
-	now := fmt.Sprintf("%d", time.Now().Unix())
 	queuePrefix := w.keys.Queue("")
 
 	for {
 		result, err := enqueueScheduledScript.Run(
 			ctx, w.redis,
 			[]string{sourceKey, w.keys.Queues()},
-			now, 100, queuePrefix,
+			100, queuePrefix,
 		)
 		if err != nil {
 			return fmt.Errorf("promote jobs from %q: %w", sourceKey, err)
