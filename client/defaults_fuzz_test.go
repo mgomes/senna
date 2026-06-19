@@ -37,5 +37,10 @@ func FuzzNormalizeSettings(f *testing.F) {
 				queue, retry, got.DefaultRetry, wantRetry,
 			)
 		}
+		if got.BulkChunkSize != defaults.BulkChunkSize {
+			t.Errorf("normalizeSettings({DefaultQueue:%q, DefaultRetry:%d}).BulkChunkSize = %d, want %d",
+				queue, retry, got.BulkChunkSize, defaults.BulkChunkSize,
+			)
+		}
 	})
 }

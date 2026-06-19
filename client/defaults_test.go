@@ -26,8 +26,9 @@ func TestNormalizeSettings(t *testing.T) {
 				DefaultRetry: 3,
 			},
 			want: Settings{
-				DefaultQueue: defaults.DefaultQueue,
-				DefaultRetry: 3,
+				DefaultQueue:  defaults.DefaultQueue,
+				DefaultRetry:  3,
+				BulkChunkSize: defaults.BulkChunkSize,
 			},
 		},
 		{
@@ -36,8 +37,20 @@ func TestNormalizeSettings(t *testing.T) {
 				DefaultQueue: "critical",
 			},
 			want: Settings{
-				DefaultQueue: "critical",
-				DefaultRetry: 0,
+				DefaultQueue:  "critical",
+				DefaultRetry:  0,
+				BulkChunkSize: defaults.BulkChunkSize,
+			},
+		},
+		{
+			name: "custom bulk chunk size",
+			in: Settings{
+				BulkChunkSize: 250,
+			},
+			want: Settings{
+				DefaultQueue:  defaults.DefaultQueue,
+				DefaultRetry:  0,
+				BulkChunkSize: 250,
 			},
 		},
 	}

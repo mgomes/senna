@@ -80,6 +80,8 @@ const (
 	DefaultQueueName = "default"
 	// DefaultRetryCount is the default retry count assigned to new jobs.
 	DefaultRetryCount = 25
+	// DefaultBulkChunkSize bounds bulk enqueue Redis command size by default.
+	DefaultBulkChunkSize = 1000
 )
 
 // DefaultWorkerSettings returns the default worker settings.
@@ -111,15 +113,17 @@ type QueueConfig struct {
 
 // ClientSettings configures enqueue defaults for a client.
 type ClientSettings struct {
-	DefaultQueue string
-	DefaultRetry int
+	DefaultQueue  string
+	DefaultRetry  int
+	BulkChunkSize int
 }
 
 // DefaultClientSettings returns the default client settings.
 func DefaultClientSettings() ClientSettings {
 	return ClientSettings{
-		DefaultQueue: DefaultQueueName,
-		DefaultRetry: DefaultRetryCount,
+		DefaultQueue:  DefaultQueueName,
+		DefaultRetry:  DefaultRetryCount,
+		BulkChunkSize: DefaultBulkChunkSize,
 	}
 }
 

@@ -29,7 +29,31 @@ var (
 	ErrBatchSelfParent = errors.New("batch cannot be its own parent")
 	// ErrInvalidQueueName indicates an enqueue target queue is empty or whitespace.
 	ErrInvalidQueueName = errors.New("queue name must not be empty or whitespace")
+	// ErrInvalidChunkSize indicates a bulk or batch chunk size is not positive.
+	ErrInvalidChunkSize = errors.New("chunk size must be > 0")
 )
+
+// BulkPartialError reports that EnqueueBulk accepted some chunks before a later
+// chunk failed. The returned jobs slice contains the accepted prefix.
+type BulkPartialError struct {
+	// Enqueued is the number of jobs known to have been accepted by Redis.
+	Enqueued int
+	// Total is the total number of jobs requested by the bulk enqueue call.
+	Total int
+	// Err is the Redis error from the first chunk not known to be accepted.
+	Err error
+}
+
+func (e *BulkPartialError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("bulk enqueue partially completed: enqueued %d of %d jobs", e.Enqueued, e.Total)
+	}
+	return fmt.Sprintf("bulk enqueue partially completed: enqueued %d of %d jobs: %v", e.Enqueued, e.Total, e.Err)
+}
+
+func (e *BulkPartialError) Unwrap() error {
+	return e.Err
+}
 
 // Client enqueues jobs and exposes batch and iteration helpers.
 type Client struct {
@@ -63,6 +87,9 @@ func normalizeSettings(settings Settings) Settings {
 
 	if settings.DefaultQueue == "" {
 		settings.DefaultQueue = senna.DefaultQueueName
+	}
+	if settings.BulkChunkSize <= 0 {
+		settings.BulkChunkSize = senna.DefaultBulkChunkSize
 	}
 
 	return settings
@@ -111,14 +138,16 @@ func (c *Client) Redis() *redis.Client {
 type EnqueueOption func(*enqueueConfig)
 
 type enqueueConfig struct {
-	queue     string
-	retry     int
-	uniqueKey string
-	uniqueTTL time.Duration
-	batchID   string
-	encrypt   bool
-	delay     time.Duration
-	at        time.Time
+	queue        string
+	retry        int
+	uniqueKey    string
+	uniqueTTL    time.Duration
+	batchID      string
+	encrypt      bool
+	delay        time.Duration
+	at           time.Time
+	chunkSize    int
+	chunkSizeSet bool
 }
 
 // WithQueue enqueues the job onto the provided queue.
@@ -171,11 +200,20 @@ func WithScheduleAt(t time.Time) EnqueueOption {
 	}
 }
 
+// WithBulkChunkSize bounds each Redis command emitted by EnqueueBulk.
+func WithBulkChunkSize(n int) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.chunkSize = n
+		c.chunkSizeSet = true
+	}
+}
+
 // Enqueue creates a job and enqueues it immediately or at a scheduled time.
 func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]any, opts ...EnqueueOption) (*senna.Job, error) {
 	cfg := &enqueueConfig{
-		queue: c.settings.DefaultQueue,
-		retry: c.settings.DefaultRetry,
+		queue:     c.settings.DefaultQueue,
+		retry:     c.settings.DefaultRetry,
+		chunkSize: c.settings.BulkChunkSize,
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -235,23 +273,20 @@ func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, arg
 	return c.Enqueue(ctx, jobType, args, opts...)
 }
 
-// enqueuedJob pairs a job with its marshaled data for bulk operations.
-type enqueuedJob struct {
-	job  *senna.Job
-	data []byte
-}
-
-// EnqueueBulk enqueues multiple jobs of the same type in a single Redis round trip.
+// EnqueueBulk enqueues multiple jobs of the same type in bounded Redis chunks.
 // All jobs share the same options (queue, retry, etc.) but have different arguments.
 // If any job fails to marshal or encrypt, no jobs are enqueued.
+// If Redis fails after earlier chunks are accepted, EnqueueBulk returns the accepted
+// job prefix and a *BulkPartialError.
 func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
 	if len(argsList) == 0 {
 		return nil, nil
 	}
 
 	cfg := &enqueueConfig{
-		queue: c.settings.DefaultQueue,
-		retry: c.settings.DefaultRetry,
+		queue:     c.settings.DefaultQueue,
+		retry:     c.settings.DefaultRetry,
+		chunkSize: c.settings.BulkChunkSize,
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -264,9 +299,12 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	if cfg.uniqueKey != "" {
 		return nil, ErrUniqueKeyInBulk
 	}
+	if cfg.chunkSize <= 0 {
+		return nil, ErrInvalidChunkSize
+	}
 
-	// Build and marshal all jobs upfront to fail before any Redis changes.
-	enqueued := make([]enqueuedJob, 0, len(argsList))
+	validateBeforeWrite := len(argsList) > cfg.chunkSize
+	jobs := make([]*senna.Job, len(argsList))
 	for i, args := range argsList {
 		job := senna.NewJob(jobType, args)
 		job.Queue = cfg.queue
@@ -280,18 +318,13 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 			}
 			job.Args = encryptedArgs
 			job.Encrypted = true
+		} else if validateBeforeWrite {
+			if _, err := json.Marshal(args); err != nil {
+				return nil, fmt.Errorf("marshal bulk job %d of type %s args: %w", i, jobType, err)
+			}
 		}
 
-		data, err := job.Marshal()
-		if err != nil {
-			return nil, fmt.Errorf("marshal bulk job %d of type %s: %w", i, jobType, err)
-		}
-
-		enqueued = append(enqueued, enqueuedJob{job: job, data: data})
-	}
-
-	if len(enqueued) == 0 {
-		return nil, nil
+		jobs[i] = job
 	}
 
 	// Determine if we're scheduling or enqueueing immediately.
@@ -303,59 +336,60 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	} else if cfg.delay > 0 {
 		now, err := redisNow(ctx, c.redis)
 		if err != nil {
-			return nil, fmt.Errorf("get Redis time for %d bulk jobs of type %s: %w", len(enqueued), jobType, err)
+			return nil, fmt.Errorf("get Redis time for %d bulk jobs of type %s: %w", len(jobs), jobType, err)
 		}
 		scheduleScore = float64(now.Add(cfg.delay).Unix())
 		scheduled = true
 	}
 
-	// Use pipeline for efficiency
-	pipe := c.redis.Pipeline()
-
-	if !scheduled {
-		// Immediate enqueue - group jobs by queue
-		jobsByQueue := make(map[string][]string)
-		for _, ej := range enqueued {
-			jobsByQueue[ej.job.Queue] = append(jobsByQueue[ej.job.Queue], string(ej.data))
-		}
-
-		// Add all queues to the queues set
-		for queue := range jobsByQueue {
-			pipe.SAdd(ctx, c.keys.Queues(), queue)
-		}
-
-		// Push jobs to their respective queues
-		for queue, jobDataList := range jobsByQueue {
-			args := make([]any, len(jobDataList))
-			for i, d := range jobDataList {
-				args[i] = d
+	for start := 0; start < len(jobs); start += cfg.chunkSize {
+		end := min(start+cfg.chunkSize, len(jobs))
+		if err := c.enqueueBulkChunk(ctx, jobs[start:end], scheduled, scheduleScore); err != nil {
+			err = fmt.Errorf("enqueue bulk jobs %d-%d of type %s: %w", start, end-1, jobType, err)
+			if start > 0 {
+				return jobs[:start], &BulkPartialError{
+					Enqueued: start,
+					Total:    len(jobs),
+					Err:      err,
+				}
 			}
-			pipe.LPush(ctx, c.keys.Queue(queue), args...)
+			return nil, err
 		}
-	} else {
-		// Scheduled enqueue
-		members := make([]redis.Z, len(enqueued))
-		for i, ej := range enqueued {
-			members[i] = redis.Z{
-				Score:  scheduleScore,
-				Member: string(ej.data),
-			}
-		}
-		pipe.ZAdd(ctx, c.keys.Scheduled(), members...)
-	}
-
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("enqueue %d bulk jobs of type %s: %w", len(enqueued), jobType, err)
-	}
-
-	// Extract only the successfully enqueued jobs
-	jobs := make([]*senna.Job, len(enqueued))
-	for i, ej := range enqueued {
-		jobs[i] = ej.job
 	}
 
 	return jobs, nil
+}
+
+func (c *Client) enqueueBulkChunk(ctx context.Context, jobs []*senna.Job, scheduled bool, scheduleScore float64) error {
+	if scheduled {
+		members := make([]redis.Z, len(jobs))
+		for i, job := range jobs {
+			data, err := job.Marshal()
+			if err != nil {
+				return fmt.Errorf("marshal job %s: %w", job.ID, err)
+			}
+			members[i] = redis.Z{
+				Score:  scheduleScore,
+				Member: string(data),
+			}
+		}
+		return c.redis.ZAdd(ctx, c.keys.Scheduled(), members...).Err()
+	}
+
+	payloads := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		data, err := job.Marshal()
+		if err != nil {
+			return fmt.Errorf("marshal job %s: %w", job.ID, err)
+		}
+		payloads = append(payloads, string(data))
+	}
+
+	pipe := c.redis.Pipeline()
+	pipe.SAdd(ctx, c.keys.Queues(), jobs[0].Queue)
+	pipe.LPush(ctx, c.keys.Queue(jobs[0].Queue), payloads...)
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 // EnqueueBulkIn schedules multiple jobs to run after a delay.
@@ -535,10 +569,17 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 		}
 	}
 
-	// Pre-marshal jobs to fail fast before any Redis changes
-	marshaledJobs, err := c.marshalBatchJobs(b)
-	if err != nil {
-		return err
+	var marshaledJobs []marshaledJob
+	if b.autoflushChunkSize > 0 {
+		if err := c.validateBatchJobsMarshal(b); err != nil {
+			return err
+		}
+	} else {
+		var err error
+		marshaledJobs, err = c.marshalBatchJobs(b)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Build and store batch state
@@ -557,8 +598,14 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 	}
 
 	// Step 3: Enqueue jobs
-	if err := c.enqueueBatchJobs(ctx, b, marshaledJobs); err != nil {
-		return err
+	if b.autoflushChunkSize > 0 {
+		if err := c.enqueueBatchJobsAutoflush(ctx, b); err != nil {
+			return err
+		}
+	} else {
+		if err := c.enqueueBatchJobs(ctx, b, marshaledJobs); err != nil {
+			return err
+		}
 	}
 
 	// Handle empty batches
@@ -675,6 +722,16 @@ func (c *Client) marshalBatchJobs(b *Batch) ([]marshaledJob, error) {
 		jobs = append(jobs, marshaledJob{job: job, data: data})
 	}
 	return jobs, nil
+}
+
+func (c *Client) validateBatchJobsMarshal(b *Batch) error {
+	for _, job := range b.Jobs {
+		job.BatchID = b.ID
+		if _, err := json.Marshal(job.Args); err != nil {
+			return fmt.Errorf("failed to marshal job %s args: %w", job.ID, err)
+		}
+	}
+	return nil
 }
 
 // buildBatchState constructs the BatchState from a Batch.
@@ -822,6 +879,45 @@ func (c *Client) enqueueBatchJobs(ctx context.Context, b *Batch, jobs []marshale
 		return fmt.Errorf("enqueue batch %s jobs: %w", b.ID, err)
 	}
 	return nil
+}
+
+func (c *Client) enqueueBatchJobsAutoflush(ctx context.Context, b *Batch) error {
+	if len(b.Jobs) == 0 {
+		return nil
+	}
+	if b.autoflushChunkSize <= 0 {
+		return ErrInvalidChunkSize
+	}
+
+	for start := 0; start < len(b.Jobs); start += b.autoflushChunkSize {
+		end := min(start+b.autoflushChunkSize, len(b.Jobs))
+		if err := c.enqueueBatchJobChunk(ctx, b, b.Jobs[start:end]); err != nil {
+			if b.ParentID != "" {
+				c.rollbackParentLink(ctx, b.ParentID, b.ID)
+			}
+			c.cleanupOrphanedBatch(ctx, b.ID)
+			return fmt.Errorf("enqueue batch %s jobs %d-%d: %w", b.ID, start, end-1, err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) enqueueBatchJobChunk(ctx context.Context, b *Batch, jobs []*senna.Job) error {
+	keys := []string{c.keys.BatchJobs(b.ID)}
+	args := make([]any, 0, 2+len(jobs)*3)
+	args = append(args, len(jobs), int64(batch.BatchTTL/time.Second))
+	for _, job := range jobs {
+		data, err := job.Marshal()
+		if err != nil {
+			return fmt.Errorf("failed to marshal job %s: %w", job.ID, err)
+		}
+		args = append(args, job.ID, c.keys.Queue(job.Queue), string(data))
+	}
+
+	var enqueueResult struct {
+		Success bool `json:"success"`
+	}
+	return batchEnqueueJobsScript.RunJSON(ctx, c.redis, &enqueueResult, keys, args...)
 }
 
 // handleEmptyBatch marks an empty batch complete and enqueues callbacks atomically.
