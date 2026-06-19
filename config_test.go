@@ -157,6 +157,9 @@ func TestDefaultClientSettings(t *testing.T) {
 	if settings.DefaultRetry != 25 {
 		t.Errorf("expected DefaultRetry 25, got %d", settings.DefaultRetry)
 	}
+	if settings.BulkChunkSize != 1000 {
+		t.Errorf("expected BulkChunkSize 1000, got %d", settings.BulkChunkSize)
+	}
 }
 
 func TestOption_WithNamespace(t *testing.T) {

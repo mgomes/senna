@@ -26,6 +26,8 @@ type Batch struct {
 	CallbackQueue string          `json:"callback_queue,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
 	err           error           `json:"-"`
+
+	autoflushChunkSize int
 }
 
 // NewBatch creates a new batch with a unique ID.
@@ -115,6 +117,21 @@ func (b *Batch) WithCallbackQueue(queue string) *Batch {
 	return b
 }
 
+// WithAutoflush enqueues initial batch jobs in chunks.
+//
+// This trades the default single-script initial enqueue atomicity for bounded
+// Redis command size. If a later chunk fails, earlier jobs may already be
+// queued; Senna cleans up the batch state so those jobs run without batch
+// tracking.
+func (b *Batch) WithAutoflush(chunkSize int) *Batch {
+	if chunkSize <= 0 {
+		b.err = ErrInvalidChunkSize
+		return b
+	}
+	b.autoflushChunkSize = chunkSize
+	return b
+}
+
 func unsupportedBatchOptions(cfg *enqueueConfig) []string {
 	var unsupported []string
 	if cfg.uniqueKey != "" {
@@ -131,6 +148,9 @@ func unsupportedBatchOptions(cfg *enqueueConfig) []string {
 	}
 	if cfg.batchID != "" {
 		unsupported = append(unsupported, "WithBatch")
+	}
+	if cfg.chunkSizeSet {
+		unsupported = append(unsupported, "WithBulkChunkSize")
 	}
 	return unsupported
 }

@@ -790,6 +790,95 @@ func (h *clientCommandHook) pipelineCommandNames() []string {
 	return names
 }
 
+type commandSizeHook struct {
+	mu       sync.Mutex
+	eval     int
+	maxEval  int
+	lpush    int
+	maxLPush int
+	zadd     int
+	maxZAdd  int
+}
+
+func (h *commandSizeHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *commandSizeHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.record(cmd)
+		return next(ctx, cmd)
+	}
+}
+
+func (h *commandSizeHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			h.record(cmd)
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func (h *commandSizeHook) record(cmd redis.Cmder) {
+	argsLen := len(cmd.Args())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch cmd.Name() {
+	case "eval", "evalsha":
+		h.eval++
+		if argsLen > h.maxEval {
+			h.maxEval = argsLen
+		}
+	case "lpush":
+		h.lpush++
+		if argsLen > h.maxLPush {
+			h.maxLPush = argsLen
+		}
+	case "zadd":
+		h.zadd++
+		if argsLen > h.maxZAdd {
+			h.maxZAdd = argsLen
+		}
+	}
+}
+
+func (h *commandSizeHook) evalCalls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.eval
+}
+
+func (h *commandSizeHook) maxEvalArgs() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.maxEval
+}
+
+func (h *commandSizeHook) lpushCalls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lpush
+}
+
+func (h *commandSizeHook) maxLPushArgs() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.maxLPush
+}
+
+func (h *commandSizeHook) zaddCalls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.zadd
+}
+
+func (h *commandSizeHook) maxZAddArgs() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.maxZAdd
+}
+
 func TestClient_EncryptedJob(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
@@ -1261,6 +1350,124 @@ func TestClient_EnqueueBulk_WithQueue(t *testing.T) {
 	}
 }
 
+func TestClient_EnqueueBulk_UsesChunkSizeAndPreservesOrder(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-chunk:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-bulk-chunk",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	hook := &commandSizeHook{}
+	client.redis.AddHook(hook)
+
+	ctx := context.Background()
+	argsList := []map[string]any{
+		{"index": 0},
+		{"index": 1},
+		{"index": 2},
+		{"index": 3},
+		{"index": 4},
+	}
+
+	jobs, err := client.EnqueueBulk(ctx, "bulk_chunk_job", argsList, WithBulkChunkSize(2))
+	if err != nil {
+		t.Fatalf("EnqueueBulk(chunked) error = %v, want nil", err)
+	}
+	if len(jobs) != len(argsList) {
+		t.Fatalf("EnqueueBulk(chunked) jobs = %d, want %d", len(jobs), len(argsList))
+	}
+
+	if got := hook.lpushCalls(); got != 3 {
+		t.Fatalf("bulk enqueue LPush calls = %d, want 3", got)
+	}
+	if got, wantMax := hook.maxLPushArgs(), 4; got > wantMax {
+		t.Fatalf("max LPush args = %d, want <= %d", got, wantMax)
+	}
+
+	for i, wantJob := range jobs {
+		payload, err := redisClient.RPop(ctx, "test-bulk-chunk:queue:default").Result()
+		if err != nil {
+			t.Fatalf("RPop(default) at index %d error = %v, want nil", i, err)
+		}
+		gotJob, err := senna.UnmarshalJob([]byte(payload))
+		if err != nil {
+			t.Fatalf("UnmarshalJob(queue payload %d) error = %v, want nil", i, err)
+		}
+		if gotJob.ID != wantJob.ID {
+			t.Fatalf("queued job %d ID = %q, want %q", i, gotJob.ID, wantJob.ID)
+		}
+	}
+}
+
+func TestClient_EnqueueBulkAt_UsesChunkSize(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-at-chunk:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-bulk-at-chunk",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	hook := &commandSizeHook{}
+	client.redis.AddHook(hook)
+
+	argsList := []map[string]any{
+		{"index": 0},
+		{"index": 1},
+		{"index": 2},
+		{"index": 3},
+		{"index": 4},
+	}
+	_, err = client.EnqueueBulkAt(context.Background(), time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), "bulk_at_chunk_job", argsList, WithBulkChunkSize(2))
+	if err != nil {
+		t.Fatalf("EnqueueBulkAt(chunked) error = %v, want nil", err)
+	}
+
+	if got := hook.zaddCalls(); got != 3 {
+		t.Fatalf("ZAdd calls = %d, want 3", got)
+	}
+	if got, wantMax := hook.maxZAddArgs(), 6; got > wantMax {
+		t.Fatalf("max ZAdd args = %d, want <= %d", got, wantMax)
+	}
+}
+
+func TestClient_EnqueueBulkRejectsInvalidChunkSize(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-invalid-chunk:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-bulk-invalid-chunk",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	jobs, err := client.EnqueueBulk(context.Background(), "bulk_job", []map[string]any{{"id": 1}}, WithBulkChunkSize(0))
+	if !errors.Is(err, ErrInvalidChunkSize) {
+		t.Fatalf("EnqueueBulk(invalid chunk) error = %v, want %v", err, ErrInvalidChunkSize)
+	}
+	if jobs != nil {
+		t.Fatalf("EnqueueBulk(invalid chunk) jobs = %#v, want nil", jobs)
+	}
+	if exists, err := redisClient.Exists(context.Background(), "test-bulk-invalid-chunk:queues").Result(); err != nil {
+		t.Fatalf("Exists(queues) error = %v, want nil", err)
+	} else if exists != 0 {
+		t.Fatalf("Exists(queues) = %d, want 0", exists)
+	}
+}
+
 func TestClient_EnqueueBulkRejectsInvalidQueueName(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-bulk-invalid-queue:*")
@@ -1584,5 +1791,66 @@ func TestClient_EnqueueBulkIn_ReturnsErrorForUnmarshalableJobs(t *testing.T) {
 	}
 	if scheduledCount != 0 {
 		t.Errorf("scheduled count = %d, want 0", scheduledCount)
+	}
+}
+
+func TestClient_EnqueueBatch_WithAutoflushUsesChunks(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-autoflush:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-autoflush",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	hook := &commandSizeHook{}
+	client.redis.AddHook(hook)
+
+	batch := NewBatch().WithAutoflush(2)
+	for i := range 5 {
+		batch.Add("batch_autoflush_job", map[string]any{"index": i})
+	}
+
+	ctx := context.Background()
+	if err := client.EnqueueBatch(ctx, batch); err != nil {
+		t.Fatalf("EnqueueBatch(autoflush) error = %v, want nil", err)
+	}
+
+	if got := hook.evalCalls(); got != 3 {
+		t.Fatalf("batch enqueue script calls = %d, want 3", got)
+	}
+	if got, wantMax := hook.maxEvalArgs(), 12; got > wantMax {
+		t.Fatalf("max eval args = %d, want <= %d", got, wantMax)
+	}
+	if jobs, err := redisClient.SCard(ctx, client.keys.BatchJobs(batch.ID)).Result(); err != nil {
+		t.Fatalf("SCard(batch jobs) error = %v, want nil", err)
+	} else if jobs != 5 {
+		t.Fatalf("SCard(batch jobs) = %d, want 5", jobs)
+	}
+	if queued, err := redisClient.LLen(ctx, client.keys.Queue("default")).Result(); err != nil {
+		t.Fatalf("LLen(default) error = %v, want nil", err)
+	} else if queued != 5 {
+		t.Fatalf("LLen(default) = %d, want 5", queued)
+	}
+}
+
+func TestClient_EnqueueBatchRejectsInvalidAutoflushChunkSize(t *testing.T) {
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-invalid-autoflush",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	batch := NewBatch().WithAutoflush(0).Add("job", nil)
+	err = client.EnqueueBatch(context.Background(), batch)
+	if !errors.Is(err, ErrInvalidChunkSize) {
+		t.Fatalf("EnqueueBatch(invalid autoflush chunk) error = %v, want %v", err, ErrInvalidChunkSize)
 	}
 }

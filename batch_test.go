@@ -107,6 +107,7 @@ func TestBatch_UnsupportedOptions(t *testing.T) {
 			client.WithUniqueKey("unique", time.Minute),
 			client.WithEncryption(),
 			client.WithDelay(time.Second),
+			client.WithBulkChunkSize(10),
 		)
 
 	if len(batch.Jobs) != 0 {
