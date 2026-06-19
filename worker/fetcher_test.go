@@ -1479,6 +1479,114 @@ func TestFetcher_Sequential_FetchUsesScriptWithoutPreflightGet(t *testing.T) {
 	}
 }
 
+func TestFetcher_Sequential_BlockingFetchBlocksOnRegularQueueWhenSequentialLocked(t *testing.T) {
+	tests := []struct {
+		name           string
+		strictPriority bool
+	}{
+		{
+			name:           "weighted",
+			strictPriority: false,
+		},
+		{
+			name:           "strict",
+			strictPriority: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestRedisClient(t)
+			namespace := "test-seq-locked-block-regular-" + tt.name
+			flushTestKeys(t, client, namespace+":*")
+
+			k := keys.New(namespace)
+			f := newFetcher(client, k, []senna.QueueConfig{
+				{Name: "transforms", Priority: 10, Sequential: true},
+				{Name: "default", Priority: 1},
+			}, 20*time.Millisecond, tt.strictPriority)
+			ctx := context.Background()
+
+			if err := client.SetArgs(ctx, k.SequentialLock("transforms"), "worker-1", redis.SetArgs{
+				Mode: "NX",
+				TTL:  30 * time.Second,
+			}).Err(); err != nil {
+				t.Fatalf("SetArgs(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+			}
+
+			hook := &commandNameHook{}
+			client.AddHook(hook)
+
+			startedAt := time.Now()
+			fetched, err := f.BlockingFetch(ctx, "worker-2", time.Second)
+			elapsed := time.Since(startedAt)
+			if err != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) error = %v, want nil", err)
+			}
+			if fetched != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) job = %v, want nil", fetched)
+			}
+			if !hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) did not issue BLMOVE; commands = %v", hook.names())
+			}
+			if elapsed < 800*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+			}
+		})
+	}
+}
+
+func TestFetcher_Sequential_BlockingFetchPollsWhenSequentialQueueIsOpen(t *testing.T) {
+	tests := []struct {
+		name           string
+		strictPriority bool
+	}{
+		{
+			name:           "weighted",
+			strictPriority: false,
+		},
+		{
+			name:           "strict",
+			strictPriority: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestRedisClient(t)
+			namespace := "test-seq-open-poll-" + tt.name
+			flushTestKeys(t, client, namespace+":*")
+
+			k := keys.New(namespace)
+			f := newFetcher(client, k, []senna.QueueConfig{
+				{Name: "transforms", Priority: 10, Sequential: true},
+				{Name: "default", Priority: 1},
+			}, 20*time.Millisecond, tt.strictPriority)
+			hook := &commandNameHook{}
+			client.AddHook(hook)
+
+			startedAt := time.Now()
+			fetched, err := f.BlockingFetch(context.Background(), "worker-1", time.Second)
+			elapsed := time.Since(startedAt)
+			if err != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) error = %v, want nil", err)
+			}
+			if fetched != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) job = %v, want nil", fetched)
+			}
+			if hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) issued BLMOVE; commands = %v", hook.names())
+			}
+			if elapsed < 15*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want poll interval wait", elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want less than block timeout", elapsed)
+			}
+		})
+	}
+}
+
 func TestFetcher_Sequential_BlockingFetch(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-seq-blocking:*")

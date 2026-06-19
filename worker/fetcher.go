@@ -20,6 +20,7 @@ type fetcher struct {
 	keys              *keys.Keys
 	queues            []queueInfo
 	activeQueues      []queueInfo
+	blockableQueues   []queueInfo
 	queueByName       map[string]queueInfo
 	totalActiveWeight int
 	pollInterval      time.Duration
@@ -38,6 +39,14 @@ type queueInfo struct {
 	queueKey          string
 	sequentialLockKey string
 }
+
+type queueFetchStatus int
+
+const (
+	queueFetchEmpty queueFetchStatus = iota
+	queueFetchLocked
+	queueFetchJob
+)
 
 func newFetcher(client *redis.Client, k *keys.Keys, queues []senna.QueueConfig, pollInterval time.Duration, strictPriority bool) *fetcher {
 	return newFetcherWithSequentialLockTTL(
@@ -93,6 +102,7 @@ func newFetcherWithSequentialLockTTL(
 	sema := make(map[string]chan struct{})
 	queueByName := make(map[string]queueInfo, len(queueInfos))
 	activeQueues := make([]queueInfo, 0, len(queueInfos))
+	blockableQueues := make([]queueInfo, 0, len(queueInfos))
 	var totalActiveWeight int
 	for _, q := range queueInfos {
 		queueByName[q.name] = q
@@ -104,6 +114,9 @@ func newFetcherWithSequentialLockTTL(
 		}
 		activeQueues = append(activeQueues, q)
 		totalActiveWeight += q.priority
+		if !q.sequential {
+			blockableQueues = append(blockableQueues, q)
+		}
 	}
 
 	return &fetcher{
@@ -111,6 +124,7 @@ func newFetcherWithSequentialLockTTL(
 		keys:              k,
 		queues:            queueInfos,
 		activeQueues:      activeQueues,
+		blockableQueues:   blockableQueues,
 		queueByName:       queueByName,
 		totalActiveWeight: totalActiveWeight,
 		pollInterval:      pollInterval,
@@ -178,17 +192,17 @@ func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Jo
 		return nil, nil
 	}
 
-	job, err := f.fetchFromQueueInfo(ctx, workerID, primaryQueue)
+	job, status, err := f.fetchFromQueueInfo(ctx, workerID, primaryQueue)
 	if err != nil || job != nil {
 		return job, err
 	}
 
-	if primaryQueue.sequential && len(f.activeQueues) > 1 {
+	if primaryQueue.sequential && status == queueFetchLocked && len(f.activeQueues) > 1 {
 		for _, queue := range f.activeQueues {
 			if queue.name == primaryQueue.name {
 				continue
 			}
-			job, err := f.fetchFromQueueInfo(ctx, workerID, queue)
+			job, _, err := f.fetchFromQueueInfo(ctx, workerID, queue)
 			if err != nil || job != nil {
 				return job, err
 			}
@@ -201,7 +215,7 @@ func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Jo
 // fetchStrict tries each queue in priority order until a job is found
 func (f *fetcher) fetchStrict(ctx context.Context, workerID string) (*senna.Job, error) {
 	for _, q := range f.activeQueues {
-		job, err := f.fetchFromQueueInfo(ctx, workerID, q)
+		job, _, err := f.fetchFromQueueInfo(ctx, workerID, q)
 		if err != nil {
 			return nil, err
 		}
@@ -213,7 +227,7 @@ func (f *fetcher) fetchStrict(ctx context.Context, workerID string) (*senna.Job,
 	return nil, nil
 }
 
-func (f *fetcher) fetchFromQueueInfo(ctx context.Context, workerID string, queue queueInfo) (*senna.Job, error) {
+func (f *fetcher) fetchFromQueueInfo(ctx context.Context, workerID string, queue queueInfo) (*senna.Job, queueFetchStatus, error) {
 	// Use atomic fetch for sequential queues (acquires lock only if job claimed)
 	if queue.sequential {
 		return f.fetchFromSequentialQueue(ctx, workerID, queue)
@@ -225,22 +239,22 @@ func (f *fetcher) fetchFromQueueInfo(ctx context.Context, workerID string, queue
 	if errors.Is(err, redis.Nil) {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, queueFetchEmpty, ctx.Err()
 		default:
-			return nil, nil
+			return nil, queueFetchEmpty, nil
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, queueFetchEmpty, err
 	}
 
 	var job senna.Job
 	if err := json.Unmarshal([]byte(result), &job); err != nil {
-		return nil, err
+		return nil, queueFetchEmpty, err
 	}
 
 	job.SetRaw(result)
-	return &job, nil
+	return &job, queueFetchJob, nil
 }
 
 func (f *fetcher) hasSequentialLock(queueName string) bool {
@@ -266,7 +280,7 @@ func (f *fetcher) clearSequentialLock(queueName string) {
 // Only acquires the lock if a job is actually claimed.
 // Uses local semaphore to ensure only one goroutine in this process can
 // process from this sequential queue at a time.
-func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string, queue queueInfo) (*senna.Job, error) {
+func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string, queue queueInfo) (*senna.Job, queueFetchStatus, error) {
 	// Acquire local semaphore first (non-blocking)
 	// This ensures only one goroutine in this process can process this queue
 	sema := f.sequentialSema[queue.name]
@@ -275,7 +289,7 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string,
 		// Got the local lock
 	default:
 		// Another goroutine in this process is already processing this queue
-		return nil, nil
+		return nil, queueFetchLocked, nil
 	}
 
 	inFlightKey := f.keys.InFlight(workerID)
@@ -288,25 +302,30 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string,
 	if errors.Is(err, redis.Nil) {
 		// Script returned nil - queue empty or lock held by another worker
 		<-sema // Release local semaphore
-		return nil, nil
+		return nil, queueFetchEmpty, nil
 	}
 	if err != nil {
 		<-sema // Release local semaphore
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, queueFetchEmpty, ctx.Err()
 		}
-		return nil, err
+		return nil, queueFetchEmpty, err
 	}
 
 	if result == nil {
 		<-sema // Release local semaphore
-		return nil, nil
+		return nil, queueFetchEmpty, nil
 	}
 
-	jobData, ok := result.(string)
-	if !ok {
+	status, jobData := parseSequentialFetchResult(result)
+	switch status {
+	case queueFetchLocked, queueFetchEmpty:
 		<-sema // Release local semaphore
-		return nil, nil
+		return nil, status, nil
+	case queueFetchJob:
+	default:
+		<-sema // Release local semaphore
+		return nil, queueFetchEmpty, nil
 	}
 
 	var job senna.Job
@@ -314,15 +333,43 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string,
 		cleanupErr := f.discardClaimedSequentialPayload(ctx, workerID, queue.name, jobData)
 		<-sema // Release local semaphore
 		if cleanupErr != nil {
-			return nil, errors.Join(err, cleanupErr)
+			return nil, queueFetchEmpty, errors.Join(err, cleanupErr)
 		}
-		return nil, err
+		return nil, queueFetchEmpty, err
 	}
 
 	// Successfully fetched job - semaphore will be released in ReleaseSequentialLock
 	f.holdSequentialLock(queue.name)
 	job.SetRaw(jobData)
-	return &job, nil
+	return &job, queueFetchJob, nil
+}
+
+func parseSequentialFetchResult(result any) (queueFetchStatus, string) {
+	values, ok := result.([]any)
+	if !ok || len(values) < 1 {
+		return queueFetchEmpty, ""
+	}
+	status, ok := values[0].(string)
+	if !ok {
+		return queueFetchEmpty, ""
+	}
+	switch status {
+	case "locked":
+		return queueFetchLocked, ""
+	case "empty":
+		return queueFetchEmpty, ""
+	case "job":
+		if len(values) < 2 {
+			return queueFetchEmpty, ""
+		}
+		jobData, ok := values[1].(string)
+		if !ok {
+			return queueFetchEmpty, ""
+		}
+		return queueFetchJob, jobData
+	default:
+		return queueFetchEmpty, ""
+	}
 }
 
 func (f *fetcher) discardClaimedSequentialPayload(ctx context.Context, workerID, queueName, payload string) error {
@@ -378,14 +425,16 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, bl
 	primaryQueue, ok := f.selectWeightedQueue()
 
 	// Try primary queue first
+	sawSequentialEmpty := false
 	if ok {
-		job, err := f.fetchFromQueueInfo(ctx, workerID, primaryQueue)
+		job, status, err := f.fetchFromQueueInfo(ctx, workerID, primaryQueue)
 		if err != nil {
 			return nil, err
 		}
 		if job != nil {
 			return job, nil
 		}
+		sawSequentialEmpty = primaryQueue.sequential && status == queueFetchEmpty
 	}
 
 	// Primary queue empty - check remaining processable queues
@@ -393,34 +442,29 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, bl
 		if ok && q.name == primaryQueue.name {
 			continue
 		}
-		job, err := f.fetchFromQueueInfo(ctx, workerID, q)
+		job, status, err := f.fetchFromQueueInfo(ctx, workerID, q)
 		if err != nil {
 			return nil, err
 		}
 		if job != nil {
 			return job, nil
 		}
+		if q.sequential && status == queueFetchEmpty {
+			sawSequentialEmpty = true
+		}
 	}
 
 	// BLMOVE can only watch one queue. Keep multi-queue rotation bounded by the
 	// poll interval so jobs arriving on another queue are not delayed by the full
 	// block timeout.
-	if len(f.activeQueues) > 1 || f.activeQueues[0].sequential {
+	if len(f.blockableQueues) != 1 || sawSequentialEmpty {
 		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
 			return nil, err
 		}
 		return nil, nil
 	}
 
-	// All queues empty, block on a weighted random processable queue
-	blockQueue, ok := f.selectWeightedQueue()
-	if !ok {
-		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	}
-	return f.blockingFetchFromQueueInfo(ctx, workerID, blockQueue, blockTimeout)
+	return f.blockingFetchFromQueueInfo(ctx, workerID, f.blockableQueues[0], blockTimeout)
 }
 
 func (f *fetcher) selectWeightedQueue() (queueInfo, bool) {
@@ -458,29 +502,31 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, bloc
 	}
 
 	// Try ALL processable queues non-blocking in priority order (high to low)
+	sawSequentialEmpty := false
 	for _, q := range f.activeQueues {
-		job, err := f.fetchFromQueueInfo(ctx, workerID, q)
+		job, status, err := f.fetchFromQueueInfo(ctx, workerID, q)
 		if err != nil {
 			return nil, err
 		}
 		if job != nil {
 			return job, nil
 		}
+		if q.sequential && status == queueFetchEmpty {
+			sawSequentialEmpty = true
+		}
 	}
 
 	// BLMOVE can only watch one queue. Keep multi-queue rotation bounded by the
 	// poll interval so lower-priority queues are rechecked promptly when all
 	// current queues are empty.
-	if len(f.activeQueues) > 1 || f.activeQueues[0].sequential {
+	if len(f.blockableQueues) != 1 || sawSequentialEmpty {
 		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
 			return nil, err
 		}
 		return nil, nil
 	}
 
-	// Block on HIGHEST priority processable queue - ensures high-priority jobs wake us immediately
-	// Low-priority jobs will be picked up on the next cycle after timeout
-	return f.blockingFetchFromQueueInfo(ctx, workerID, f.activeQueues[0], blockTimeout)
+	return f.blockingFetchFromQueueInfo(ctx, workerID, f.blockableQueues[0], blockTimeout)
 }
 
 func (f *fetcher) blockingFetchFromQueueInfo(ctx context.Context, workerID string, queue queueInfo, blockTimeout time.Duration) (*senna.Job, error) {
@@ -488,7 +534,7 @@ func (f *fetcher) blockingFetchFromQueueInfo(ctx context.Context, workerID strin
 	// break the exclusivity guarantee. Use non-blocking fetch with the atomic
 	// lock script, then wait for the poll interval if no job.
 	if queue.sequential {
-		job, err := f.fetchFromSequentialQueue(ctx, workerID, queue)
+		job, _, err := f.fetchFromSequentialQueue(ctx, workerID, queue)
 		if err != nil || job != nil {
 			return job, err
 		}
