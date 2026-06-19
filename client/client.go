@@ -370,11 +370,16 @@ func (c *Client) enqueueNow(ctx context.Context, job *senna.Job) (*senna.Job, er
 		return nil, fmt.Errorf("marshal job %s: %w", job.ID, err)
 	}
 
-	if err := c.redis.SAdd(ctx, c.keys.Queues(), job.Queue).Err(); err != nil {
-		return nil, fmt.Errorf("register queue %s: %w", job.Queue, err)
-	}
-
-	if err := c.redis.LPush(ctx, c.keys.Queue(job.Queue), string(data)).Err(); err != nil {
+	if _, err := enqueueNowScript.Run(
+		ctx,
+		c.redis,
+		[]string{
+			c.keys.Queues(),
+			c.keys.Queue(job.Queue),
+		},
+		job.Queue,
+		string(data),
+	); err != nil {
 		return nil, fmt.Errorf("enqueue job %s to queue %s: %w", job.ID, job.Queue, err)
 	}
 

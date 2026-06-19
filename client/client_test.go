@@ -98,6 +98,98 @@ func TestClient_EnqueueWithQueue(t *testing.T) {
 	}
 }
 
+func TestClient_EnqueueDoesNotRegisterQueueWhenQueuePushFails(t *testing.T) {
+	const namespace = "test-enqueue-wrong-queue-type"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	if err := redisClient.Set(ctx, namespace+":queue:default", "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(queue wrong type) error = %v, want nil", err)
+	}
+
+	job, err := client.Enqueue(ctx, "send_email", nil)
+	if err == nil {
+		t.Fatal("Enqueue(with wrong queue type) error = nil, want non-nil")
+	}
+	if job != nil {
+		t.Fatalf("Enqueue(with wrong queue type) job = %#v, want nil", job)
+	}
+
+	registered, err := redisClient.SIsMember(ctx, namespace+":queues", "default").Result()
+	if err != nil {
+		t.Fatalf("SIsMember(queues, default) error = %v, want nil", err)
+	}
+	if registered {
+		t.Fatal("SIsMember(queues, default) = true, want false")
+	}
+
+	if err := redisClient.Del(ctx, namespace+":queue:default").Err(); err != nil {
+		t.Fatalf("Del(queue wrong type) error = %v, want nil", err)
+	}
+
+	_, err = client.Enqueue(ctx, "send_email", nil)
+	if err != nil {
+		t.Fatalf("Enqueue(after repairing queue) error = %v, want nil", err)
+	}
+}
+
+func TestClient_EnqueueDoesNotPushJobWhenQueuesKeyHasWrongType(t *testing.T) {
+	const namespace = "test-enqueue-wrong-queues-type"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ctx := context.Background()
+	if err := redisClient.Set(ctx, namespace+":queues", "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("Set(queues wrong type) error = %v, want nil", err)
+	}
+
+	job, err := client.Enqueue(ctx, "send_email", nil)
+	if err == nil {
+		t.Fatal("Enqueue(with wrong queues type) error = nil, want non-nil")
+	}
+	if job != nil {
+		t.Fatalf("Enqueue(with wrong queues type) job = %#v, want nil", job)
+	}
+
+	queueExists, err := redisClient.Exists(ctx, namespace+":queue:default").Result()
+	if err != nil {
+		t.Fatalf("Exists(queue) error = %v, want nil", err)
+	}
+	if queueExists != 0 {
+		t.Fatalf("Exists(queue) = %d, want 0", queueExists)
+	}
+
+	if err := redisClient.Del(ctx, namespace+":queues").Err(); err != nil {
+		t.Fatalf("Del(queues wrong type) error = %v, want nil", err)
+	}
+
+	_, err = client.Enqueue(ctx, "send_email", nil)
+	if err != nil {
+		t.Fatalf("Enqueue(after repairing queues key) error = %v, want nil", err)
+	}
+}
+
 func TestClient_EnqueueRejectsInvalidQueueName(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-invalid-queue:*")
