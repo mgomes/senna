@@ -577,6 +577,9 @@ func TestIterable_MaxRuntimeRequeuesJob(t *testing.T) {
 		t.Fatal("fetcher.Fetch() job = nil, want job")
 	}
 
+	waitingJob := senna.NewJob("waiting_job", nil)
+	enqueueWorkerJob(t, w, waitingJob)
+
 	w.processJob(ctx, fetched)
 
 	inFlightLen, err := w.redis.LLen(ctx, w.keys.InFlight(w.id)).Result()
@@ -591,8 +594,8 @@ func TestIterable_MaxRuntimeRequeuesJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LRange(%q) error = %v, want nil", w.keys.Queue(job.Queue), err)
 	}
-	if len(payloads) != 1 {
-		t.Fatalf("LRange(%q) returned %d payloads, want 1", w.keys.Queue(job.Queue), len(payloads))
+	if len(payloads) != 2 {
+		t.Fatalf("LRange(%q) returned %d payloads, want 2", w.keys.Queue(job.Queue), len(payloads))
 	}
 	requeued, err := senna.UnmarshalJob([]byte(payloads[0]))
 	if err != nil {
@@ -600,6 +603,16 @@ func TestIterable_MaxRuntimeRequeuesJob(t *testing.T) {
 	}
 	if requeued.ID != job.ID {
 		t.Errorf("requeued job ID = %q, want %q", requeued.ID, job.ID)
+	}
+	nextFetched, err := w.fetcher.Fetch(ctx, w.id)
+	if err != nil {
+		t.Fatalf("fetcher.Fetch() after runtime requeue error = %v, want nil", err)
+	}
+	if nextFetched == nil {
+		t.Fatal("fetcher.Fetch() after runtime requeue job = nil, want waiting job")
+	}
+	if nextFetched.ID != waitingJob.ID {
+		t.Errorf("next fetched job ID = %q, want waiting job %q", nextFetched.ID, waitingJob.ID)
 	}
 
 	state, err := w.loadIterationState(ctx, w.keys.IterationState(job.ID))
