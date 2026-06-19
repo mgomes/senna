@@ -69,6 +69,7 @@ type WorkerSettings struct {
 	ReaperInterval              time.Duration
 	SequentialLockTTL           time.Duration
 	SequentialLockRenewInterval time.Duration
+	IterableMaxRuntime          time.Duration
 	PeriodicPollInterval        time.Duration
 	PeriodicEnabled             bool
 	StrictPriority              bool // If true, always process higher priority queues first (can starve lower priority)
@@ -95,6 +96,7 @@ func DefaultWorkerSettings() WorkerSettings {
 		ReaperInterval:              30 * time.Second,
 		SequentialLockTTL:           30 * time.Second,
 		SequentialLockRenewInterval: 10 * time.Second,
+		IterableMaxRuntime:          30 * time.Second,
 		PeriodicPollInterval:        15 * time.Second,
 	}
 }
@@ -183,6 +185,13 @@ func WithSequentialLockTTL(d time.Duration) Option {
 func WithSequentialLockRenewInterval(d time.Duration) Option {
 	return func(c *Config) {
 		c.Worker.SequentialLockRenewInterval = d
+	}
+}
+
+// WithIterableMaxRuntime sets how long an iterable job can run before yielding.
+func WithIterableMaxRuntime(d time.Duration) Option {
+	return func(c *Config) {
+		c.Worker.IterableMaxRuntime = d
 	}
 }
 

@@ -50,6 +50,9 @@ func TestWorker_New_DefaultSettings(t *testing.T) {
 	if w.sequentialLockRenewEvery != defaults.SequentialLockRenewInterval {
 		t.Errorf("expected sequentialLockRenewEvery %v, got %v", defaults.SequentialLockRenewInterval, w.sequentialLockRenewEvery)
 	}
+	if w.config.Settings.IterableMaxRuntime != defaults.IterableMaxRuntime {
+		t.Errorf("expected IterableMaxRuntime %v, got %v", defaults.IterableMaxRuntime, w.config.Settings.IterableMaxRuntime)
+	}
 	if w.config.Settings.PeriodicPollInterval != defaults.PeriodicPollInterval {
 		t.Errorf("expected PeriodicPollInterval %v, got %v", defaults.PeriodicPollInterval, w.config.Settings.PeriodicPollInterval)
 	}
@@ -60,6 +63,7 @@ func TestWorker_New_WithSettings(t *testing.T) {
 		reaperInterval              = 45 * time.Second
 		sequentialLockTTL           = 2 * time.Minute
 		sequentialLockRenewInterval = 20 * time.Second
+		iterableMaxRuntime          = 2 * time.Minute
 		periodicPollInterval        = time.Minute
 	)
 
@@ -76,6 +80,7 @@ func TestWorker_New_WithSettings(t *testing.T) {
 			ReaperInterval:              reaperInterval,
 			SequentialLockTTL:           sequentialLockTTL,
 			SequentialLockRenewInterval: sequentialLockRenewInterval,
+			IterableMaxRuntime:          iterableMaxRuntime,
 			PeriodicPollInterval:        periodicPollInterval,
 			PeriodicEnabled:             true,
 		},
@@ -105,6 +110,9 @@ func TestWorker_New_WithSettings(t *testing.T) {
 	}
 	if w.sequentialLockRenewEvery != sequentialLockRenewInterval {
 		t.Errorf("expected sequentialLockRenewEvery %v, got %v", sequentialLockRenewInterval, w.sequentialLockRenewEvery)
+	}
+	if w.config.Settings.IterableMaxRuntime != iterableMaxRuntime {
+		t.Errorf("expected IterableMaxRuntime %v, got %v", iterableMaxRuntime, w.config.Settings.IterableMaxRuntime)
 	}
 	if w.config.Settings.PeriodicPollInterval != periodicPollInterval {
 		t.Errorf("expected PeriodicPollInterval %v, got %v", periodicPollInterval, w.config.Settings.PeriodicPollInterval)
@@ -165,6 +173,9 @@ func TestWorker_New_PartialSettings(t *testing.T) {
 	}
 	if w.config.Settings.SequentialLockRenewInterval != defaults.SequentialLockRenewInterval {
 		t.Errorf("expected SequentialLockRenewInterval %v, got %v", defaults.SequentialLockRenewInterval, w.config.Settings.SequentialLockRenewInterval)
+	}
+	if w.config.Settings.IterableMaxRuntime != defaults.IterableMaxRuntime {
+		t.Errorf("expected IterableMaxRuntime %v, got %v", defaults.IterableMaxRuntime, w.config.Settings.IterableMaxRuntime)
 	}
 	if w.config.Settings.PeriodicPollInterval != defaults.PeriodicPollInterval {
 		t.Errorf("expected PeriodicPollInterval %v, got %v", defaults.PeriodicPollInterval, w.config.Settings.PeriodicPollInterval)
@@ -1122,6 +1133,15 @@ func TestWorker_IterableJobOptions(t *testing.T) {
 			validate: func(t *testing.T, opts *IterableJobOptions) {
 				if opts.Timeout != 3*time.Second {
 					t.Errorf("expected Timeout 3s, got %v", opts.Timeout)
+				}
+			},
+		},
+		{
+			name:   "WithIterableMaxRuntime",
+			option: WithIterableMaxRuntime(3 * time.Second),
+			validate: func(t *testing.T, opts *IterableJobOptions) {
+				if opts.MaxRuntime != 3*time.Second {
+					t.Errorf("expected MaxRuntime 3s, got %v", opts.MaxRuntime)
 				}
 			},
 		},

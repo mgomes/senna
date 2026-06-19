@@ -139,6 +139,9 @@ func TestDefaultWorkerSettings(t *testing.T) {
 	if settings.SequentialLockRenewInterval != 10*time.Second {
 		t.Errorf("expected SequentialLockRenewInterval 10s, got %v", settings.SequentialLockRenewInterval)
 	}
+	if settings.IterableMaxRuntime != 30*time.Second {
+		t.Errorf("expected IterableMaxRuntime 30s, got %v", settings.IterableMaxRuntime)
+	}
 	if settings.PeriodicPollInterval != 15*time.Second {
 		t.Errorf("expected PeriodicPollInterval 15s, got %v", settings.PeriodicPollInterval)
 	}
@@ -252,6 +255,17 @@ func TestOption_WithSequentialLockRenewInterval(t *testing.T) {
 
 	if cfg.Worker.SequentialLockRenewInterval != 20*time.Second {
 		t.Errorf("expected SequentialLockRenewInterval 20s, got %v", cfg.Worker.SequentialLockRenewInterval)
+	}
+}
+
+func TestOption_WithIterableMaxRuntime(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	opt := WithIterableMaxRuntime(time.Minute)
+	opt(cfg)
+
+	if cfg.Worker.IterableMaxRuntime != time.Minute {
+		t.Errorf("expected IterableMaxRuntime 1m, got %v", cfg.Worker.IterableMaxRuntime)
 	}
 }
 
