@@ -116,6 +116,39 @@ func TestFetcher_SelectQueue_ZeroPriority(t *testing.T) {
 	}
 }
 
+func TestFetcher_SelectQueue_SkippingQueuePreservesRemainingWeights(t *testing.T) {
+	client := newTestRedisClient(t)
+	k := keys.New("test-fetcher")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 100, Sequential: true},
+		{Name: "alpha", Priority: 1},
+		{Name: "beta", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	counts := make(map[string]int)
+	iterations := 10000
+	for range iterations {
+		queue, ok := f.selectWeightedQueueSkipping([]string{"transforms"})
+		if !ok {
+			t.Fatal("selectWeightedQueueSkipping([transforms]) ok = false, want true")
+		}
+		if queue.name == "transforms" {
+			t.Fatal("selectWeightedQueueSkipping([transforms]) selected transforms, want skipped")
+		}
+		counts[queue.name]++
+	}
+
+	alphaRatio := float64(counts["alpha"]) / float64(iterations)
+	betaRatio := float64(counts["beta"]) / float64(iterations)
+	if alphaRatio < 0.4 || alphaRatio > 0.6 {
+		t.Errorf("alpha queue ratio should be ~0.5, got %f", alphaRatio)
+	}
+	if betaRatio < 0.4 || betaRatio > 0.6 {
+		t.Errorf("beta queue ratio should be ~0.5, got %f", betaRatio)
+	}
+}
+
 func TestFetcher_Fetch_Success(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-fetch:*")

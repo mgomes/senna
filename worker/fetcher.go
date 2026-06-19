@@ -187,29 +187,23 @@ func (f *fetcher) Fetch(ctx context.Context, workerID string) (*senna.Job, error
 
 // fetchWeighted selects a queue using weighted random and tries to fetch from it
 func (f *fetcher) fetchWeighted(ctx context.Context, workerID string) (*senna.Job, error) {
-	primaryQueue, ok := f.selectWeightedQueue()
-	if !ok {
-		return nil, nil
-	}
-
-	job, status, err := f.fetchFromQueueInfo(ctx, workerID, primaryQueue)
-	if err != nil || job != nil {
-		return job, err
-	}
-
-	if primaryQueue.sequential && status == queueFetchLocked && len(f.activeQueues) > 1 {
-		for _, queue := range f.activeQueues {
-			if queue.name == primaryQueue.name {
-				continue
-			}
-			job, _, err := f.fetchFromQueueInfo(ctx, workerID, queue)
-			if err != nil || job != nil {
-				return job, err
-			}
+	var skippedStorage [8]string
+	skipped := skippedStorage[:0]
+	for {
+		queue, ok := f.selectWeightedQueueSkipping(skipped)
+		if !ok {
+			return nil, nil
 		}
-	}
 
-	return nil, nil
+		job, status, err := f.fetchFromQueueInfo(ctx, workerID, queue)
+		if err != nil || job != nil {
+			return job, err
+		}
+		if !queue.sequential || status != queueFetchLocked {
+			return nil, nil
+		}
+		skipped = appendSkippedQueueName(skipped, queue.name)
+	}
 }
 
 // fetchStrict tries each queue in priority order until a job is found
@@ -422,24 +416,40 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, bl
 	}
 
 	// Select primary queue using weighted random from processable queues
-	primaryQueue, ok := f.selectWeightedQueue()
-
-	// Try primary queue first
+	var skippedStorage [8]string
+	skipped := skippedStorage[:0]
+	var selectedQueue queueInfo
+	var selectedQueueOK bool
 	sawSequentialEmpty := false
-	if ok {
-		job, status, err := f.fetchFromQueueInfo(ctx, workerID, primaryQueue)
+	for {
+		queue, ok := f.selectWeightedQueueSkipping(skipped)
+		if !ok {
+			break
+		}
+
+		job, status, err := f.fetchFromQueueInfo(ctx, workerID, queue)
 		if err != nil {
 			return nil, err
 		}
 		if job != nil {
 			return job, nil
 		}
-		sawSequentialEmpty = primaryQueue.sequential && status == queueFetchEmpty
+		if queue.sequential && status == queueFetchLocked {
+			skipped = appendSkippedQueueName(skipped, queue.name)
+			continue
+		}
+		selectedQueue = queue
+		selectedQueueOK = true
+		sawSequentialEmpty = queue.sequential && status == queueFetchEmpty
+		break
 	}
 
 	// Primary queue empty - check remaining processable queues
 	for _, q := range f.activeQueues {
-		if ok && q.name == primaryQueue.name {
+		if selectedQueueOK && q.name == selectedQueue.name {
+			continue
+		}
+		if queueNameSkipped(q.name, skipped) {
 			continue
 		}
 		job, status, err := f.fetchFromQueueInfo(ctx, workerID, q)
@@ -451,6 +461,9 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, bl
 		}
 		if q.sequential && status == queueFetchEmpty {
 			sawSequentialEmpty = true
+		}
+		if q.sequential && status == queueFetchLocked {
+			skipped = appendSkippedQueueName(skipped, q.name)
 		}
 	}
 
@@ -471,6 +484,13 @@ func (f *fetcher) selectWeightedQueue() (queueInfo, bool) {
 	return selectWeightedQueue(f.activeQueues, f.totalActiveWeight)
 }
 
+func (f *fetcher) selectWeightedQueueSkipping(skipped []string) (queueInfo, bool) {
+	if len(skipped) == 0 {
+		return f.selectWeightedQueue()
+	}
+	return selectWeightedQueueSkipping(f.activeQueues, skipped)
+}
+
 func selectWeightedQueue(queues []queueInfo, totalWeight int) (queueInfo, bool) {
 	if len(queues) == 0 {
 		return queueInfo{}, false
@@ -489,6 +509,67 @@ func selectWeightedQueue(queues []queueInfo, totalWeight int) (queueInfo, bool) 
 		}
 	}
 	return queueInfo{}, false
+}
+
+func selectWeightedQueueSkipping(queues []queueInfo, skipped []string) (queueInfo, bool) {
+	var only queueInfo
+	var count int
+	var totalWeight int
+	for _, q := range queues {
+		if queueNameSkipped(q.name, skipped) {
+			continue
+		}
+		only = q
+		count++
+		totalWeight += q.priority
+	}
+	if count == 0 {
+		return queueInfo{}, false
+	}
+	if count == 1 {
+		return only, true
+	}
+	if totalWeight <= 0 {
+		n := rand.Intn(count)
+		for _, q := range queues {
+			if queueNameSkipped(q.name, skipped) {
+				continue
+			}
+			if n == 0 {
+				return q, true
+			}
+			n--
+		}
+		return queueInfo{}, false
+	}
+
+	r := rand.Intn(totalWeight)
+	for _, q := range queues {
+		if queueNameSkipped(q.name, skipped) {
+			continue
+		}
+		r -= q.priority
+		if r < 0 {
+			return q, true
+		}
+	}
+	return queueInfo{}, false
+}
+
+func queueNameSkipped(name string, skipped []string) bool {
+	for _, skippedName := range skipped {
+		if name == skippedName {
+			return true
+		}
+	}
+	return false
+}
+
+func appendSkippedQueueName(skipped []string, name string) []string {
+	if queueNameSkipped(name, skipped) {
+		return skipped
+	}
+	return append(skipped, name)
 }
 
 // blockingFetchStrict tries all queues non-blocking in priority order,
