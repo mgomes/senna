@@ -208,7 +208,7 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 			return c.enqueueUniqueAt(ctx, cfg.at, job)
 		}
 		if cfg.delay > 0 {
-			return c.enqueueUniqueAt(ctx, time.Now().Add(cfg.delay), job)
+			return c.enqueueUniqueIn(ctx, cfg.delay, job)
 		}
 		return c.enqueueUniqueNow(ctx, job)
 	}
@@ -217,7 +217,7 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 		return c.enqueueAt(ctx, cfg.at, job)
 	}
 	if cfg.delay > 0 {
-		return c.enqueueAt(ctx, time.Now().Add(cfg.delay), job)
+		return c.enqueueIn(ctx, cfg.delay, job)
 	}
 
 	return c.enqueueNow(ctx, job)
@@ -294,18 +294,25 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 		return nil, nil
 	}
 
-	// Determine if we're scheduling or enqueueing immediately
-	var scheduleAt time.Time
+	// Determine if we're scheduling or enqueueing immediately.
+	var scheduleScore float64
+	scheduled := false
 	if !cfg.at.IsZero() {
-		scheduleAt = cfg.at
+		scheduleScore = float64(cfg.at.Unix())
+		scheduled = true
 	} else if cfg.delay > 0 {
-		scheduleAt = time.Now().Add(cfg.delay)
+		now, err := redisNow(ctx, c.redis)
+		if err != nil {
+			return nil, fmt.Errorf("get Redis time for %d bulk jobs of type %s: %w", len(enqueued), jobType, err)
+		}
+		scheduleScore = float64(now.Add(cfg.delay).Unix())
+		scheduled = true
 	}
 
 	// Use pipeline for efficiency
 	pipe := c.redis.Pipeline()
 
-	if scheduleAt.IsZero() {
+	if !scheduled {
 		// Immediate enqueue - group jobs by queue
 		jobsByQueue := make(map[string][]string)
 		for _, ej := range enqueued {
@@ -327,11 +334,10 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 		}
 	} else {
 		// Scheduled enqueue
-		score := float64(scheduleAt.Unix())
 		members := make([]redis.Z, len(enqueued))
 		for i, ej := range enqueued {
 			members[i] = redis.Z{
-				Score:  score,
+				Score:  scheduleScore,
 				Member: string(ej.data),
 			}
 		}
@@ -402,6 +408,14 @@ func (c *Client) enqueueAt(ctx context.Context, t time.Time, job *senna.Job) (*s
 	return job, nil
 }
 
+func (c *Client) enqueueIn(ctx context.Context, d time.Duration, job *senna.Job) (*senna.Job, error) {
+	now, err := redisNow(ctx, c.redis)
+	if err != nil {
+		return nil, fmt.Errorf("get Redis time for scheduled job %s: %w", job.ID, err)
+	}
+	return c.enqueueAt(ctx, now.Add(d), job)
+}
+
 func (c *Client) enqueueUniqueNow(ctx context.Context, job *senna.Job) (*senna.Job, error) {
 	data, err := job.Marshal()
 	if err != nil {
@@ -467,6 +481,14 @@ func (c *Client) enqueueUniqueAt(ctx context.Context, t time.Time, job *senna.Jo
 	}
 
 	return job, nil
+}
+
+func (c *Client) enqueueUniqueIn(ctx context.Context, d time.Duration, job *senna.Job) (*senna.Job, error) {
+	now, err := redisNow(ctx, c.redis)
+	if err != nil {
+		return nil, fmt.Errorf("get Redis time for scheduled unique job %s: %w", job.ID, err)
+	}
+	return c.enqueueUniqueAt(ctx, now.Add(d), job)
 }
 
 func uniqueTTLMillis(ttl time.Duration) int64 {

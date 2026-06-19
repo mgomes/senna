@@ -408,10 +408,26 @@ func (w *Worker) completeJob(ctx context.Context, job *senna.Job) {
 
 func (w *Worker) retryJob(ctx context.Context, job *senna.Job, retryIn time.Duration) {
 	if retryIn > 0 {
-		w.retryJobAt(ctx, job, time.Now().Add(retryIn))
+		w.retryJobIn(ctx, job, retryIn)
 		return
 	}
 	w.finalizeRetryJob(ctx, job, senna.JobFinalization{Operation: jobFinalizationRetry}, retryIn)
+}
+
+func (w *Worker) retryJobIn(ctx context.Context, job *senna.Job, retryIn time.Duration) {
+	for {
+		now, err := redisNow(ctx, w.redis)
+		if err == nil {
+			w.retryJobAt(ctx, job, now.Add(retryIn))
+			return
+		}
+
+		err = fmt.Errorf("get Redis time for retry: %w", err)
+		w.logFinalizationRetry(ctx, job, jobFinalizationRetry, err)
+		if !w.waitToRetryFinalization(ctx, job, jobFinalizationRetry, err) {
+			return
+		}
+	}
 }
 
 func (w *Worker) retryJobAt(ctx context.Context, job *senna.Job, retryAt time.Time) {
@@ -838,14 +854,13 @@ func (w *Worker) scheduler(ctx context.Context) {
 }
 
 func (w *Worker) enqueueFromZSet(ctx context.Context, sourceKey string) error {
-	now := fmt.Sprintf("%d", time.Now().Unix())
 	queuePrefix := w.keys.Queue("")
 
 	for {
 		result, err := enqueueScheduledScript.Run(
 			ctx, w.redis,
 			[]string{sourceKey, w.keys.Queues()},
-			now, 100, queuePrefix,
+			100, queuePrefix,
 		)
 		if err != nil {
 			return fmt.Errorf("promote jobs from %q: %w", sourceKey, err)

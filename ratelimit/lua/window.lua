@@ -1,9 +1,10 @@
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local window_us = tonumber(ARGV[2])
-local now_us = tonumber(ARGV[3])
-local member = ARGV[4]
-local ttl = tonumber(ARGV[5])
+local member = ARGV[3]
+local ttl = tonumber(ARGV[4])
+local redis_time = redis.call("TIME")
+local now_us = (tonumber(redis_time[1]) * 1000000) + tonumber(redis_time[2])
 
 redis.call("ZREMRANGEBYSCORE", key, "-inf", now_us - window_us)
 

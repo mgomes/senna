@@ -583,7 +583,11 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) erro
 
 func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, retryIn time.Duration) error {
 	if retryIn > 0 {
-		return f.NackAt(ctx, workerID, job, time.Now().Add(retryIn))
+		now, err := redisNow(ctx, f.client)
+		if err != nil {
+			return fmt.Errorf("get Redis time for retry: %w", err)
+		}
+		return f.NackAt(ctx, workerID, job, now.Add(retryIn))
 	}
 
 	payload, err := jobPayload(job)

@@ -69,7 +69,6 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		nowUs := time.Now().UnixMicro()
 		drainTimeUs := l.drainTime.Microseconds()
 		if drainTimeUs < 1 {
 			drainTimeUs = 1
@@ -81,7 +80,7 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error
 
 		result, err := leakyScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.capacity, drainTimeUs, nowUs, ttlSeconds,
+			l.capacity, drainTimeUs, ttlSeconds,
 		)
 		if err != nil {
 			return nil, 0, err
@@ -127,7 +126,11 @@ func (l *LeakyLimiter) Acquire(ctx context.Context) (Lease, time.Duration, error
 
 // Level returns the current bucket fill level.
 func (l *LeakyLimiter) Level(ctx context.Context) (float64, error) {
-	nowUs := time.Now().UnixMicro()
+	now, err := redisNow(ctx, l.client)
+	if err != nil {
+		return 0, err
+	}
+	nowUs := now.UnixMicro()
 	drainTimeUs := l.drainTime.Microseconds()
 	if drainTimeUs < 1 {
 		drainTimeUs = 1

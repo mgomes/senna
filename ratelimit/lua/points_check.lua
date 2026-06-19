@@ -2,8 +2,9 @@ local key = KEYS[1]
 local capacity = tonumber(ARGV[1])
 local refill_time_us = tonumber(ARGV[2])
 local cost = tonumber(ARGV[3])
-local now_us = tonumber(ARGV[4])
-local ttl = tonumber(ARGV[5])
+local ttl = tonumber(ARGV[4])
+local redis_time = redis.call("TIME")
+local now_us = (tonumber(redis_time[1]) * 1000000) + tonumber(redis_time[2])
 
 local state = redis.call("HMGET", key, "points", "last_refill")
 local points = tonumber(state[1] or capacity)

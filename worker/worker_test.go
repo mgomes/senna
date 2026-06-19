@@ -2675,14 +2675,23 @@ func TestWorker_RetryJob_RetriesUntilBatchFailureRecorded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
+	retryIn := 5 * time.Second
+	beforeRetry, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() before retryJob error = %v, want nil", err)
+	}
 	go func() {
-		w.retryJob(ctx, job, 5*time.Second)
+		w.retryJob(ctx, job, retryIn)
 		close(done)
 	}()
 
 	assertFinalizationStillPending(t, done)
 	repairBatchJobSet(t, w, redisClient, bid, job.ID)
 	waitForFinalization(t, done)
+	afterRetry, err := redisNow(ctx, redisClient)
+	if err != nil {
+		t.Fatalf("redisNow() after retryJob error = %v, want nil", err)
+	}
 
 	status := senna.NewBatchStatus(redisClient, w.keys.Namespace(), bid)
 	if err := status.Refresh(context.Background()); err != nil {
@@ -2703,14 +2712,23 @@ func TestWorker_RetryJob_RetriesUntilBatchFailureRecorded(t *testing.T) {
 		t.Errorf("expected retry job removed from in-flight after finalization, got %d", inFlight)
 	}
 
-	retryItems, err := redisClient.ZRange(context.Background(), w.keys.Retry(), 0, -1).Result()
+	retryItems, err := redisClient.ZRangeWithScores(context.Background(), w.keys.Retry(), 0, -1).Result()
 	if err != nil {
 		t.Fatalf("zrange retry: %v", err)
 	}
 	if len(retryItems) != 1 {
 		t.Fatalf("expected 1 scheduled retry, got %d", len(retryItems))
 	}
-	retryJob, err := senna.UnmarshalJob([]byte(retryItems[0]))
+	minScore := beforeRetry.Add(retryIn).Unix()
+	maxScore := afterRetry.Add(retryIn).Unix()
+	if got := int64(retryItems[0].Score); got < minScore || got > maxScore {
+		t.Errorf("retry score = %d, want between Redis-time scores %d and %d", got, minScore, maxScore)
+	}
+	retryData, ok := retryItems[0].Member.(string)
+	if !ok {
+		t.Fatalf("retry member type = %T, want string", retryItems[0].Member)
+	}
+	retryJob, err := senna.UnmarshalJob([]byte(retryData))
 	if err != nil {
 		t.Fatalf("unmarshal retry job: %v", err)
 	}

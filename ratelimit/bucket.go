@@ -67,7 +67,6 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
-		nowUs := time.Now().UnixMicro()
 		windowUs := l.interval.Microseconds()
 		if windowUs < 1 {
 			windowUs = 1
@@ -79,7 +78,7 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 
 		result, err := bucketScript.Run(ctx, l.client,
 			[]string{l.keyPrefix + ":" + l.name},
-			l.limit, windowUs, nowUs, ttlSeconds,
+			l.limit, windowUs, ttlSeconds,
 		)
 		if err != nil {
 			return nil, 0, err
@@ -120,7 +119,11 @@ func (l *BucketLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 
 // Remaining returns the remaining capacity in the current bucket window.
 func (l *BucketLimiter) Remaining(ctx context.Context) (int, error) {
-	nowUs := time.Now().UnixMicro()
+	now, err := redisNow(ctx, l.client)
+	if err != nil {
+		return 0, err
+	}
+	nowUs := now.UnixMicro()
 	windowUs := l.interval.Microseconds()
 	if windowUs < 1 {
 		windowUs = 1
