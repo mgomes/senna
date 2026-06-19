@@ -10,6 +10,6 @@ end
 
 local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
 if removed > 0 then
-	redis.call("RPUSH", KEYS[2], ARGV[2])
+	redis.call("LPUSH", KEYS[2], ARGV[2])
 end
 return removed

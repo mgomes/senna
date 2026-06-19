@@ -155,6 +155,9 @@ func normalizeWorkerSettings(settings senna.WorkerSettings) senna.WorkerSettings
 			settings.SequentialLockRenewInterval = settings.SequentialLockTTL
 		}
 	}
+	if settings.IterableMaxRuntime == 0 {
+		settings.IterableMaxRuntime = defaults.IterableMaxRuntime
+	}
 	if settings.PeriodicPollInterval <= 0 {
 		settings.PeriodicPollInterval = defaults.PeriodicPollInterval
 	}

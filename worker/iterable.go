@@ -24,6 +24,10 @@ type IterableJobOptions struct {
 	// 0 means no limit (process until completion or interruption).
 	MaxItemsPerRun int
 
+	// MaxRuntime limits elapsed processing time before re-enqueueing the job.
+	// 0 uses the worker default. A negative value disables runtime-based yielding.
+	MaxRuntime time.Duration
+
 	// Callbacks for lifecycle events.
 	Callbacks *senna.IterableCallbacks
 
@@ -49,6 +53,13 @@ func WithCursorSaveInterval(d time.Duration) IterableJobOption {
 func WithMaxItemsPerRun(n int) IterableJobOption {
 	return func(o *IterableJobOptions) {
 		o.MaxItemsPerRun = n
+	}
+}
+
+// WithIterableMaxRuntime limits elapsed processing time before re-enqueueing.
+func WithIterableMaxRuntime(d time.Duration) IterableJobOption {
+	return func(o *IterableJobOptions) {
+		o.MaxRuntime = d
 	}
 }
 
@@ -84,6 +95,7 @@ func WithIterableRateLimiter(limiter ratelimit.Limiter) IterableJobOption {
 func (w *Worker) RegisterIterable(jobType string, handler senna.IterableHandler, opts ...IterableJobOption) {
 	options := &IterableJobOptions{
 		CursorSaveInterval: defaultCursorSaveInterval,
+		MaxRuntime:         w.defaultIterableMaxRuntime(),
 		MaxRetries:         senna.DefaultRetryCount,
 		RetryBackoff:       senna.DefaultBackoff(),
 	}
@@ -92,6 +104,13 @@ func (w *Worker) RegisterIterable(jobType string, handler senna.IterableHandler,
 	}
 
 	w.handlers.RegisterIterable(jobType, handler, options)
+}
+
+func (w *Worker) defaultIterableMaxRuntime() time.Duration {
+	if w != nil && w.config != nil {
+		return w.config.Settings.IterableMaxRuntime
+	}
+	return senna.DefaultWorkerSettings().IterableMaxRuntime
 }
 
 // processIterable handles the iteration loop for an iterable job.
@@ -156,6 +175,11 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 	itemsThisRun := 0
 	runStart := time.Now()
+	maxRuntime := w.iterableMaxRuntime(opts)
+	runtimeDeadline := time.Time{}
+	if maxRuntime > 0 {
+		runtimeDeadline = runStart.Add(maxRuntime)
+	}
 	needsSave := false
 
 	for iter.Next(ctx) {
@@ -204,6 +228,15 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 
 		// Check max items per run
 		if opts.MaxItemsPerRun > 0 && itemsThisRun >= opts.MaxItemsPerRun {
+			interruptCtx := ctx
+			if ctx.Err() != nil {
+				interruptCtx = context.WithoutCancel(ctx)
+			}
+			w.preserveCancellation(interruptCtx, state, stateKey)
+			return w.handleIterationInterrupt(interruptCtx, state, stateKey, runStart, opts, job)
+		}
+
+		if !runtimeDeadline.IsZero() && !time.Now().Before(runtimeDeadline) {
 			interruptCtx := ctx
 			if ctx.Err() != nil {
 				interruptCtx = context.WithoutCancel(ctx)
@@ -290,6 +323,13 @@ func (w *Worker) processIterable(ctx context.Context, job *senna.Job, handler se
 	}
 
 	return nil
+}
+
+func (w *Worker) iterableMaxRuntime(opts *IterableJobOptions) time.Duration {
+	if opts != nil && opts.MaxRuntime != 0 {
+		return opts.MaxRuntime
+	}
+	return w.defaultIterableMaxRuntime()
 }
 
 // loadIterationState loads the iteration state from Redis.
