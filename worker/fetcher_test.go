@@ -13,9 +13,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func selectTestQueue(ctx context.Context, f *fetcher, workerID string) string {
-	processable, totalWeight := f.processableQueues(ctx, workerID)
-	return selectProcessableQueue(processable, totalWeight)
+func selectTestQueue(f *fetcher) string {
+	queue, ok := f.selectWeightedQueue()
+	if !ok {
+		return ""
+	}
+	return queue.name
 }
 
 func TestFetcher_SelectQueue_SingleQueue(t *testing.T) {
@@ -26,9 +29,8 @@ func TestFetcher_SelectQueue_SingleQueue(t *testing.T) {
 		{Name: "default", Priority: 1},
 	}, 100*time.Millisecond, false)
 
-	ctx := context.Background()
 	for range 10 {
-		queue := selectTestQueue(ctx, f, "worker-1")
+		queue := selectTestQueue(f)
 		if queue != "default" {
 			t.Errorf("expected 'default', got '%s'", queue)
 		}
@@ -47,10 +49,9 @@ func TestFetcher_SelectQueue_MultipleQueues(t *testing.T) {
 
 	counts := make(map[string]int)
 	iterations := 10000
-	ctx := context.Background()
 
 	for range iterations {
-		queue := selectTestQueue(ctx, f, "worker-1")
+		queue := selectTestQueue(f)
 		counts[queue]++
 	}
 
@@ -78,9 +79,8 @@ func TestFetcher_SelectQueue_PausedQueues(t *testing.T) {
 		{Name: "default", Priority: 5},
 	}, 100*time.Millisecond, false)
 
-	ctx := context.Background()
 	for range 100 {
-		queue := selectTestQueue(ctx, f, "worker-1")
+		queue := selectTestQueue(f)
 		if queue != "default" {
 			t.Errorf("expected 'default' (critical is paused), got '%s'", queue)
 		}
@@ -96,7 +96,7 @@ func TestFetcher_SelectQueue_AllPaused(t *testing.T) {
 		{Name: "default", Priority: 5, Paused: true},
 	}, 100*time.Millisecond, false)
 
-	queue := selectTestQueue(context.Background(), f, "worker-1")
+	queue := selectTestQueue(f)
 	if queue != "" {
 		t.Errorf("expected empty string when all paused, got '%s'", queue)
 	}
@@ -110,9 +110,42 @@ func TestFetcher_SelectQueue_ZeroPriority(t *testing.T) {
 		{Name: "default", Priority: 0},
 	}, 100*time.Millisecond, false)
 
-	queue := selectTestQueue(context.Background(), f, "worker-1")
+	queue := selectTestQueue(f)
 	if queue != "default" {
 		t.Errorf("expected 'default' (priority normalized to 1), got '%s'", queue)
+	}
+}
+
+func TestFetcher_SelectQueue_SkippingQueuePreservesRemainingWeights(t *testing.T) {
+	client := newTestRedisClient(t)
+	k := keys.New("test-fetcher")
+
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 100, Sequential: true},
+		{Name: "alpha", Priority: 1},
+		{Name: "beta", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	counts := make(map[string]int)
+	iterations := 10000
+	for range iterations {
+		queue, ok := f.selectWeightedQueueSkipping([]string{"transforms"})
+		if !ok {
+			t.Fatal("selectWeightedQueueSkipping([transforms]) ok = false, want true")
+		}
+		if queue.name == "transforms" {
+			t.Fatal("selectWeightedQueueSkipping([transforms]) selected transforms, want skipped")
+		}
+		counts[queue.name]++
+	}
+
+	alphaRatio := float64(counts["alpha"]) / float64(iterations)
+	betaRatio := float64(counts["beta"]) / float64(iterations)
+	if alphaRatio < 0.4 || alphaRatio > 0.6 {
+		t.Errorf("alpha queue ratio should be ~0.5, got %f", alphaRatio)
+	}
+	if betaRatio < 0.4 || betaRatio > 0.6 {
+		t.Errorf("beta queue ratio should be ~0.5, got %f", betaRatio)
 	}
 }
 
@@ -1432,6 +1465,158 @@ func TestFetcher_Sequential_MixedQueues(t *testing.T) {
 	}
 	if fetched.Type != "default_job" {
 		t.Errorf("expected default_job, got %s", fetched.Type)
+	}
+}
+
+func TestFetcher_Sequential_FetchUsesScriptWithoutPreflightGet(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-no-preflight-get:*")
+
+	k := keys.New("test-seq-no-preflight-get")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "transforms", Priority: 1, Sequential: true},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("seq_job", nil)
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	if err := client.LPush(ctx, k.Queue("transforms"), string(data)).Err(); err != nil {
+		t.Fatalf("LPush(%q) error = %v, want nil", k.Queue("transforms"), err)
+	}
+	if err := client.SetArgs(ctx, k.SequentialLock("transforms"), "worker-1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  30 * time.Second,
+	}).Err(); err != nil {
+		t.Fatalf("SetArgs(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+	}
+
+	hook := &commandNameHook{}
+	client.AddHook(hook)
+
+	fetched, err := f.Fetch(ctx, "worker-2")
+	if err != nil {
+		t.Fatalf("Fetch(ctx, worker-2) error = %v, want nil", err)
+	}
+	if fetched != nil {
+		t.Fatalf("Fetch(ctx, worker-2) job = %v, want nil", fetched)
+	}
+	if hook.saw("get") {
+		t.Fatalf("Fetch(ctx, worker-2) issued preflight GET; commands = %v", hook.names())
+	}
+	if !hook.saw("eval") && !hook.saw("evalsha") {
+		t.Fatalf("Fetch(ctx, worker-2) did not run sequential script; commands = %v", hook.names())
+	}
+}
+
+func TestFetcher_Sequential_BlockingFetchBlocksOnRegularQueueWhenSequentialLocked(t *testing.T) {
+	tests := []struct {
+		name           string
+		strictPriority bool
+	}{
+		{
+			name:           "weighted",
+			strictPriority: false,
+		},
+		{
+			name:           "strict",
+			strictPriority: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestRedisClient(t)
+			namespace := "test-seq-locked-block-regular-" + tt.name
+			flushTestKeys(t, client, namespace+":*")
+
+			k := keys.New(namespace)
+			f := newFetcher(client, k, []senna.QueueConfig{
+				{Name: "transforms", Priority: 10, Sequential: true},
+				{Name: "default", Priority: 1},
+			}, 20*time.Millisecond, tt.strictPriority)
+			ctx := context.Background()
+
+			if err := client.SetArgs(ctx, k.SequentialLock("transforms"), "worker-1", redis.SetArgs{
+				Mode: "NX",
+				TTL:  30 * time.Second,
+			}).Err(); err != nil {
+				t.Fatalf("SetArgs(%q) error = %v, want nil", k.SequentialLock("transforms"), err)
+			}
+
+			hook := &commandNameHook{}
+			client.AddHook(hook)
+
+			startedAt := time.Now()
+			fetched, err := f.BlockingFetch(ctx, "worker-2", time.Second)
+			elapsed := time.Since(startedAt)
+			if err != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) error = %v, want nil", err)
+			}
+			if fetched != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) job = %v, want nil", fetched)
+			}
+			if !hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) did not issue BLMOVE; commands = %v", hook.names())
+			}
+			if elapsed < 800*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+			}
+		})
+	}
+}
+
+func TestFetcher_Sequential_BlockingFetchPollsWhenSequentialQueueIsOpen(t *testing.T) {
+	tests := []struct {
+		name           string
+		strictPriority bool
+	}{
+		{
+			name:           "weighted",
+			strictPriority: false,
+		},
+		{
+			name:           "strict",
+			strictPriority: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestRedisClient(t)
+			namespace := "test-seq-open-poll-" + tt.name
+			flushTestKeys(t, client, namespace+":*")
+
+			k := keys.New(namespace)
+			f := newFetcher(client, k, []senna.QueueConfig{
+				{Name: "transforms", Priority: 10, Sequential: true},
+				{Name: "default", Priority: 1},
+			}, 20*time.Millisecond, tt.strictPriority)
+			hook := &commandNameHook{}
+			client.AddHook(hook)
+
+			startedAt := time.Now()
+			fetched, err := f.BlockingFetch(context.Background(), "worker-1", time.Second)
+			elapsed := time.Since(startedAt)
+			if err != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) error = %v, want nil", err)
+			}
+			if fetched != nil {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) job = %v, want nil", fetched)
+			}
+			if hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) issued BLMOVE; commands = %v", hook.names())
+			}
+			if elapsed < 15*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want poll interval wait", elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want less than block timeout", elapsed)
+			}
+		})
 	}
 }
 
