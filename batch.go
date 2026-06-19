@@ -270,7 +270,7 @@ func (bs *BatchStatus) Delete(ctx context.Context) error {
 	pipe := bs.redis.Pipeline()
 	removeFromBatches := pipe.SRem(ctx, bs.keys.Batches(), bs.bid)
 	removeFromDeadBatches := pipe.SRem(ctx, bs.keys.DeadBatches(), bs.bid)
-	deleteBatchData := pipe.Del(ctx, keys...)
+	deleteBatchData := pipe.Unlink(ctx, keys...)
 
 	_, execErr := pipe.Exec(ctx)
 
