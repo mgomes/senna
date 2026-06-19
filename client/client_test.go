@@ -879,6 +879,39 @@ func (h *commandSizeHook) maxZAddArgs() int {
 	return h.maxZAdd
 }
 
+type failNthLPushHook struct {
+	mu     sync.Mutex
+	failOn int
+	seen   int
+	err    error
+}
+
+func (h *failNthLPushHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *failNthLPushHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return next
+}
+
+func (h *failNthLPushHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			if cmd.Name() != "lpush" {
+				continue
+			}
+			h.mu.Lock()
+			h.seen++
+			shouldFail := h.seen == h.failOn
+			h.mu.Unlock()
+			if shouldFail {
+				return h.err
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
 func TestClient_EncryptedJob(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test:*")
@@ -1465,6 +1498,68 @@ func TestClient_EnqueueBulkRejectsInvalidChunkSize(t *testing.T) {
 		t.Fatalf("Exists(queues) error = %v, want nil", err)
 	} else if exists != 0 {
 		t.Fatalf("Exists(queues) = %d, want 0", exists)
+	}
+}
+
+func TestClient_EnqueueBulkReturnsAcceptedJobsOnChunkFailure(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-bulk-partial:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-bulk-partial",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	injectedErr := errors.New("injected lpush failure")
+	client.redis.AddHook(&failNthLPushHook{
+		failOn: 2,
+		err:    injectedErr,
+	})
+
+	argsList := []map[string]any{
+		{"index": 0},
+		{"index": 1},
+		{"index": 2},
+		{"index": 3},
+		{"index": 4},
+	}
+	jobs, err := client.EnqueueBulk(context.Background(), "bulk_partial_job", argsList, WithBulkChunkSize(2))
+	if !errors.Is(err, injectedErr) {
+		t.Fatalf("EnqueueBulk(partial failure) error = %v, want wrapped %v", err, injectedErr)
+	}
+	var partial *BulkPartialError
+	if !errors.As(err, &partial) {
+		t.Fatalf("EnqueueBulk(partial failure) error = %T, want *BulkPartialError", err)
+	}
+	if partial.Enqueued != 2 || partial.Total != len(argsList) {
+		t.Fatalf("BulkPartialError = {Enqueued:%d Total:%d}, want {Enqueued:2 Total:%d}", partial.Enqueued, partial.Total, len(argsList))
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("EnqueueBulk(partial failure) jobs = %d, want 2", len(jobs))
+	}
+
+	ctx := context.Background()
+	if queued, err := redisClient.LLen(ctx, "test-bulk-partial:queue:default").Result(); err != nil {
+		t.Fatalf("LLen(default) error = %v, want nil", err)
+	} else if queued != 2 {
+		t.Fatalf("LLen(default) = %d, want 2", queued)
+	}
+	for i, wantJob := range jobs {
+		payload, err := redisClient.RPop(ctx, "test-bulk-partial:queue:default").Result()
+		if err != nil {
+			t.Fatalf("RPop(default) at index %d error = %v, want nil", i, err)
+		}
+		gotJob, err := senna.UnmarshalJob([]byte(payload))
+		if err != nil {
+			t.Fatalf("UnmarshalJob(queue payload %d) error = %v, want nil", i, err)
+		}
+		if gotJob.ID != wantJob.ID {
+			t.Fatalf("queued job %d ID = %q, want %q", i, gotJob.ID, wantJob.ID)
+		}
 	}
 }
 

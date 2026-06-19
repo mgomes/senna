@@ -33,6 +33,28 @@ var (
 	ErrInvalidChunkSize = errors.New("chunk size must be > 0")
 )
 
+// BulkPartialError reports that EnqueueBulk accepted some chunks before a later
+// chunk failed. The returned jobs slice contains the accepted prefix.
+type BulkPartialError struct {
+	// Enqueued is the number of jobs known to have been accepted by Redis.
+	Enqueued int
+	// Total is the total number of jobs requested by the bulk enqueue call.
+	Total int
+	// Err is the Redis error from the first chunk not known to be accepted.
+	Err error
+}
+
+func (e *BulkPartialError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("bulk enqueue partially completed: enqueued %d of %d jobs", e.Enqueued, e.Total)
+	}
+	return fmt.Sprintf("bulk enqueue partially completed: enqueued %d of %d jobs: %v", e.Enqueued, e.Total, e.Err)
+}
+
+func (e *BulkPartialError) Unwrap() error {
+	return e.Err
+}
+
 // Client enqueues jobs and exposes batch and iteration helpers.
 type Client struct {
 	redis     *redis.Client
@@ -254,6 +276,8 @@ func (c *Client) EnqueueAt(ctx context.Context, t time.Time, jobType string, arg
 // EnqueueBulk enqueues multiple jobs of the same type in bounded Redis chunks.
 // All jobs share the same options (queue, retry, etc.) but have different arguments.
 // If any job fails to marshal or encrypt, no jobs are enqueued.
+// If Redis fails after earlier chunks are accepted, EnqueueBulk returns the accepted
+// job prefix and a *BulkPartialError.
 func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map[string]any, opts ...EnqueueOption) ([]*senna.Job, error) {
 	if len(argsList) == 0 {
 		return nil, nil
@@ -321,7 +345,15 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	for start := 0; start < len(jobs); start += cfg.chunkSize {
 		end := min(start+cfg.chunkSize, len(jobs))
 		if err := c.enqueueBulkChunk(ctx, jobs[start:end], scheduled, scheduleScore); err != nil {
-			return nil, fmt.Errorf("enqueue bulk jobs %d-%d of type %s: %w", start, end-1, jobType, err)
+			err = fmt.Errorf("enqueue bulk jobs %d-%d of type %s: %w", start, end-1, jobType, err)
+			if start > 0 {
+				return jobs[:start], &BulkPartialError{
+					Enqueued: start,
+					Total:    len(jobs),
+					Err:      err,
+				}
+			}
+			return nil, err
 		}
 	}
 
