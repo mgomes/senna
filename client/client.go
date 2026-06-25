@@ -31,6 +31,8 @@ var (
 	ErrInvalidQueueName = errors.New("queue name must not be empty or whitespace")
 	// ErrInvalidChunkSize indicates a bulk or batch chunk size is not positive.
 	ErrInvalidChunkSize = errors.New("chunk size must be > 0")
+	// ErrEncryptionUnavailable indicates encryption was requested without client encryption configured.
+	ErrEncryptionUnavailable = errors.New("encryption requested but client encryption is not configured")
 )
 
 // BulkPartialError reports that EnqueueBulk accepted some chunks before a later
@@ -179,7 +181,7 @@ func WithBatch(batchID string) EnqueueOption {
 	}
 }
 
-// WithEncryption encrypts job arguments when client encryption is enabled.
+// WithEncryption encrypts job arguments and requires client encryption to be configured.
 func WithEncryption() EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.encrypt = true
@@ -220,6 +222,9 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args map[string]an
 	}
 	if err := validateQueueName(cfg.queue); err != nil {
 		return nil, err
+	}
+	if cfg.encrypt && c.encryptor == nil {
+		return nil, ErrEncryptionUnavailable
 	}
 
 	job := senna.NewJob(jobType, args)
@@ -301,6 +306,9 @@ func (c *Client) EnqueueBulk(ctx context.Context, jobType string, argsList []map
 	}
 	if cfg.chunkSize <= 0 {
 		return nil, ErrInvalidChunkSize
+	}
+	if cfg.encrypt && c.encryptor == nil {
+		return nil, ErrEncryptionUnavailable
 	}
 
 	validateBeforeWrite := len(argsList) > cfg.chunkSize
