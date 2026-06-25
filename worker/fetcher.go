@@ -15,6 +15,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const finalizationTrustTTL = 30 * 24 * time.Hour
+
 type fetcher struct {
 	client            *redis.Client
 	keys              *keys.Keys
@@ -228,26 +230,27 @@ func (f *fetcher) fetchFromQueueInfo(ctx context.Context, workerID string, queue
 	}
 
 	inFlightKey := f.keys.InFlight(workerID)
-
-	result, err := f.client.LMove(ctx, queue.queueKey, inFlightKey, "RIGHT", "LEFT").Result()
-	if errors.Is(err, redis.Nil) {
-		select {
-		case <-ctx.Done():
-			return nil, queueFetchEmpty, ctx.Err()
-		default:
-			return nil, queueFetchEmpty, nil
-		}
-	}
+	result, err := fetchJobScript.Run(ctx, f.client,
+		[]string{queue.queueKey, inFlightKey},
+		f.keys.Finalization(""),
+	)
 	if err != nil {
 		return nil, queueFetchEmpty, err
 	}
 
+	status, jobData := parseSequentialFetchResult(result)
+	if status != queueFetchJob {
+		return nil, status, nil
+	}
+
 	var job senna.Job
-	if err := json.Unmarshal([]byte(result), &job); err != nil {
+	if err := json.Unmarshal([]byte(jobData), &job); err != nil {
 		return nil, queueFetchEmpty, err
 	}
 
-	job.SetRaw(result)
+	if err := f.prepareFetchedJob(ctx, workerID, &job, jobData); err != nil {
+		return nil, queueFetchEmpty, err
+	}
 	return &job, queueFetchJob, nil
 }
 
@@ -291,7 +294,7 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string,
 	result, err := sequentialFetchScript.Run(
 		ctx, f.client,
 		[]string{queue.queueKey, inFlightKey, queue.sequentialLockKey},
-		workerID, durationMilliseconds(f.sequentialLockTTL),
+		workerID, durationMilliseconds(f.sequentialLockTTL), f.keys.Finalization(""),
 	)
 	if errors.Is(err, redis.Nil) {
 		// Script returned nil - queue empty or lock held by another worker
@@ -331,10 +334,17 @@ func (f *fetcher) fetchFromSequentialQueue(ctx context.Context, workerID string,
 		}
 		return nil, queueFetchEmpty, err
 	}
+	if err := f.prepareFetchedJob(ctx, workerID, &job, jobData); err != nil {
+		cleanupErr := f.releaseClaimedSequentialLock(ctx, workerID, queue.name)
+		<-sema // Release local semaphore
+		if cleanupErr != nil {
+			return nil, queueFetchEmpty, errors.Join(err, cleanupErr)
+		}
+		return nil, queueFetchEmpty, err
+	}
 
 	// Successfully fetched job - semaphore will be released in ReleaseSequentialLock
 	f.holdSequentialLock(queue.name)
-	job.SetRaw(jobData)
 	return &job, queueFetchJob, nil
 }
 
@@ -378,6 +388,14 @@ func (f *fetcher) discardClaimedSequentialPayload(ctx context.Context, workerID,
 	return nil
 }
 
+func (f *fetcher) releaseClaimedSequentialLock(ctx context.Context, workerID, queueName string) error {
+	cleanupCtx := context.WithoutCancel(ctx)
+	if _, err := releaseSequentialLockScript.Run(cleanupCtx, f.client, []string{f.keys.SequentialLock(queueName)}, workerID); err != nil {
+		return fmt.Errorf("release sequential lock for queue %s: %w", queueName, err)
+	}
+	return nil
+}
+
 func durationMilliseconds(d time.Duration) int64 {
 	ms := d.Milliseconds()
 	if ms <= 0 {
@@ -386,8 +404,8 @@ func durationMilliseconds(d time.Duration) int64 {
 	return ms
 }
 
-// BlockingFetch blocks until a job is available, then atomically moves it to in-flight.
-// Uses BLMOVE (Redis 6.2+) when blockTimeout is at least one second.
+// BlockingFetch waits for a job to become available, then atomically moves a
+// sanitized payload to in-flight.
 func (f *fetcher) BlockingFetch(ctx context.Context, workerID string, blockTimeout time.Duration) (*senna.Job, error) {
 	if blockTimeout < time.Second {
 		job, err := f.Fetch(ctx, workerID)
@@ -467,9 +485,8 @@ func (f *fetcher) blockingFetchWeighted(ctx context.Context, workerID string, bl
 		}
 	}
 
-	// BLMOVE can only watch one queue. Keep multi-queue rotation bounded by the
-	// poll interval so jobs arriving on another queue are not delayed by the full
-	// block timeout.
+	// Keep multi-queue rotation bounded by the poll interval so jobs arriving on
+	// another queue are not delayed by the full block timeout.
 	if len(f.blockableQueues) != 1 || sawSequentialEmpty {
 		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
 			return nil, err
@@ -597,9 +614,8 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, bloc
 		}
 	}
 
-	// BLMOVE can only watch one queue. Keep multi-queue rotation bounded by the
-	// poll interval so lower-priority queues are rechecked promptly when all
-	// current queues are empty.
+	// Keep multi-queue rotation bounded by the poll interval so lower-priority
+	// queues are rechecked promptly when all current queues are empty.
 	if len(f.blockableQueues) != 1 || sawSequentialEmpty {
 		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
 			return nil, err
@@ -611,41 +627,85 @@ func (f *fetcher) blockingFetchStrict(ctx context.Context, workerID string, bloc
 }
 
 func (f *fetcher) blockingFetchFromQueueInfo(ctx context.Context, workerID string, queue queueInfo, blockTimeout time.Duration) (*senna.Job, error) {
-	// Sequential queues can't use BLMOVE - multiple workers blocking would
-	// break the exclusivity guarantee. Use non-blocking fetch with the atomic
-	// lock script, then wait for the poll interval if no job.
-	if queue.sequential {
-		job, _, err := f.fetchFromSequentialQueue(ctx, workerID, queue)
-		if err != nil || job != nil {
-			return job, err
-		}
-		if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	}
-
-	inFlightKey := f.keys.InFlight(workerID)
-
-	result, err := f.client.BLMove(ctx, queue.queueKey, inFlightKey, "RIGHT", "LEFT", blockTimeout).Result()
-	if errors.Is(err, redis.Nil) {
-		return nil, nil
-	}
-	if err != nil {
-		// Check if context was cancelled
+	job, _, err := f.fetchFromQueueInfo(ctx, workerID, queue)
+	if err != nil || job != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		return job, err
+	}
+	if err := f.waitPollInterval(ctx, blockTimeout); err != nil {
 		return nil, err
 	}
+	return nil, nil
+}
 
-	var job senna.Job
-	if err := json.Unmarshal([]byte(result), &job); err != nil {
-		return nil, err
+func (f *fetcher) prepareFetchedJob(ctx context.Context, workerID string, job *senna.Job, payload string) error {
+	if job.Finalization() == nil {
+		job.SetRaw(payload)
+		return nil
 	}
 
-	job.SetRaw(result)
-	return &job, nil
+	trusted, err := f.trustsFinalization(ctx, job.ID, payload)
+	if err != nil {
+		return err
+	}
+	if trusted {
+		job.SetRaw(payload)
+		return nil
+	}
+
+	job.ClearFinalization()
+	sanitizedData, err := job.Marshal()
+	if err != nil {
+		return fmt.Errorf("sanitize job %s finalization: %w", job.ID, err)
+	}
+	sanitizedPayload := string(sanitizedData)
+
+	if sanitizedPayload != payload {
+		result, err := sanitizeJobFinalizationScript.Run(
+			ctx, f.client,
+			[]string{f.keys.InFlight(workerID)},
+			payload, sanitizedPayload,
+		)
+		if err != nil {
+			return fmt.Errorf("sanitize job %s finalization: %w", job.ID, err)
+		}
+		replaced, ok := result.(int64)
+		if !ok {
+			return fmt.Errorf("sanitize job %s finalization: unexpected script result %T", job.ID, result)
+		}
+		if replaced != 1 {
+			return fmt.Errorf("sanitize job %s finalization: in-flight payload not found", job.ID)
+		}
+	}
+
+	job.SetRaw(sanitizedPayload)
+	return nil
+}
+
+func (f *fetcher) trustsFinalization(ctx context.Context, jobID, payload string) (bool, error) {
+	if jobID == "" {
+		return false, nil
+	}
+
+	trustKey := f.keys.Finalization(jobID)
+	keyType, err := f.client.Type(ctx, trustKey).Result()
+	if err != nil {
+		return false, fmt.Errorf("read job %s finalization trust type: %w", jobID, err)
+	}
+	if keyType != "string" {
+		return false, nil
+	}
+
+	trustedPayload, err := f.client.Get(ctx, trustKey).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read job %s finalization trust: %w", jobID, err)
+	}
+	return trustedPayload == payload, nil
 }
 
 func (f *fetcher) waitPollInterval(ctx context.Context, maxWait time.Duration) error {
@@ -673,7 +733,7 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) erro
 	if err != nil {
 		return err
 	}
-	keys := []string{f.keys.InFlight(workerID)}
+	keys := []string{f.keys.InFlight(workerID), f.keys.Finalization(job.ID)}
 	if job.UniqueKey != "" {
 		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
@@ -698,7 +758,7 @@ func (f *fetcher) Nack(ctx context.Context, workerID string, job *senna.Job, ret
 		return err
 	}
 
-	if _, err = ackJobScript.Run(ctx, f.client, []string{f.keys.InFlight(workerID)}, payload); err != nil {
+	if _, err = ackJobScript.Run(ctx, f.client, []string{f.keys.InFlight(workerID), f.keys.Finalization(job.ID)}, payload, job.ID); err != nil {
 		return fmt.Errorf("nack job %s: %w", job.ID, err)
 	}
 	job.ClearFinalization()
@@ -719,7 +779,7 @@ func (f *fetcher) NackAt(ctx context.Context, workerID string, job *senna.Job, r
 		return err
 	}
 	if _, err = retryJobScript.Run(ctx, f.client,
-		[]string{f.keys.InFlight(workerID), f.keys.Retry()},
+		[]string{f.keys.InFlight(workerID), f.keys.Retry(), f.keys.Finalization(job.ID)},
 		payload, retryAt.Unix(), string(newData),
 	); err != nil {
 		return fmt.Errorf("nack job %s for retry: %w", job.ID, err)
@@ -744,7 +804,7 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 		return err
 	}
 
-	keys := []string{f.keys.InFlight(workerID), f.keys.Dead()}
+	keys := []string{f.keys.InFlight(workerID), f.keys.Dead(), f.keys.Finalization(job.ID)}
 	if job.UniqueKey != "" {
 		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
@@ -773,8 +833,8 @@ func (f *fetcher) MarkFinalization(ctx context.Context, workerID string, job *se
 
 	result, err := markJobFinalizationScript.Run(
 		ctx, f.client,
-		[]string{f.keys.InFlight(workerID), f.keys.Queue(job.Queue)},
-		payload, string(finalizedData),
+		[]string{f.keys.InFlight(workerID), f.keys.Queue(job.Queue), f.keys.Finalization(job.ID)},
+		payload, string(finalizedData), durationMilliseconds(finalizationTrustTTL),
 	)
 	if err != nil {
 		return fmt.Errorf("mark job %s finalization: %w", job.ID, err)

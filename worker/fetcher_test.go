@@ -227,11 +227,11 @@ func TestFetcher_Fetch_ContextCanceled(t *testing.T) {
 	_ = err
 }
 
-func TestFetcher_BlockingFetchUsesBLMoveWithSubSecondPollInterval(t *testing.T) {
+func TestFetcher_BlockingFetchUsesPollInterval(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "test-blocking-blmove:*")
+	flushTestKeys(t, client, "test-blocking-poll:*")
 
-	k := keys.New("test-blocking-blmove")
+	k := keys.New("test-blocking-poll")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
 	}, 10*time.Millisecond, false)
@@ -247,11 +247,14 @@ func TestFetcher_BlockingFetchUsesBLMoveWithSubSecondPollInterval(t *testing.T) 
 	if fetched != nil {
 		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) job = %v, want nil", fetched)
 	}
-	if !hook.saw("blmove") {
-		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) did not issue BLMOVE; commands = %v", hook.names())
+	if hook.saw("blmove") {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) issued BLMOVE; commands = %v", hook.names())
 	}
-	if elapsed < 800*time.Millisecond {
-		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+	if elapsed < 5*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want poll interval wait", elapsed)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want less than block timeout", elapsed)
 	}
 }
 
@@ -1718,11 +1721,14 @@ func TestFetcher_Sequential_BlockingFetchBlocksOnRegularQueueWhenSequentialLocke
 			if fetched != nil {
 				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) job = %v, want nil", fetched)
 			}
-			if !hook.saw("blmove") {
-				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) did not issue BLMOVE; commands = %v", hook.names())
+			if hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) issued BLMOVE; commands = %v", hook.names())
 			}
-			if elapsed < 800*time.Millisecond {
-				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+			if elapsed < 15*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want poll interval wait", elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want less than block timeout", elapsed)
 			}
 		})
 	}

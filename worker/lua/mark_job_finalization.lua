@@ -17,10 +17,18 @@ local function contains_finalized(key)
 	return index ~= false and index ~= nil
 end
 
+local function mark_trusted()
+	if #KEYS >= 3 then
+		redis.call("SET", KEYS[3], ARGV[2], "PX", ARGV[3])
+	end
+end
+
 if replace_first(KEYS[1]) then
+	mark_trusted()
 	return 1
 end
 if contains_finalized(KEYS[1]) then
+	mark_trusted()
 	return 1
 end
 
@@ -30,9 +38,11 @@ if #KEYS >= 2 then
 		return redis.error_reply("queue key has type " .. queue_type .. ", want list")
 	end
 	if replace_first(KEYS[2]) then
+		mark_trusted()
 		return 2
 	end
 	if contains_finalized(KEYS[2]) then
+		mark_trusted()
 		return 2
 	end
 end
