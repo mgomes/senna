@@ -33,6 +33,8 @@ var (
 	ErrInvalidChunkSize = errors.New("chunk size must be > 0")
 	// ErrEncryptionUnavailable indicates encryption was requested without client encryption configured.
 	ErrEncryptionUnavailable = errors.New("encryption requested but client encryption is not configured")
+	// ErrReservedCallbackOption indicates callback options tried to set Senna-owned metadata.
+	ErrReservedCallbackOption = errors.New("callback option uses a reserved Senna key")
 )
 
 // BulkPartialError reports that EnqueueBulk accepted some chunks before a later
@@ -556,6 +558,9 @@ func (c *Client) EnqueueBatch(ctx context.Context, b *Batch) error {
 	// Validation
 	if b.err != nil {
 		return b.err
+	}
+	if err := validateBatchCallbackOptions(b); err != nil {
+		return err
 	}
 	emptyBatch := len(b.Jobs) == 0
 	callbackQueue := b.CallbackQueue
