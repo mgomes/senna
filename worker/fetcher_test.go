@@ -21,6 +21,74 @@ func selectTestQueue(f *fetcher) string {
 	return queue.name
 }
 
+func seedEncryptedJobInFlight(t *testing.T, client *redis.Client, k *keys.Keys, workerID string) (*encryption.Encryptor, *senna.Job, map[string]any) {
+	t.Helper()
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	enc, err := encryption.New(key)
+	if err != nil {
+		t.Fatalf("encryption.New() error = %v, want nil", err)
+	}
+
+	plainArgs := map[string]any{"secret": "sensitive-card-4242"}
+	encryptedArgs, err := enc.Encrypt(plainArgs)
+	if err != nil {
+		t.Fatalf("Encrypt(%v) error = %v, want nil", plainArgs, err)
+	}
+
+	job := senna.NewJob("encrypted_job", encryptedArgs)
+	job.Encrypted = true
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	job.SetRaw(string(data))
+
+	if err := client.LPush(context.Background(), k.InFlight(workerID), string(data)).Err(); err != nil {
+		t.Fatalf("LPush(%q, encrypted job) error = %v, want nil", k.InFlight(workerID), err)
+	}
+
+	return enc, job, plainArgs
+}
+
+func simulateWorkerDecryption(job *senna.Job, plainArgs map[string]any) {
+	job.Args = plainArgs
+	job.Encrypted = false
+}
+
+func assertPayloadEncrypted(t *testing.T, enc *encryption.Encryptor, payload string, wantArgs map[string]any) *senna.Job {
+	t.Helper()
+
+	if strings.Contains(payload, "sensitive-card-4242") {
+		t.Fatalf("payload contains plaintext secret: %s", payload)
+	}
+
+	job, err := senna.UnmarshalJob([]byte(payload))
+	if err != nil {
+		t.Fatalf("UnmarshalJob(encrypted payload) error = %v, want nil", err)
+	}
+	if !job.Encrypted {
+		t.Fatal("job Encrypted = false, want true")
+	}
+	if _, ok := job.Args["_encrypted"]; !ok {
+		t.Fatalf("job Args missing _encrypted marker: %v", job.Args)
+	}
+
+	decrypted, err := enc.Decrypt(job.Args)
+	if err != nil {
+		t.Fatalf("Decrypt(job.Args) error = %v, want nil", err)
+	}
+	for key, want := range wantArgs {
+		if got := decrypted[key]; got != want {
+			t.Fatalf("Decrypt(job.Args)[%q] = %v, want %v", key, got, want)
+		}
+	}
+	return job
+}
+
 func TestFetcher_SelectQueue_SingleQueue(t *testing.T) {
 	client := newTestRedisClient(t)
 	k := keys.New("test-fetcher")
@@ -592,6 +660,111 @@ func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
 	if finalization.Operation != jobFinalizationComplete {
 		t.Errorf("finalized job operation = %q, want %q", finalization.Operation, jobFinalizationComplete)
 	}
+}
+
+func TestFetcher_NackAtPreservesEncryptedPayloadAfterDecryption(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-nack-encrypted:*")
+
+	k := keys.New("test-nack-encrypted")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	enc, job, plainArgs := seedEncryptedJobInFlight(t, client, k, "worker-1")
+	simulateWorkerDecryption(job, plainArgs)
+
+	finalization := senna.JobFinalization{
+		Operation: jobFinalizationRetry,
+		RetryAt:   time.Now().Add(5 * time.Minute).UTC(),
+	}
+	if err := f.MarkFinalization(ctx, "worker-1", job, finalization); err != nil {
+		t.Fatalf("MarkFinalization(ctx, worker-1, job, retry) error = %v, want nil", err)
+	}
+
+	if err := f.NackAt(ctx, "worker-1", job, finalization.RetryAt); err != nil {
+		t.Fatalf("NackAt(ctx, worker-1, decrypted encrypted job) error = %v, want nil", err)
+	}
+
+	items, err := client.ZRange(ctx, k.Retry(), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("ZRange(%q) error = %v, want nil", k.Retry(), err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("retry set length = %d, want 1", len(items))
+	}
+	retryJob := assertPayloadEncrypted(t, enc, items[0], plainArgs)
+	if retryJob.RetryCount != 1 {
+		t.Errorf("retry job RetryCount = %d, want 1", retryJob.RetryCount)
+	}
+	if retryJob.Finalization() != nil {
+		t.Fatal("retry job retained finalization marker, want nil")
+	}
+}
+
+func TestFetcher_MoveToDeadPreservesEncryptedPayloadAfterDecryption(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-dead-encrypted:*")
+
+	k := keys.New("test-dead-encrypted")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	enc, job, plainArgs := seedEncryptedJobInFlight(t, client, k, "worker-1")
+	simulateWorkerDecryption(job, plainArgs)
+
+	if err := f.MarkFinalization(ctx, "worker-1", job, senna.JobFinalization{Operation: jobFinalizationKill}); err != nil {
+		t.Fatalf("MarkFinalization(ctx, worker-1, job, kill) error = %v, want nil", err)
+	}
+
+	if err := f.MoveToDead(ctx, "worker-1", job); err != nil {
+		t.Fatalf("MoveToDead(ctx, worker-1, decrypted encrypted job) error = %v, want nil", err)
+	}
+
+	items, err := client.ZRange(ctx, k.Dead(), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("ZRange(%q) error = %v, want nil", k.Dead(), err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("dead set length = %d, want 1", len(items))
+	}
+	deadJob := assertPayloadEncrypted(t, enc, items[0], plainArgs)
+	if deadJob.FailedAt == nil {
+		t.Fatal("dead job FailedAt = nil, want timestamp")
+	}
+	if deadJob.Finalization() != nil {
+		t.Fatal("dead job retained finalization marker, want nil")
+	}
+}
+
+func TestFetcher_RequeuePreservesEncryptedPayloadAfterDecryption(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-requeue-encrypted:*")
+
+	k := keys.New("test-requeue-encrypted")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	enc, job, plainArgs := seedEncryptedJobInFlight(t, client, k, "worker-1")
+	simulateWorkerDecryption(job, plainArgs)
+
+	if err := f.requeue(ctx, "worker-1", job); err != nil {
+		t.Fatalf("requeue(ctx, worker-1, decrypted encrypted job) error = %v, want nil", err)
+	}
+
+	items, err := client.LRange(ctx, k.Queue("default"), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange(%q) error = %v, want nil", k.Queue("default"), err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("queue length = %d, want 1", len(items))
+	}
+	assertPayloadEncrypted(t, enc, items[0], plainArgs)
 }
 
 func TestFetcher_MarkFinalizationScriptUsesDirectListLookup(t *testing.T) {
