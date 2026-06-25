@@ -437,6 +437,83 @@ func TestFetcher_Ack_CleansUniqueKey(t *testing.T) {
 	}
 }
 
+func TestFetcher_Ack_PreservesReplacementUniqueKey(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-ack-unique-replacement:*")
+
+	k := keys.New("test-ack-unique-replacement")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	job.UniqueKey = "user:123:sync"
+	data, _ := job.Marshal()
+
+	client.Set(ctx, k.Unique(job.UniqueKey), job.ID, time.Hour)
+	client.LPush(ctx, k.Queue("default"), string(data))
+
+	fetched, _ := f.Fetch(ctx, "worker-1")
+
+	replacementJobID := "replacement-job-id"
+	client.Set(ctx, k.Unique(job.UniqueKey), replacementJobID, time.Hour)
+
+	err := f.Ack(ctx, "worker-1", fetched)
+	if err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+
+	holder, err := client.Get(ctx, k.Unique(job.UniqueKey)).Result()
+	if err != nil {
+		t.Fatalf("unique key missing after ack: %v", err)
+	}
+	if holder != replacementJobID {
+		t.Fatalf("unique key holder = %q, want %q", holder, replacementJobID)
+	}
+}
+
+func TestFetcher_Ack_LeavesNonStringUniqueKey(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-ack-unique-nonstring:*")
+
+	k := keys.New("test-ack-unique-nonstring")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	job.UniqueKey = "user:123:sync"
+	data, _ := job.Marshal()
+
+	uniqueKey := k.Unique(job.UniqueKey)
+	client.RPush(ctx, uniqueKey, "not-a-lock")
+	client.LPush(ctx, k.Queue("default"), string(data))
+
+	fetched, _ := f.Fetch(ctx, "worker-1")
+
+	err := f.Ack(ctx, "worker-1", fetched)
+	if err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+
+	inFlightLen, _ := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if inFlightLen != 0 {
+		t.Fatalf("expected 0 jobs in-flight after ack, got %d", inFlightLen)
+	}
+
+	uniqueLen, err := client.LLen(ctx, uniqueKey).Result()
+	if err != nil {
+		t.Fatalf("unique key should remain a list: %v", err)
+	}
+	if uniqueLen != 1 {
+		t.Fatalf("unique key length = %d, want 1", uniqueLen)
+	}
+}
+
 func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-mark-finalization-encrypted:*")
@@ -894,6 +971,88 @@ func TestFetcher_MoveToDead_CleansUniqueKey(t *testing.T) {
 	exists, _ := client.Exists(ctx, k.Unique(job.UniqueKey)).Result()
 	if exists != 0 {
 		t.Error("unique key should be deleted after move to dead")
+	}
+}
+
+func TestFetcher_MoveToDead_PreservesReplacementUniqueKey(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-dead-unique-replacement:*")
+
+	k := keys.New("test-dead-unique-replacement")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	job.UniqueKey = "order:456:process"
+	data, _ := job.Marshal()
+
+	client.Set(ctx, k.Unique(job.UniqueKey), job.ID, time.Hour)
+	client.LPush(ctx, k.Queue("default"), string(data))
+
+	fetched, _ := f.Fetch(ctx, "worker-1")
+
+	replacementJobID := "replacement-job-id"
+	client.Set(ctx, k.Unique(job.UniqueKey), replacementJobID, time.Hour)
+
+	err := f.MoveToDead(ctx, "worker-1", fetched)
+	if err != nil {
+		t.Fatalf("move to dead failed: %v", err)
+	}
+
+	holder, err := client.Get(ctx, k.Unique(job.UniqueKey)).Result()
+	if err != nil {
+		t.Fatalf("unique key missing after move to dead: %v", err)
+	}
+	if holder != replacementJobID {
+		t.Fatalf("unique key holder = %q, want %q", holder, replacementJobID)
+	}
+}
+
+func TestFetcher_MoveToDead_LeavesNonStringUniqueKey(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-dead-unique-nonstring:*")
+
+	k := keys.New("test-dead-unique-nonstring")
+	f := newFetcher(client, k, []senna.QueueConfig{
+		{Name: "default", Priority: 1},
+	}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+
+	job := senna.NewJob("test_job", nil)
+	job.UniqueKey = "order:456:process"
+	data, _ := job.Marshal()
+
+	uniqueKey := k.Unique(job.UniqueKey)
+	client.RPush(ctx, uniqueKey, "not-a-lock")
+	client.LPush(ctx, k.Queue("default"), string(data))
+
+	fetched, _ := f.Fetch(ctx, "worker-1")
+
+	err := f.MoveToDead(ctx, "worker-1", fetched)
+	if err != nil {
+		t.Fatalf("move to dead failed: %v", err)
+	}
+
+	inFlightLen, _ := client.LLen(ctx, k.InFlight("worker-1")).Result()
+	if inFlightLen != 0 {
+		t.Fatalf("expected 0 jobs in-flight after move to dead, got %d", inFlightLen)
+	}
+
+	deadLen, _ := client.ZCard(ctx, k.Dead()).Result()
+	if deadLen != 1 {
+		t.Fatalf("expected 1 job in dead set, got %d", deadLen)
+	}
+
+	uniqueLen, err := client.LLen(ctx, uniqueKey).Result()
+	if err != nil {
+		t.Fatalf("unique key should remain a list: %v", err)
+	}
+	if uniqueLen != 1 {
+		t.Fatalf("unique key length = %d, want 1", uniqueLen)
 	}
 }
 

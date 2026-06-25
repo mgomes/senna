@@ -677,7 +677,7 @@ func (f *fetcher) Ack(ctx context.Context, workerID string, job *senna.Job) erro
 	if job.UniqueKey != "" {
 		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
-	if _, err = ackJobScript.Run(ctx, f.client, keys, payload); err != nil {
+	if _, err = ackJobScript.Run(ctx, f.client, keys, payload, job.ID); err != nil {
 		return fmt.Errorf("ack job %s: %w", job.ID, err)
 	}
 	job.ClearFinalization()
@@ -748,7 +748,7 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 	if job.UniqueKey != "" {
 		keys = append(keys, f.keys.Unique(job.UniqueKey))
 	}
-	if _, err = moveToDeadJobScript.Run(ctx, f.client, keys, payload, now.Unix(), string(newData)); err != nil {
+	if _, err = moveToDeadJobScript.Run(ctx, f.client, keys, payload, now.Unix(), string(newData), job.ID); err != nil {
 		return fmt.Errorf("move job %s to dead queue: %w", job.ID, err)
 	}
 	job.FailedAt = &now
