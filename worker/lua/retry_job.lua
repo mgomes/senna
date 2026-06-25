@@ -10,6 +10,9 @@ end
 
 local removed = redis.call("LREM", KEYS[1], 1, ARGV[1])
 if removed > 0 then
+	if #KEYS >= 3 then
+		redis.call("DEL", KEYS[3])
+	end
 	redis.call("ZADD", KEYS[2], ARGV[2], ARGV[3])
 end
 return removed

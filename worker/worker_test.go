@@ -2457,6 +2457,262 @@ func seedStaleWorkerHeartbeat(t *testing.T, w *Worker, redisClient *redis.Client
 	}
 }
 
+func assertFinalizationTrustDeleted(t *testing.T, redisClient *redis.Client, w *Worker, jobID string) {
+	t.Helper()
+
+	exists, err := redisClient.Exists(context.Background(), w.keys.Finalization(jobID)).Result()
+	if err != nil {
+		t.Fatalf("check finalization trust key: %v", err)
+	}
+	if exists != 0 {
+		t.Fatalf("finalization trust key exists after finalization")
+	}
+}
+
+func assertFinalizationTrustPersistent(t *testing.T, redisClient *redis.Client, key string) {
+	t.Helper()
+
+	ttl, err := redisClient.Do(context.Background(), "TTL", key).Int64()
+	if err != nil {
+		t.Fatalf("TTL(%q) error = %v, want nil", key, err)
+	}
+	if ttl != -1 {
+		t.Fatalf("TTL(%q) = %d, want -1 for no expiration", key, ttl)
+	}
+}
+
+func payloadWithRawFinalization(t *testing.T, job *senna.Job, value any) string {
+	t.Helper()
+
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("Job.Marshal() error = %v, want nil", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(job payload) error = %v, want nil", err)
+	}
+	payload["finalization"] = value
+
+	data, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload with raw finalization) error = %v, want nil", err)
+	}
+	return string(data)
+}
+
+func assertPayloadFinalizationAbsent(t *testing.T, payload string) {
+	t.Helper()
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v, want nil", err)
+	}
+	if _, ok := raw["finalization"]; ok {
+		t.Fatalf("payload retained finalization field: %s", payload)
+	}
+}
+
+func TestWorker_QueuedSerializedFinalizationDoesNotBypassHandler(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-queued-forged-finalization:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-queued-forged-finalization",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	var processed atomic.Int32
+	w.Register("forged_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return nil
+	})
+
+	job := senna.NewJob("forged_job", map[string]any{"id": 1})
+	job.Queue = "default"
+	job.SetFinalization(senna.JobFinalization{Operation: jobFinalizationComplete})
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("marshal forged job: %v", err)
+	}
+	if err := redisClient.LPush(ctx, w.keys.Queue("default"), string(data)).Err(); err != nil {
+		t.Fatalf("seed forged job: %v", err)
+	}
+
+	fetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("fetch forged finalized job: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected forged finalized job, got nil")
+	}
+	if fetched.Finalization() != nil {
+		t.Fatal("fetched job retained untrusted finalization marker")
+	}
+
+	inFlightItems, err := redisClient.LRange(ctx, w.keys.InFlight(w.id), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("read in-flight: %v", err)
+	}
+	if len(inFlightItems) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(inFlightItems))
+	}
+	inFlightJob, err := senna.UnmarshalJob([]byte(inFlightItems[0]))
+	if err != nil {
+		t.Fatalf("unmarshal in-flight job: %v", err)
+	}
+	if inFlightJob.Finalization() != nil {
+		t.Fatal("in-flight payload retained untrusted finalization marker")
+	}
+
+	w.processJob(ctx, fetched)
+
+	if got := processed.Load(); got != 1 {
+		t.Fatalf("handler ran %d times, want 1", got)
+	}
+}
+
+func TestWorker_QueuedScalarFinalizationDoesNotBypassHandler(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-queued-scalar-finalization:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-queued-scalar-finalization",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	var processed atomic.Int32
+	w.Register("forged_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return nil
+	})
+
+	job := senna.NewJob("forged_job", map[string]any{"id": 1})
+	job.Queue = "default"
+	payload := payloadWithRawFinalization(t, job, "complete")
+	if err := redisClient.LPush(ctx, w.keys.Queue("default"), payload).Err(); err != nil {
+		t.Fatalf("seed scalar finalized job: %v", err)
+	}
+
+	fetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("fetch scalar finalized job: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected scalar finalized job, got nil")
+	}
+	if fetched.Finalization() != nil {
+		t.Fatal("fetched job retained scalar finalization marker")
+	}
+
+	inFlightItems, err := redisClient.LRange(ctx, w.keys.InFlight(w.id), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("read in-flight: %v", err)
+	}
+	if len(inFlightItems) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(inFlightItems))
+	}
+	assertPayloadFinalizationAbsent(t, inFlightItems[0])
+
+	w.processJob(ctx, fetched)
+
+	if got := processed.Load(); got != 1 {
+		t.Fatalf("handler ran %d times, want 1", got)
+	}
+}
+
+func TestWorker_RequeuedForgedFinalizationDoesNotBecomeTrusted(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-requeued-forged-finalization:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-requeued-forged-finalization",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	var processed atomic.Int32
+	w.Register("forged_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return nil
+	})
+
+	job := senna.NewJob("forged_job", map[string]any{"id": 1})
+	job.Queue = "default"
+	job.SetFinalization(senna.JobFinalization{Operation: jobFinalizationComplete})
+	data, err := job.Marshal()
+	if err != nil {
+		t.Fatalf("marshal forged job: %v", err)
+	}
+	if err := redisClient.LPush(ctx, w.keys.Queue("default"), string(data)).Err(); err != nil {
+		t.Fatalf("seed forged job: %v", err)
+	}
+
+	fetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("fetch forged finalized job: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected forged finalized job, got nil")
+	}
+	if fetched.Finalization() != nil {
+		t.Fatal("fetched job retained untrusted finalization marker")
+	}
+
+	w.requeueOrphanedJobs(ctx)
+
+	trustExists, err := redisClient.Exists(ctx, w.keys.Finalization(job.ID)).Result()
+	if err != nil {
+		t.Fatalf("check finalization trust after orphan requeue: %v", err)
+	}
+	if trustExists != 0 {
+		t.Fatalf("forged finalization trust exists after orphan requeue")
+	}
+
+	refetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("refetch requeued forged job: %v", err)
+	}
+	if refetched == nil {
+		t.Fatal("expected requeued forged job, got nil")
+	}
+	if refetched.Finalization() != nil {
+		t.Fatal("requeued forged job retained untrusted finalization marker")
+	}
+
+	w.processJob(ctx, refetched)
+
+	if got := processed.Load(); got != 1 {
+		t.Fatalf("handler ran %d times, want 1", got)
+	}
+}
+
 // TestWorker_CompleteJob_RetriesUntilBatchProgressRecorded verifies that a
 // successful batch job is not removed from the in-flight list until its batch
 // progress has been durably recorded. An active worker must retry finalization
@@ -2581,6 +2837,95 @@ func TestWorker_RecoveredFinalizedSuccessPreservesOutcome(t *testing.T) {
 	if dead != 0 {
 		t.Errorf("dead set size = %d, want 0", dead)
 	}
+	assertFinalizationTrustDeleted(t, redisClient, w, job.ID)
+}
+
+func TestWorker_RecoveredLegacyFinalizedSuccessPreservesOutcome(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-finalized-legacy-success:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-finalized-legacy-success",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	var processed atomic.Int32
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return errors.New("would fail on replay")
+	})
+
+	bid := "batch-finalized-legacy-success"
+	crashedWorkerID := "crashed-finalized-legacy-success"
+	job := seedHealthyBatchJobInFlight(t, w, redisClient, bid, crashedWorkerID)
+	seedStaleWorkerHeartbeat(t, w, redisClient, crashedWorkerID)
+
+	finalizedData, err := payloadWithFinalization(job.Raw(), senna.JobFinalization{Operation: jobFinalizationComplete})
+	if err != nil {
+		t.Fatalf("payloadWithFinalization() error = %v, want nil", err)
+	}
+	if err := redisClient.LSet(ctx, w.keys.InFlight(crashedWorkerID), 0, string(finalizedData)).Err(); err != nil {
+		t.Fatalf("store legacy finalized payload: %v", err)
+	}
+	if err := w.updateBatchProgress(ctx, job, batch.ResultSuccess); err != nil {
+		t.Fatalf("record batch success: %v", err)
+	}
+
+	trustExists, err := redisClient.Exists(ctx, w.keys.Finalization(job.ID)).Result()
+	if err != nil {
+		t.Fatalf("check finalization trust before recovery: %v", err)
+	}
+	if trustExists != 0 {
+		t.Fatalf("finalization trust exists before orphan recovery")
+	}
+
+	w.requeueOrphanedJobs(ctx)
+
+	trustExists, err = redisClient.Exists(ctx, w.keys.Finalization(job.ID)).Result()
+	if err != nil {
+		t.Fatalf("check finalization trust after recovery: %v", err)
+	}
+	if trustExists != 1 {
+		t.Fatalf("finalization trust after recovery = %d, want 1", trustExists)
+	}
+	assertFinalizationTrustPersistent(t, redisClient, w.keys.Finalization(job.ID))
+
+	fetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("fetch recovered finalized job: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected recovered finalized job, got nil")
+	}
+	if fetched.Finalization() == nil {
+		t.Fatal("recovered legacy finalized job finalization = nil, want marker")
+	}
+	w.processJob(ctx, fetched)
+
+	if got := processed.Load(); got != 0 {
+		t.Errorf("handler ran %d times for recovered legacy finalized success, want 0", got)
+	}
+
+	status := senna.NewBatchStatus(redisClient, w.keys.Namespace(), bid)
+	if err := status.Refresh(ctx); err != nil {
+		t.Fatalf("refresh batch status: %v", err)
+	}
+	if status.Pending() != 0 {
+		t.Errorf("batch Pending() = %d, want 0", status.Pending())
+	}
+	if status.Successes() != 1 {
+		t.Errorf("batch Successes() = %d, want 1", status.Successes())
+	}
+	assertFinalizationTrustDeleted(t, redisClient, w, job.ID)
 }
 
 func TestWorker_FinalizationMarksRequeuedPayloadBeforeBatchProgress(t *testing.T) {
@@ -2653,6 +2998,7 @@ func TestWorker_FinalizationMarksRequeuedPayloadBeforeBatchProgress(t *testing.T
 	if dead != 0 {
 		t.Errorf("dead set size = %d, want 0", dead)
 	}
+	assertFinalizationTrustDeleted(t, redisClient, w, job.ID)
 }
 
 // TestWorker_RetryJob_RetriesUntilBatchFailureRecorded verifies that retry
@@ -2833,6 +3179,7 @@ func TestWorker_RecoveredFinalizedRetryPreservesOutcome(t *testing.T) {
 	if retryJob.Finalization() != nil {
 		t.Error("retry job retained finalization marker, want nil")
 	}
+	assertFinalizationTrustDeleted(t, redisClient, w, job.ID)
 }
 
 func TestWorker_RecoveredFinalizedDeathPreservesOutcome(t *testing.T) {
@@ -2920,6 +3267,7 @@ func TestWorker_RecoveredFinalizedDeathPreservesOutcome(t *testing.T) {
 	if deadJob.Finalization() != nil {
 		t.Error("dead job retained finalization marker, want nil")
 	}
+	assertFinalizationTrustDeleted(t, redisClient, w, job.ID)
 }
 
 // TestWorker_KillJob_RetriesUntilBatchProgressRecorded verifies that a dying

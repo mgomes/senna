@@ -43,6 +43,10 @@ func (k *Keys) InFlight(workerID string) string {
 	return k.prefix("inflight", workerID)
 }
 
+func (k *Keys) Finalization(jobID string) string {
+	return k.prefix("finalization", jobID)
+}
+
 func (k *Keys) Workers() string {
 	return k.prefix("workers")
 }

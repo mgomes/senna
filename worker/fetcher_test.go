@@ -227,11 +227,11 @@ func TestFetcher_Fetch_ContextCanceled(t *testing.T) {
 	_ = err
 }
 
-func TestFetcher_BlockingFetchUsesBLMoveWithSubSecondPollInterval(t *testing.T) {
+func TestFetcher_BlockingFetchUsesPollInterval(t *testing.T) {
 	client := newTestRedisClient(t)
-	flushTestKeys(t, client, "test-blocking-blmove:*")
+	flushTestKeys(t, client, "test-blocking-poll:*")
 
-	k := keys.New("test-blocking-blmove")
+	k := keys.New("test-blocking-poll")
 	f := newFetcher(client, k, []senna.QueueConfig{
 		{Name: "default", Priority: 1},
 	}, 10*time.Millisecond, false)
@@ -247,11 +247,14 @@ func TestFetcher_BlockingFetchUsesBLMoveWithSubSecondPollInterval(t *testing.T) 
 	if fetched != nil {
 		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) job = %v, want nil", fetched)
 	}
-	if !hook.saw("blmove") {
-		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) did not issue BLMOVE; commands = %v", hook.names())
+	if hook.saw("blmove") {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) issued BLMOVE; commands = %v", hook.names())
 	}
-	if elapsed < 800*time.Millisecond {
-		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+	if elapsed < 5*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want poll interval wait", elapsed)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("BlockingFetch(ctx, worker-1, 1s) elapsed = %v, want less than block timeout", elapsed)
 	}
 }
 
@@ -555,6 +558,7 @@ func TestFetcher_MarkFinalizationPreservesEncryptedPayload(t *testing.T) {
 	if err := f.MarkFinalization(ctx, "worker-1", job, senna.JobFinalization{Operation: jobFinalizationComplete}); err != nil {
 		t.Fatalf("MarkFinalization() error = %v, want nil", err)
 	}
+	assertFinalizationTrustPersistent(t, client, k.Finalization(job.ID))
 
 	items, err := client.LRange(ctx, k.InFlight("worker-1"), 0, -1).Result()
 	if err != nil {
@@ -1272,6 +1276,44 @@ func TestFetcher_Sequential_AcquiresLock(t *testing.T) {
 	}
 }
 
+func TestFetcher_Sequential_ScalarFinalizationIsSanitized(t *testing.T) {
+	client := newTestRedisClient(t)
+	flushTestKeys(t, client, "test-seq-scalar-finalization:*")
+
+	k := keys.New("test-seq-scalar-finalization")
+	queue := senna.QueueConfig{Name: "transforms", Priority: 1, Sequential: true}
+	f := newFetcher(client, k, []senna.QueueConfig{queue}, 100*time.Millisecond, false)
+
+	ctx := context.Background()
+	job := senna.NewJob("transform_job", nil)
+	job.Queue = "transforms"
+	payload := payloadWithRawFinalization(t, job, "complete")
+	if err := client.LPush(ctx, k.Queue("transforms"), payload).Err(); err != nil {
+		t.Fatalf("LPush(scalar finalized sequential payload) error = %v, want nil", err)
+	}
+
+	fetched, err := f.Fetch(ctx, "worker-1")
+	if err != nil {
+		t.Fatalf("Fetch(scalar finalized sequential payload) error = %v, want nil", err)
+	}
+	if fetched == nil {
+		t.Fatal("Fetch(scalar finalized sequential payload) job = nil, want job")
+	}
+	if fetched.Finalization() != nil {
+		t.Fatal("fetched sequential job retained scalar finalization marker")
+	}
+
+	inFlightItems, err := client.LRange(ctx, k.InFlight("worker-1"), 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRange(%q) error = %v, want nil", k.InFlight("worker-1"), err)
+	}
+	if len(inFlightItems) != 1 {
+		t.Fatalf("in-flight length = %d, want 1", len(inFlightItems))
+	}
+	assertPayloadFinalizationAbsent(t, inFlightItems[0])
+	f.ReleaseSequentialLock(ctx, "worker-1", "transforms")
+}
+
 func TestFetcher_Sequential_UnmarshalErrorDiscardsPayloadAndReleasesLock(t *testing.T) {
 	client := newTestRedisClient(t)
 	flushTestKeys(t, client, "test-seq-invalid:*")
@@ -1718,11 +1760,14 @@ func TestFetcher_Sequential_BlockingFetchBlocksOnRegularQueueWhenSequentialLocke
 			if fetched != nil {
 				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) job = %v, want nil", fetched)
 			}
-			if !hook.saw("blmove") {
-				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) did not issue BLMOVE; commands = %v", hook.names())
+			if hook.saw("blmove") {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) issued BLMOVE; commands = %v", hook.names())
 			}
-			if elapsed < 800*time.Millisecond {
-				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want BLMOVE wait near 1s", elapsed)
+			if elapsed < 15*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want poll interval wait", elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("BlockingFetch(ctx, worker-2, 1s) elapsed = %v, want less than block timeout", elapsed)
 			}
 		})
 	}

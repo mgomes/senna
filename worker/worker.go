@@ -980,7 +980,13 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 			}
 
 			opCtx, cancel := w.reaperOperationContext(ctx)
-			_, err := requeueOrphanedScript.Run(opCtx, w.redis, []string{key, w.keys.Queues()}, queuePrefix)
+			_, err := requeueOrphanedScript.Run(
+				opCtx,
+				w.redis,
+				[]string{key, w.keys.Queues()},
+				queuePrefix,
+				w.keys.Finalization(""),
+			)
 			cancel()
 			if err != nil {
 				if ctx.Err() == nil {
