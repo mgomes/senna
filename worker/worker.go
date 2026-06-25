@@ -355,18 +355,19 @@ func workerBlockTimeout(settings senna.WorkerSettings) time.Duration {
 }
 
 func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
-	// If job is part of a batch, attach batch handle to context
-	if job.BatchID != "" {
-		bh := newBatchHandle(job.BatchID, w.redis, w.keys)
-		ctx = contextWithBatch(ctx, bh)
-	}
-
 	// Release sequential lock after processing to allow other workers to take over.
 	// Use a non-canceled context so shutdown doesn't strand the lock.
 	defer w.fetcher.ReleaseSequentialLock(context.WithoutCancel(ctx), w.id, job.Queue)
 
 	if job.Finalization() != nil {
 		w.resumeFinalizedJob(ctx, job)
+		return
+	}
+
+	var err error
+	ctx, err = w.contextWithVerifiedBatchHandle(ctx, job)
+	if err != nil {
+		w.handleJobResult(ctx, job, err, nil, nil)
 		return
 	}
 
@@ -378,6 +379,23 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 
 	opts, err := w.handlers.process(ctx, job)
 	w.handleJobResult(ctx, job, err, opts, nil)
+}
+
+func (w *Worker) contextWithVerifiedBatchHandle(ctx context.Context, job *senna.Job) (context.Context, error) {
+	if job.BatchID == "" {
+		return ctx, nil
+	}
+
+	member, err := w.redis.SIsMember(ctx, w.keys.BatchJobs(job.BatchID), job.ID).Result()
+	if err != nil {
+		return ctx, fmt.Errorf("verify batch membership for job %s in batch %s: %w", job.ID, job.BatchID, err)
+	}
+	if !member {
+		slog.WarnContext(ctx, "job is not a member of claimed batch; withholding batch handle", "job_id", job.ID, "batch_id", job.BatchID)
+		return ctx, nil
+	}
+
+	return contextWithBatch(ctx, newBatchHandle(job.BatchID, w.redis, w.keys)), nil
 }
 
 const (

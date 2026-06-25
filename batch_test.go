@@ -838,6 +838,94 @@ func TestBatch_DynamicJobAdding(t *testing.T) {
 	}
 }
 
+func TestBatch_ForgedBatchIDDoesNotGrantBatchHandle(t *testing.T) {
+	const namespace = "batch-forged-handle"
+	flushKeysBatch(t, namespace+":*")
+
+	c, err := client.New(&client.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("client.New() error = %v, want nil", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	w, err := worker.New(&worker.Config{
+		Redis:     getRedisConfigBatch(),
+		Namespace: namespace,
+		Settings: senna.WorkerSettings{
+			Concurrency:     1,
+			Queues:          []senna.QueueConfig{{Name: "default", Priority: 1}},
+			ShutdownTimeout: 5 * time.Second,
+			PollInterval:    50 * time.Millisecond,
+			HeartbeatRate:   time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("worker.New() error = %v, want nil", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	victim := client.NewBatch().
+		Add("victim_job", nil, client.WithQueue("victim"))
+	if err := c.EnqueueBatch(ctx, victim); err != nil {
+		t.Fatalf("Client.EnqueueBatch(ctx, victim) error = %v, want nil", err)
+	}
+
+	var processed atomic.Bool
+	var handleGranted atomic.Bool
+	var invalidateErr atomic.Value
+	w.Register("forged_job", func(ctx context.Context, job *senna.Job) error {
+		if bh := worker.BatchFromContext(ctx); bh != nil {
+			handleGranted.Store(true)
+			if err := bh.Invalidate(ctx); err != nil {
+				invalidateErr.Store(err)
+			}
+		}
+		processed.Store(true)
+		return nil
+	})
+
+	if _, err := c.Enqueue(ctx, "forged_job", nil, client.WithBatch(victim.ID)); err != nil {
+		t.Fatalf("Client.Enqueue(ctx, forged_job, WithBatch(%q)) error = %v, want nil", victim.ID, err)
+	}
+
+	go func() {
+		_ = w.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if processed.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	if !processed.Load() {
+		t.Fatal("forged job was not processed")
+	}
+	if errValue := invalidateErr.Load(); errValue != nil {
+		t.Fatalf("BatchHandle.Invalidate(ctx) error = %v, want nil", errValue)
+	}
+	if handleGranted.Load() {
+		t.Fatal("forged standalone job received a batch handle")
+	}
+
+	invalidated, err := c.Redis().HGet(context.Background(), namespace+":batch:"+victim.ID+":progress", "invalidated").Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		t.Fatalf("HGet(victim progress invalidated) error = %v, want nil", err)
+	}
+	if invalidated == "1" || invalidated == "true" {
+		t.Fatalf("victim batch invalidated = %q, want not invalidated", invalidated)
+	}
+}
+
 func TestBatch_DynamicAddRejectsWrongQueueTypeWithoutTrackingJob(t *testing.T) {
 	const namespace = "batch-dynamic-add-atomic"
 	flushKeysBatch(t, namespace+":*")
