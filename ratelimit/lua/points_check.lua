@@ -3,6 +3,11 @@ local capacity = tonumber(ARGV[1])
 local refill_time_us = tonumber(ARGV[2])
 local cost = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
+
+if not cost or cost <= 0 then
+    return redis.error_reply("points cost must be positive")
+end
+
 local redis_time = redis.call("TIME")
 local now_us = (tonumber(redis_time[1]) * 1000000) + tonumber(redis_time[2])
 

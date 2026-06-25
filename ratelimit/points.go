@@ -16,6 +16,9 @@ var pointsCheckScript = script.New("points_check", pointsCheckLua)
 
 var pointsAdjustScript = script.New("points_adjust", pointsAdjustLua)
 
+// ErrInvalidPointsUsage reports invalid points limiter accounting input.
+var ErrInvalidPointsUsage = errors.New("invalid points usage")
+
 // PointsLimiter implements a token-bucket style limiter with variable costs.
 type PointsLimiter struct {
 	name        string
@@ -66,7 +69,7 @@ func (l *PointsLimiter) WithinLimit(ctx context.Context, fn func() error) error 
 	return l.WithinLimitCost(ctx, 1, fn)
 }
 
-// WithinLimitCost runs fn after acquiring the requested number of points.
+// WithinLimitCost runs fn after acquiring a positive number of points.
 func (l *PointsLimiter) WithinLimitCost(ctx context.Context, cost int, fn func() error) error {
 	_, waitTime, err := l.AcquirePoints(ctx, cost)
 	if err != nil {
@@ -90,16 +93,20 @@ type PointsHandle struct {
 	estimate int
 }
 
-// PointsUsed adjusts the limiter after actual usage differs from the estimate.
+// PointsUsed adjusts the limiter after non-negative actual usage differs from the estimate.
 func (h *PointsHandle) PointsUsed(actual int) error {
+	if actual < 0 {
+		return fmt.Errorf("points limiter %s: actual usage must be non-negative: %w", h.limiter.name, ErrInvalidPointsUsage)
+	}
+
 	diff := h.estimate - actual
 	if diff == 0 {
 		return nil
 	}
-	return h.limiter.adjust(h.ctx, diff)
+	return h.limiter.adjust(h.ctx, diff, h.estimate)
 }
 
-// WithinLimitEstimate runs fn after acquiring an estimated number of points.
+// WithinLimitEstimate runs fn after acquiring a positive estimated number of points.
 func (l *PointsLimiter) WithinLimitEstimate(ctx context.Context, estimate int, fn func(h *PointsHandle) error) error {
 	_, waitTime, err := l.AcquirePoints(ctx, estimate)
 	if err != nil {
@@ -127,8 +134,12 @@ func (l *PointsLimiter) Acquire(ctx context.Context) (Lease, time.Duration, erro
 	return l.AcquirePoints(ctx, 1)
 }
 
-// AcquirePoints waits for or reports the availability of the requested points.
+// AcquirePoints waits for or reports the availability of the requested positive points.
 func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, time.Duration, error) {
+	if cost <= 0 {
+		return nil, 0, fmt.Errorf("points limiter %s: cost must be positive: %w", l.name, ErrInvalidPointsUsage)
+	}
+
 	deadline := time.Now().Add(l.waitTimeout)
 
 	for {
@@ -187,7 +198,7 @@ func (l *PointsLimiter) AcquirePoints(ctx context.Context, cost int) (Lease, tim
 	}
 }
 
-func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
+func (l *PointsLimiter) adjust(ctx context.Context, diff int, maxRefund int) error {
 	refillTimeUs := l.refillTime.Microseconds()
 	if refillTimeUs < 1 {
 		refillTimeUs = 1
@@ -198,7 +209,7 @@ func (l *PointsLimiter) adjust(ctx context.Context, diff int) error {
 	}
 	_, err := pointsAdjustScript.Run(ctx, l.client,
 		[]string{l.keyPrefix + ":" + l.name},
-		diff, l.capacity, ttlSeconds,
+		diff, maxRefund, l.capacity, ttlSeconds,
 	)
 	return err
 }
