@@ -19,7 +19,7 @@ end
 
 local function mark_trusted()
 	if #KEYS >= 3 then
-		redis.call("SET", KEYS[3], ARGV[2], "PX", ARGV[3])
+		redis.call("SET", KEYS[3], ARGV[2])
 	end
 end
 

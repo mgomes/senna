@@ -40,9 +40,9 @@ end
 
 local in_flight_payload = job
 local ok, decoded = pcall(cjson.decode, job)
-if ok and type(decoded) == "table" and type(decoded.finalization) == "table" then
+if ok and type(decoded) == "table" and decoded.finalization ~= nil then
     local trusted = false
-    if type(decoded.jid) == "string" and decoded.jid ~= "" then
+    if type(decoded.finalization) == "table" and type(decoded.jid) == "string" and decoded.jid ~= "" then
         local trust_key = finalization_prefix .. decoded.jid
         local trust_type = redis.call("TYPE", trust_key).ok
         if trust_type == "string" and redis.call("GET", trust_key) == job then

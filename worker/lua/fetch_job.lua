@@ -16,9 +16,9 @@ end
 local finalization_prefix = ARGV[1]
 local in_flight_payload = payload
 local ok, job = pcall(cjson.decode, payload)
-if ok and type(job) == "table" and type(job.finalization) == "table" then
+if ok and type(job) == "table" and job.finalization ~= nil then
 	local trusted = false
-	if type(job.jid) == "string" and job.jid ~= "" then
+	if type(job.finalization) == "table" and type(job.jid) == "string" and job.jid ~= "" then
 		local trust_key = finalization_prefix .. job.jid
 		local trust_type = redis.call("TYPE", trust_key).ok
 		if trust_type == "string" and redis.call("GET", trust_key) == payload then

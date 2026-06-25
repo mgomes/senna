@@ -15,8 +15,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const finalizationTrustTTL = 30 * 24 * time.Hour
-
 type fetcher struct {
 	client            *redis.Client
 	keys              *keys.Keys
@@ -834,7 +832,7 @@ func (f *fetcher) MarkFinalization(ctx context.Context, workerID string, job *se
 	result, err := markJobFinalizationScript.Run(
 		ctx, f.client,
 		[]string{f.keys.InFlight(workerID), f.keys.Queue(job.Queue), f.keys.Finalization(job.ID)},
-		payload, string(finalizedData), durationMilliseconds(finalizationTrustTTL),
+		payload, string(finalizedData),
 	)
 	if err != nil {
 		return fmt.Errorf("mark job %s finalization: %w", job.ID, err)

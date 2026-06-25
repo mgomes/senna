@@ -3,14 +3,12 @@
 -- KEYS[2] = known queues set key
 -- ARGV[1] = queue key prefix (e.g., "senna:queue:")
 -- ARGV[2] = finalization key prefix (e.g., "senna:finalization:")
--- ARGV[3] = finalization trust TTL in milliseconds
 -- Returns: number of jobs requeued
 
 local inflight_key = KEYS[1]
 local queues_key = KEYS[2]
 local queue_prefix = ARGV[1]
 local finalization_prefix = ARGV[2]
-local finalization_ttl = ARGV[3]
 
 local inflight_type = redis.call("TYPE", inflight_key).ok
 if inflight_type == "none" then
@@ -75,7 +73,7 @@ for _, target in ipairs(targets) do
 	redis.call("SADD", queues_key, target.queue)
 	redis.call("LPUSH", target.key, target.data)
 	if target.finalized then
-		redis.call("SET", finalization_prefix .. target.jid, target.data, "PX", finalization_ttl)
+		redis.call("SET", finalization_prefix .. target.jid, target.data)
 	end
 	requeued = requeued + 1
 end

@@ -986,7 +986,6 @@ func (w *Worker) requeueOrphanedJobs(ctx context.Context) {
 				[]string{key, w.keys.Queues()},
 				queuePrefix,
 				w.keys.Finalization(""),
-				durationMilliseconds(finalizationTrustTTL),
 			)
 			cancel()
 			if err != nil {
