@@ -111,6 +111,40 @@ func (b *Batch) OnDeathCallback(jobType string, options ...map[string]any) *Batc
 	return b
 }
 
+func validateBatchCallbackOptions(b *Batch) error {
+	if err := validateCallbackOptions("on_complete", b.OnComplete); err != nil {
+		return err
+	}
+	if err := validateCallbackOptions("on_success", b.OnSuccess); err != nil {
+		return err
+	}
+	if err := validateCallbackOptions("on_death", b.OnDeath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCallbackOptions(callbackName string, cfg *CallbackConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	for key := range cfg.Options {
+		if isReservedCallbackOptionKey(key) {
+			return fmt.Errorf("%w: %s option %q", ErrReservedCallbackOption, callbackName, key)
+		}
+	}
+	return nil
+}
+
+func isReservedCallbackOptionKey(key string) bool {
+	switch key {
+	case "batch_id", "parent_id":
+		return true
+	default:
+		return false
+	}
+}
+
 // WithCallbackQueue sets the queue for callback jobs.
 func (b *Batch) WithCallbackQueue(queue string) *Batch {
 	b.CallbackQueue = queue

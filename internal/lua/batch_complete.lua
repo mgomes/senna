@@ -338,16 +338,17 @@ if num_callbacks > 0 then
     for _, callback in ipairs(callback_list) do
         local callback_seq = redis.call("HINCRBY", progress_key, "callback_seq", 1)
 
-        local args = {
-            batch_id = batch_id
-        }
-        if parent_id and parent_id ~= "" then
-            args.parent_id = parent_id
-        end
+        local args = {}
         if type(callback.options) == "table" then
             for key, value in pairs(callback.options) do
-                args[key] = value
+                if key ~= "batch_id" and key ~= "parent_id" then
+                    args[key] = value
+                end
             end
+        end
+        args.batch_id = batch_id
+        if parent_id and parent_id ~= "" then
+            args.parent_id = parent_id
         end
 
         local callback_job_id = batch_id .. ":callback:" .. callback_seq

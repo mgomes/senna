@@ -609,6 +609,39 @@ func TestClient_EnqueueBatchRejectsInvalidCallbackQueue(t *testing.T) {
 	}
 }
 
+func TestClient_EnqueueBatchRejectsReservedCallbackOptions(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-batch-reserved-callback-options:*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-batch-reserved-callback-options",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	batch := NewBatch().
+		Add("job", nil).
+		OnCompleteCallback("complete", map[string]any{
+			"batch_id": "forged-batch",
+		})
+
+	err = client.EnqueueBatch(context.Background(), batch)
+	if !errors.Is(err, ErrReservedCallbackOption) {
+		t.Fatalf("EnqueueBatch(reserved callback option) error = %v, want ErrReservedCallbackOption", err)
+	}
+
+	stateCount, err := redisClient.Exists(context.Background(), "test-batch-reserved-callback-options:batch:"+batch.ID).Result()
+	if err != nil {
+		t.Fatalf("Exists(batch state after reserved callback option) error = %v, want nil", err)
+	}
+	if stateCount != 0 {
+		t.Fatalf("Exists(batch state after reserved callback option) = %d, want 0", stateCount)
+	}
+}
+
 func TestClient_EnqueueBatch_RejectsWrongQueueTypeWithoutQueueingPartialJobs(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-batch-atomic:*")
