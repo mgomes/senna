@@ -167,6 +167,92 @@ func TestPointsLimiter_EstimateAndAdjust(t *testing.T) {
 	}
 }
 
+func TestPointsLimiter_RejectsNonPositiveAcquireCost(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:points:test-invalid-acquire*")
+
+	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
+		Name:        "test-invalid-acquire",
+		Capacity:    10,
+		RefillTime:  time.Hour,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	for _, cost := range []int{-5, 0} {
+		_, _, err := limiter.AcquirePoints(ctx, cost)
+		if !errors.Is(err, ratelimit.ErrInvalidPointsUsage) {
+			t.Fatalf("PointsLimiter.AcquirePoints(ctx, %d) error = %v, want ErrInvalidPointsUsage", cost, err)
+		}
+	}
+
+	exists, err := client.Exists(ctx, "senna:ratelimit:points:test-invalid-acquire").Result()
+	if err != nil {
+		t.Fatalf("Exists(points limiter key after invalid acquire) error = %v, want nil", err)
+	}
+	if exists != 0 {
+		t.Fatalf("Exists(points limiter key after invalid acquire) = %d, want 0", exists)
+	}
+}
+
+func TestPointsLimiter_RejectsNonPositiveEstimate(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:points:test-invalid-estimate*")
+
+	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
+		Name:        "test-invalid-estimate",
+		Capacity:    10,
+		RefillTime:  time.Hour,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	for _, estimate := range []int{-5, 0} {
+		executed := false
+		err := limiter.WithinLimitEstimate(ctx, estimate, func(h *ratelimit.PointsHandle) error {
+			executed = true
+			return nil
+		})
+		if !errors.Is(err, ratelimit.ErrInvalidPointsUsage) {
+			t.Fatalf("PointsLimiter.WithinLimitEstimate(ctx, %d, fn) error = %v, want ErrInvalidPointsUsage", estimate, err)
+		}
+		if executed {
+			t.Fatalf("PointsLimiter.WithinLimitEstimate(ctx, %d, fn) executed fn, want skipped", estimate)
+		}
+	}
+}
+
+func TestPointsHandle_RejectsNegativeActualUsage(t *testing.T) {
+	client := newTestClient(t)
+	ctx := context.Background()
+	flushKeys(t, client, "senna:ratelimit:points:test-negative-actual*")
+
+	limiter := ratelimit.Points(client, ratelimit.PointsConfig{
+		Name:        "test-negative-actual",
+		Capacity:    10,
+		RefillTime:  time.Hour,
+		WaitTimeout: 100 * time.Millisecond,
+		Policy:      ratelimit.PolicySkip,
+	})
+
+	err := limiter.WithinLimitEstimate(ctx, 5, func(h *ratelimit.PointsHandle) error {
+		return h.PointsUsed(-100)
+	})
+	if !errors.Is(err, ratelimit.ErrInvalidPointsUsage) {
+		t.Fatalf("PointsHandle.PointsUsed(-100) error = %v, want ErrInvalidPointsUsage", err)
+	}
+
+	balance, err := client.HGet(ctx, "senna:ratelimit:points:test-negative-actual", "points").Float64()
+	if err != nil {
+		t.Fatalf("HGet(points balance after PointsHandle.PointsUsed(-100)) error = %v, want nil", err)
+	}
+	if balance < 4.9 || balance > 5.1 {
+		t.Fatalf("HGet(points balance after PointsHandle.PointsUsed(-100)) = %f, want about 5", balance)
+	}
+}
+
 func TestPointsLimiter_Refill(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
