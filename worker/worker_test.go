@@ -2928,6 +2928,90 @@ func TestWorker_RecoveredLegacyFinalizedSuccessPreservesOutcome(t *testing.T) {
 	assertFinalizationTrustDeleted(t, redisClient, w, job.ID)
 }
 
+func TestWorker_RecoveredFinalizedSuccessSkipsBatchHandleVerification(t *testing.T) {
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, "test-finalized-success-verify:*")
+
+	ctx := context.Background()
+	w, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: "test-finalized-success-verify",
+		Settings: senna.WorkerSettings{
+			Concurrency: 1,
+			Queues:      []senna.QueueConfig{{Name: "default"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker: %v", err)
+	}
+	defer func() { _ = w.redis.Close() }()
+
+	var processed atomic.Int32
+	w.Register("batch_job", func(ctx context.Context, job *senna.Job) error {
+		processed.Add(1)
+		return errors.New("would fail on replay")
+	})
+
+	bid := "batch-finalized-success-verify"
+	crashedWorkerID := "crashed-finalized-success-verify"
+	job := seedHealthyBatchJobInFlight(t, w, redisClient, bid, crashedWorkerID)
+	seedStaleWorkerHeartbeat(t, w, redisClient, crashedWorkerID)
+
+	if err := w.fetcher.MarkFinalization(ctx, crashedWorkerID, job, senna.JobFinalization{Operation: jobFinalizationComplete}); err != nil {
+		t.Fatalf("mark finalization: %v", err)
+	}
+	if err := redisClient.Set(ctx, w.keys.BatchJobs(bid), "wrong-type", 0).Err(); err != nil {
+		t.Fatalf("corrupt batch jobs set: %v", err)
+	}
+
+	w.requeueOrphanedJobs(ctx)
+	fetched, err := w.fetcher.BlockingFetch(ctx, w.id, time.Second)
+	if err != nil {
+		t.Fatalf("fetch recovered finalized job: %v", err)
+	}
+	if fetched == nil {
+		t.Fatal("expected recovered finalized job, got nil")
+	}
+
+	processCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		w.processJob(processCtx, fetched)
+		close(done)
+	}()
+
+	assertFinalizationStillPending(t, done)
+	repairBatchJobSet(t, w, redisClient, bid, job.ID)
+	waitForFinalization(t, done)
+
+	if got := processed.Load(); got != 0 {
+		t.Errorf("handler ran %d times for recovered finalized success, want 0", got)
+	}
+
+	status := senna.NewBatchStatus(redisClient, w.keys.Namespace(), bid)
+	if err := status.Refresh(ctx); err != nil {
+		t.Fatalf("refresh batch status: %v", err)
+	}
+	if status.Pending() != 0 {
+		t.Errorf("batch Pending() = %d, want 0", status.Pending())
+	}
+	if status.Successes() != 1 {
+		t.Errorf("batch Successes() = %d, want 1", status.Successes())
+	}
+	if status.Failures() != 0 {
+		t.Errorf("batch Failures() = %d, want 0", status.Failures())
+	}
+
+	retryCount, err := redisClient.ZCard(ctx, w.keys.Retry()).Result()
+	if err != nil {
+		t.Fatalf("zcard retry: %v", err)
+	}
+	if retryCount != 0 {
+		t.Errorf("retry set size = %d, want 0", retryCount)
+	}
+}
+
 func TestWorker_FinalizationMarksRequeuedPayloadBeforeBatchProgress(t *testing.T) {
 	redisClient := newTestRedisClient(t)
 	flushTestKeys(t, redisClient, "test-finalized-requeued:*")

@@ -359,15 +359,15 @@ func (w *Worker) processJob(ctx context.Context, job *senna.Job) {
 	// Use a non-canceled context so shutdown doesn't strand the lock.
 	defer w.fetcher.ReleaseSequentialLock(context.WithoutCancel(ctx), w.id, job.Queue)
 
+	if job.Finalization() != nil {
+		w.resumeFinalizedJob(ctx, job)
+		return
+	}
+
 	var err error
 	ctx, err = w.contextWithVerifiedBatchHandle(ctx, job)
 	if err != nil {
 		w.handleJobResult(ctx, job, err, nil, nil)
-		return
-	}
-
-	if job.Finalization() != nil {
-		w.resumeFinalizedJob(ctx, job)
 		return
 	}
 
