@@ -953,6 +953,75 @@ func TestClient_EncryptedJob(t *testing.T) {
 	}
 }
 
+func TestClient_EnqueueWithEncryptionRequiresEncryptor(t *testing.T) {
+	const namespace = "test-encryption-required"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	job, err := client.Enqueue(context.Background(), "sensitive_job", map[string]any{
+		"secret": "plaintext",
+	}, WithEncryption())
+	if !errors.Is(err, ErrEncryptionUnavailable) {
+		t.Fatalf("Enqueue(WithEncryption without encryptor) error = %v, want ErrEncryptionUnavailable", err)
+	}
+	if job != nil {
+		t.Fatalf("Enqueue(WithEncryption without encryptor) job = %#v, want nil", job)
+	}
+
+	queueLen, err := redisClient.LLen(context.Background(), namespace+":queue:default").Result()
+	if err != nil {
+		t.Fatalf("LLen(default after failed encrypted enqueue) error = %v, want nil", err)
+	}
+	if queueLen != 0 {
+		t.Fatalf("LLen(default after failed encrypted enqueue) = %d, want 0", queueLen)
+	}
+}
+
+func TestClient_EnqueueBulkWithEncryptionRequiresEncryptor(t *testing.T) {
+	const namespace = "test-bulk-encryption-required"
+
+	redisClient := newTestRedisClient(t)
+	flushTestKeys(t, redisClient, namespace+":*")
+
+	client, err := New(&Config{
+		Redis:     getTestRedisConfig(),
+		Namespace: namespace,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	jobs, err := client.EnqueueBulk(context.Background(), "sensitive_job", []map[string]any{
+		{"secret": "one"},
+		{"secret": "two"},
+	}, WithEncryption())
+	if !errors.Is(err, ErrEncryptionUnavailable) {
+		t.Fatalf("EnqueueBulk(WithEncryption without encryptor) error = %v, want ErrEncryptionUnavailable", err)
+	}
+	if jobs != nil {
+		t.Fatalf("EnqueueBulk(WithEncryption without encryptor) jobs = %#v, want nil", jobs)
+	}
+
+	queueLen, err := redisClient.LLen(context.Background(), namespace+":queue:default").Result()
+	if err != nil {
+		t.Fatalf("LLen(default after failed encrypted bulk enqueue) error = %v, want nil", err)
+	}
+	if queueLen != 0 {
+		t.Fatalf("LLen(default after failed encrypted bulk enqueue) = %d, want 0", queueLen)
+	}
+}
+
 func TestClient_New_InvalidEncryptionKeyBeforeRedis(t *testing.T) {
 	_, err := New(&Config{
 		Redis: senna.RedisConfig{
