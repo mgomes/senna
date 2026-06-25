@@ -176,7 +176,8 @@ func WithUniqueKey(key string, ttl time.Duration) EnqueueOption {
 	}
 }
 
-// WithBatch associates the enqueued job with a batch ID.
+// WithBatch stores batch metadata on the enqueued job. It does not add the job
+// to the batch membership set or grant BatchHandle access in the worker.
 func WithBatch(batchID string) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.batchID = batchID

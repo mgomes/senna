@@ -173,14 +173,14 @@ func contextWithBatch(ctx context.Context, bh *BatchHandle) context.Context {
 }
 
 // BatchFromContext returns the BatchHandle from the context, if present.
-// Returns nil if the job is not part of a batch.
+// Returns nil if the worker could not verify the job as a batch member.
 func BatchFromContext(ctx context.Context) *BatchHandle {
 	bh, _ := ctx.Value(batchContextKey{}).(*BatchHandle)
 	return bh
 }
 
 // BIDFromContext returns the batch ID from the context, if present.
-// Returns empty string if the job is not part of a batch.
+// Returns empty string if the worker could not verify the job as a batch member.
 func BIDFromContext(ctx context.Context) string {
 	if bh := BatchFromContext(ctx); bh != nil {
 		return bh.BID()
