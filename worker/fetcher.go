@@ -769,9 +769,11 @@ func (f *fetcher) NackAt(ctx context.Context, workerID string, job *senna.Job, r
 		return err
 	}
 
-	nextJob := *job
+	nextJob, err := durableJobPayload(job)
+	if err != nil {
+		return err
+	}
 	nextJob.RetryCount++
-	nextJob.ClearFinalization()
 	newData, err := nextJob.Marshal()
 	if err != nil {
 		return err
@@ -794,9 +796,11 @@ func (f *fetcher) MoveToDead(ctx context.Context, workerID string, job *senna.Jo
 	}
 
 	now := time.Now()
-	deadJob := *job
+	deadJob, err := durableJobPayload(job)
+	if err != nil {
+		return err
+	}
 	deadJob.FailedAt = &now
-	deadJob.ClearFinalization()
 	newData, err := deadJob.Marshal()
 	if err != nil {
 		return err
@@ -858,7 +862,11 @@ func (f *fetcher) requeue(ctx context.Context, workerID string, job *senna.Job) 
 	if err != nil {
 		return err
 	}
-	data, err := job.Marshal()
+	requeuedJob, err := durableJobPayload(job)
+	if err != nil {
+		return err
+	}
+	data, err := requeuedJob.Marshal()
 	if err != nil {
 		return err
 	}
@@ -869,6 +877,26 @@ func (f *fetcher) requeue(ctx context.Context, workerID string, job *senna.Job) 
 		return fmt.Errorf("requeue job %s to queue %s: %w", job.ID, job.Queue, err)
 	}
 	return nil
+}
+
+func durableJobPayload(job *senna.Job) (*senna.Job, error) {
+	durable := *job
+	durable.ClearFinalization()
+
+	payload := job.Raw()
+	if payload == "" {
+		return &durable, nil
+	}
+
+	rawJob, err := senna.UnmarshalJob([]byte(payload))
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal raw job payload for durable write: %w", err)
+	}
+	if rawJob.Encrypted {
+		durable.Args = rawJob.Args
+		durable.Encrypted = true
+	}
+	return &durable, nil
 }
 
 func jobPayload(job *senna.Job) (string, error) {
