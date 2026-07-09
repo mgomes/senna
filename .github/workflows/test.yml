@@ -12,6 +12,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # go.mod uses the toolchain directive; 1.25.x is the minimum
+        # supported version from the go directive.
+        go: ["go.mod", "1.25.x"]
         store:
           - name: redis-6
             image: redis:6.2-alpine
@@ -24,7 +27,7 @@ jobs:
           - name: valkey-8
             image: valkey/valkey:8-alpine
 
-    name: go.mod / ${{ matrix.store.name }}
+    name: ${{ matrix.go }} / ${{ matrix.store.name }}
 
     services:
       store:
@@ -43,7 +46,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go != 'go.mod' && matrix.go || '' }}
+          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
           check-latest: true
 
       - name: Download dependencies
